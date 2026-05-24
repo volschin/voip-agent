@@ -119,6 +119,7 @@ AZURE_CLIENT_SECRET=
 CALENDAR_USER_EMAIL=
 
 # Agent behaviour
+CALLER_ID=+49123456789
 GREETING_TEXT=Hallo, wie kann ich Ihnen helfen?
 LLM_SYSTEM_PROMPT=Du bist ein hilfreicher Telefonassistent. Antworte immer auf Deutsch. Sei freundlich und präzise. Nutze rag_lookup für Wissensfragen und die Kalender-Werkzeuge für Terminanfragen.
 ```
@@ -247,6 +248,8 @@ class Settings(BaseSettings):
     azure_client_id: str = ""
     azure_client_secret: str = ""
     calendar_user_email: str = ""
+
+    caller_id: str = ""  # phone number shown on outbound calls, e.g. +49123456789
 
     greeting_text: str = "Hallo, wie kann ich Ihnen helfen?"
     llm_system_prompt: str = (
@@ -480,6 +483,22 @@ def test_vad_buffer_flushes_after_speech_then_silence():
     assert result is not None
     assert result.dtype == np.int16
     assert len(result) > 0
+
+
+def test_vad_buffer_hard_cap_flushes_at_15s():
+    """VadBuffer must flush at max_speech_ms even without trailing silence."""
+    buf = VadBuffer(sample_rate=16000, frame_ms=20, silence_threshold_ms=800, max_speech_ms=200)
+    t = np.arange(320) / 16000
+    speech_frame = (np.sin(2 * np.pi * 440 * t) * 30000).astype(np.int16)
+
+    results = []
+    for _ in range(15):  # 300ms > 200ms cap
+        r = buf.add_frame(speech_frame)
+        if r is not None:
+            results.append(r)
+
+    assert len(results) == 1  # exactly one flush at cap
+    assert results[0].dtype == np.int16
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -528,10 +547,12 @@ class VadBuffer:
         sample_rate: int = 16000,
         frame_ms: int = 20,
         silence_threshold_ms: int = 800,
+        max_speech_ms: int = 15000,
     ) -> None:
         self._vad = webrtcvad.Vad(2)  # aggressiveness 0-3
         self._sample_rate = sample_rate
         self._silence_threshold = silence_threshold_ms // frame_ms
+        self._max_speech_frames = max_speech_ms // frame_ms
         self._speech_frames: list[np.ndarray] = []
         self._silence_count = 0
         self._in_speech = False
@@ -550,6 +571,9 @@ class VadBuffer:
             self._silence_count += 1
             if self._silence_count >= self._silence_threshold:
                 return self._flush()
+        # Hard cap: flush after 15 s to prevent unbounded buffer growth
+        if len(self._speech_frames) >= self._max_speech_frames:
+            return self._flush()
         return None
 
     def force_flush(self) -> np.ndarray | None:
@@ -575,7 +599,7 @@ class VadBuffer:
 pytest tests/test_audio.py -v
 ```
 
-Expected: all 5 tests PASSED
+Expected: all 6 tests PASSED
 
 - [ ] **Step 5: Commit**
 
@@ -1540,6 +1564,7 @@ The RTP server is an asyncio UDP server that strips the 12-byte RTP header from 
 import asyncio
 import struct
 import pytest
+from unittest.mock import MagicMock
 from agent.rtp import RtpServer, parse_rtp_payload, build_rtp_packet
 
 
@@ -1585,7 +1610,6 @@ async def test_rtp_server_calls_callback_with_payload():
 
     payload = b"\xd5" * 160
     packet = _rtp_packet(payload)
-    # Send test packet to the server
     send_transport, _ = await asyncio.get_event_loop().create_datagram_endpoint(
         asyncio.DatagramProtocol,
         remote_addr=("127.0.0.1", bound_port),
@@ -1597,6 +1621,27 @@ async def test_rtp_server_calls_callback_with_payload():
     send_transport.close()
 
     assert received == [payload]
+
+
+async def test_stream_audio_sends_paced_frames():
+    """stream_audio must split audio into 160-byte frames with 20 ms gaps."""
+    frames_sent = []
+
+    server = RtpServer(host="127.0.0.1", port=0, on_audio=lambda _: None)
+    # Inject a fake transport that records sendto calls
+    fake_transport = MagicMock()
+    fake_transport.sendto = lambda pkt, _addr: frames_sent.append(pkt)
+    server._transport = fake_transport
+    server._remote_addr = ("127.0.0.1", 9999)
+
+    # 3 frames of audio
+    alaw = b"\xd5" * 480
+    await server.stream_audio(alaw)
+
+    assert len(frames_sent) == 3
+    # Each RTP packet = 12-byte header + 160-byte payload
+    for pkt in frames_sent:
+        assert len(pkt) == 172
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1666,11 +1711,12 @@ class RtpServer(asyncio.DatagramProtocol):
         if payload:
             self._on_audio(payload)
 
-    def send_audio(self, alaw_payload: bytes) -> None:
+    def send_frame(self, alaw_frame: bytes) -> None:
+        """Send exactly one 160-byte aLaw RTP frame."""
         if not self._transport or not self._remote_addr:
             return
         packet = build_rtp_packet(
-            alaw_payload,
+            alaw_frame,
             seq=self._seq,
             timestamp=self._timestamp,
             ssrc=self._ssrc,
@@ -1678,6 +1724,16 @@ class RtpServer(asyncio.DatagramProtocol):
         self._transport.sendto(packet, self._remote_addr)
         self._seq = (self._seq + 1) & 0xFFFF
         self._timestamp = (self._timestamp + self.SAMPLES_PER_FRAME) & 0xFFFFFFFF
+
+    async def stream_audio(self, alaw: bytes) -> None:
+        """Send alaw bytes as paced 20 ms RTP frames. Cancellable via asyncio task."""
+        _SILENCE = b"\xd5" * self.SAMPLES_PER_FRAME
+        for i in range(0, len(alaw), self.SAMPLES_PER_FRAME):
+            chunk = alaw[i : i + self.SAMPLES_PER_FRAME]
+            if len(chunk) < self.SAMPLES_PER_FRAME:
+                chunk = chunk + _SILENCE[len(chunk):]  # pad last frame
+            self.send_frame(chunk)
+            await asyncio.sleep(0.02)  # 20 ms per frame
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -1692,7 +1748,7 @@ class RtpServer(asyncio.DatagramProtocol):
 pytest tests/test_rtp.py -v
 ```
 
-Expected: all 4 tests PASSED
+Expected: all 5 tests PASSED
 
 - [ ] **Step 5: Commit**
 
@@ -1807,7 +1863,8 @@ class AriClient:
         self._pipeline = pipeline
         self._sessions: dict[str, CallSession] = {}
         self._rtp_servers: dict[str, RtpServer] = {}
-        self._vad_buffers: dict[str, VadBuffer] = {}   # per-call VAD state
+        self._vad_buffers: dict[str, VadBuffer] = {}
+        self._playback_tasks: dict[str, asyncio.Task] = {}  # cancellable per-call playback
         self._rtp_port_counter = settings.rtp_port
 
     # ── Public entry point ──────────────────────────────────────────────────
@@ -1833,7 +1890,8 @@ class AriClient:
         t = event.get("type")
         if t == "StasisStart":
             ch = event["channel"]
-            await self._setup_call(ch["id"], ch["caller"]["number"])
+            # Run setup as task so websocket reader is never blocked
+            asyncio.create_task(self._setup_call(ch["id"], ch["caller"]["number"]))
         elif t == "StasisEnd":
             ch_id = event["channel"]["id"]
             await self._teardown_call(ch_id)
@@ -1850,31 +1908,34 @@ class AriClient:
         self._sessions[channel_id] = session
 
         rtp_port = self._rtp_port_counter
-        self._rtp_port_counter += 2  # reserve two ports per call
+        self._rtp_port_counter += 2
 
+        loop = asyncio.get_running_loop()
         rtp_server = RtpServer(
             host=self._s.rtp_bind_host,
             port=rtp_port,
-            on_audio=lambda payload: asyncio.get_event_loop().call_soon_threadsafe(
-                asyncio.ensure_future,
-                self._on_audio(channel_id, payload),
+            on_audio=lambda payload: loop.create_task(
+                self._on_audio(channel_id, payload)
             ),
         )
         await rtp_server.start()
         self._rtp_servers[channel_id] = rtp_server
+        self._vad_buffers[channel_id] = VadBuffer()
 
-        # Create ExternalMedia channel + bridge
         ext_channel_id = await self._create_external_media(channel_id, rtp_port)
         await self._bridge_channels(channel_id, ext_channel_id)
 
-        # Play greeting, then enter LISTENING
+        # Stream greeting with 20 ms pacing, then enter LISTENING
         alaw = await self._pipeline.synthesize_alaw(self._s.greeting_text)
-        rtp_server.send_audio(alaw)
-
+        await rtp_server.stream_audio(alaw)
         session.transition(SessionState.LISTENING)
         log.info("Call %s from %s ready", channel_id, caller_id)
 
     async def _teardown_call(self, channel_id: str) -> None:
+        task = self._playback_tasks.pop(channel_id, None)
+        if task and not task.done():
+            task.cancel()
+        self._vad_buffers.pop(channel_id, None)
         session = self._sessions.pop(channel_id, None)
         if session:
             session.transition(SessionState.ENDED)
@@ -1885,21 +1946,56 @@ class AriClient:
 
     # ── Audio from caller ────────────────────────────────────────────────────
 
+    async def _play_audio(self, channel_id: str, alaw: bytes, session: CallSession) -> None:
+        """Stream aLaw audio to caller as paced RTP frames. Cancellable for barge-in."""
+        rtp = self._rtp_servers.get(channel_id)
+        if not rtp:
+            return
+        session.transition(SessionState.SPEAKING)
+        try:
+            await rtp.stream_audio(alaw)
+            # Normal completion: back to LISTENING
+            if session.state == SessionState.SPEAKING:
+                session.transition(SessionState.LISTENING)
+            vad = self._vad_buffers.get(channel_id)
+            if vad:
+                vad.reset()
+        except asyncio.CancelledError:
+            pass  # barge-in: _on_audio handles state transition
+
     async def _on_audio(self, channel_id: str, alaw_payload: bytes) -> None:
         session = self._sessions.get(channel_id)
-        if not session or session.state != SessionState.LISTENING:
+        if not session:
             return
 
-        if channel_id not in self._vad_buffers:
-            self._vad_buffers[channel_id] = VadBuffer()
+        state = session.state
+        if state not in (SessionState.LISTENING, SessionState.SPEAKING):
+            return
+
+        vad = self._vad_buffers.get(channel_id)
+        if vad is None:
+            return
 
         pcm_8k = alaw_decode(alaw_payload)
         pcm_16k = resample_8k_to_16k(pcm_8k)
-        speech = self._vad_buffers[channel_id].add_frame(pcm_16k)
+        speech = vad.add_frame(pcm_16k)
 
-        if speech is not None:
-            response_alaw = await self._pipeline.process_turn(session, speech)
-            self._rtp_servers[channel_id].send_audio(response_alaw)
+        if speech is None:
+            return
+
+        # Cancel ongoing playback (barge-in or normal turn transition)
+        task = self._playback_tasks.pop(channel_id, None)
+        if task and not task.done():
+            task.cancel()
+
+        # Ensure clean LISTENING state before process_turn
+        if session.state == SessionState.SPEAKING:
+            session.transition(SessionState.LISTENING)
+        vad.reset()
+
+        response_alaw = await self._pipeline.process_turn(session, speech)
+        task = asyncio.create_task(self._play_audio(channel_id, response_alaw, session))
+        self._playback_tasks[channel_id] = task
 
     # ── ARI REST helpers ─────────────────────────────────────────────────────
 
@@ -1908,7 +2004,7 @@ class AriClient:
             resp = await client.post(
                 f"{self._s.ari_base_url}/ari/channels/externalMedia",
                 auth=(self._s.ari_username, self._s.ari_password),
-                json={
+                params={
                     "app": self._s.ari_app_name,
                     "external_host": f"{self._s.rtp_bind_host}:{rtp_port}",
                     "format": "alaw",
@@ -1926,7 +2022,8 @@ class AriClient:
                 f"{self._s.ari_base_url}/ari/channels",
                 auth=(self._s.ari_username, self._s.ari_password),
                 params={
-                    "endpoint": f"PJSIP/{to_number}@fritzbox",
+                    "endpoint": f"PJSIP/{to_number}@fritzbox-endpoint",
+                    "callerId": self._s.caller_id,
                     "app": self._s.ari_app_name,
                 },
                 timeout=10.0,
@@ -1936,20 +2033,18 @@ class AriClient:
 
     async def _bridge_channels(self, channel_id: str, ext_channel_id: str) -> None:
         async with httpx.AsyncClient() as client:
-            # Create bridge
             resp = await client.post(
                 f"{self._s.ari_base_url}/ari/bridges",
                 auth=(self._s.ari_username, self._s.ari_password),
-                json={"type": "mixing", "bridgeId": f"bridge-{channel_id}"},
+                params={"type": "mixing", "bridgeId": f"bridge-{channel_id}"},
                 timeout=5.0,
             )
             resp.raise_for_status()
             bridge_id = resp.json()["id"]
-            # Add both channels to bridge
             await client.post(
                 f"{self._s.ari_base_url}/ari/bridges/{bridge_id}/addChannel",
                 auth=(self._s.ari_username, self._s.ari_password),
-                json={"channel": f"{channel_id},{ext_channel_id}"},
+                params={"channel": f"{channel_id},{ext_channel_id}"},
                 timeout=5.0,
             )
 ```
@@ -2101,6 +2196,11 @@ outbound_auth=fritzbox-auth
 aors=fritzbox-aor
 from_user=<YOUR_PHONE_NUMBER>
 from_domain=<FRITZBOX_IP>
+
+[fritzbox-identify]
+type=identify
+endpoint=fritzbox-endpoint
+match=<FRITZBOX_IP>
 ```
 
 - [ ] **Step 2: Create `asterisk/extensions.conf`**
@@ -2113,12 +2213,14 @@ writeprotect=no
 ; ── Inbound calls from Fritzbox ────────────────────────────────────────────
 [from-fritzbox]
 exten => _X.,1,NoOp(Inbound call from ${CALLERID(num)})
+ same => n,Answer()
  same => n,Stasis(voip-agent)
  same => n,Hangup()
 
 ; ── Local test extension (dial 9999 to test pipeline) ─────────────────────
 [default]
-exten => 9999,1,Stasis(voip-agent)
+exten => 9999,1,Answer()
+ same => n,Stasis(voip-agent)
  same => n,Hangup()
 ```
 

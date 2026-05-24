@@ -28,25 +28,36 @@ General-purpose voice AI agent handling inbound and outbound calls via a Fritzbo
 
 ### Call Flow
 
+ARI WebSocket carries **events only**. Audio travels separately via Asterisk **ExternalMedia** channel over **UDP RTP** between Asterisk and the agent.
+
 ```
 Inbound:
-  Phone → Fritzbox → SIP → Asterisk ──ARI websocket──► Python Agent
-                                                            │
-                                               VAD detects end-of-speech
-                                                            │
-                                            POST → Qwen3-ASR :8001  (German STT)
-                                                            │ text
-                                            POST → Nous Hermes vLLM  (LLM + tools)
-                                                  ├─ RAG tool → pgvector
-                                                  └─ Calendar tool → MS Graph API
-                                                            │ response text
-                                            POST → Qwen3-TTS :8002  (German TTS)
-                                                            │ PCM audio
-                                    Agent → ARI → Asterisk → Fritzbox → Phone
+  Phone → Fritzbox → SIP → Asterisk
+                              │
+                              ├── ARI WebSocket (events) ─────► Python Agent
+                              │       StasisStart →
+                              │       agent answers channel,
+                              │       creates ExternalMedia channel,
+                              │       bridges both into a mixing bridge
+                              │
+                              └── UDP RTP (audio, G.711 aLaw, 20ms frames) ◄──► Python Agent
+                                                                    │
+                                                          VAD detects end-of-speech
+                                                                    │
+                                                  POST → Qwen3-ASR :8001  (German STT)
+                                                                    │ text
+                                                  POST → Nous Hermes vLLM  (LLM + tools)
+                                                          ├─ RAG tool → pgvector
+                                                          └─ Calendar tool → MS Graph API
+                                                                    │ response text
+                                                  POST → Qwen3-TTS :8002  (German TTS)
+                                                                    │ PCM audio
+                                              Agent paces 20ms aLaw RTP frames → Asterisk → Fritzbox → Phone
 
 Outbound:
-  Agent decides to call → ARI originate → Asterisk → Fritzbox → PSTN
-  → connected → same pipeline as inbound
+  Agent decides to call → ARI originate (endpoint, callerId, extension, app, context)
+  → Asterisk → Fritzbox → PSTN
+  → StasisStart on answer → same setup (ExternalMedia + bridge) → same pipeline as inbound
 ```
 
 ---
@@ -55,21 +66,25 @@ Outbound:
 
 ### Asterisk (NUC)
 - PJSIP registers to Fritzbox using phone number credentials
+- PJSIP `identify` section matches Fritzbox IP → routes inbound to `fritzbox-endpoint`
 - Codec: `alaw` (G.711 A-law — standard German PSTN)
 - ARI application named `voip-agent`, websocket on `ws://localhost:8088/ari/events`
-- Inbound dialplan: `[from-fritzbox]` → `Stasis(voip-agent)`
-- Outbound: ARI `POST /ari/channels` with `endpoint=PJSIP/fritzbox`
+- Inbound dialplan: `[from-fritzbox]` → `Answer()` → `Stasis(voip-agent)`
+- Outbound: ARI `POST /ari/channels` with `endpoint=PJSIP/<number>@fritzbox-endpoint`, `callerId`, `app`
+- ExternalMedia: agent calls `POST /ari/channels/externalMedia` (query params) per call, then adds caller channel + ExternalMedia channel to a mixing bridge
 
 ### Python Agent (NUC)
 - `asyncio`-based; one coroutine per active call
-- Key libraries: `ari-py`, `webrtcvad`, `httpx`, `asyncpg`, `msal` (MS Graph)
-- Audio in: G.711 aLaw → decode → 16kHz PCM → VAD → speech buffer → ASR
-- Audio out: TTS PCM (24kHz) → resample to 8kHz → G.711 aLaw → ARI play
+- Key libraries: `websockets`, `webrtcvad`, `httpx`, `asyncpg`, `msal` (MS Graph)
+- Shared `httpx.AsyncClient` per service (connection-pooled, lifetime = process)
+- Audio in: UDP RTP → strip 12-byte header → G.711 aLaw → decode → 16kHz PCM → VAD → speech buffer → ASR
+- Audio out: TTS PCM (24kHz) → resample to 8kHz → G.711 aLaw → split into 160-byte frames → RTP-wrap → send pacing 20ms per frame
 
 ### VAD
 - `webrtcvad`, frame size 20ms, aggressiveness level 2
-- Trigger ASR after 800ms silence or 15s max buffer
-- Suppress input frames while agent is speaking (echo prevention)
+- Trigger ASR after 800ms trailing silence **or** 15s hard cap on speech buffer
+- Reset VAD buffer on every transition back to `LISTENING` (no stale frames between turns)
+- Barge-in: during `SPEAKING`, continue feeding VAD; on speech detection cancel current RTP playback and transition to `PROCESSING`
 
 ### STT
 - `POST http://dgx:8001/v1/audio/transcriptions`
@@ -85,8 +100,9 @@ Outbound:
 
 ### TTS
 - `POST http://dgx:8002/v1/audio/speech`
-- Body: `{ "text": "...", "instruct": "Eine warme, natürliche deutsche Stimme." }`
-- Response: PCM audio (24kHz, mono)
+- Body: `{ "input": "...", "instruct": "Eine warme, natürliche deutsche Stimme mit angemessenem Sprechtempo." }`
+- Response: PCM audio (24kHz, mono, int16)
+- Pre-recorded fallback clip `assets/tts_failure_de.alaw` (8kHz aLaw) used when TTS fails
 
 ### RAG
 - pgvector on DGX Spark (existing PostgreSQL instance)
