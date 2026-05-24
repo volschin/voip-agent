@@ -21,6 +21,7 @@ def settings():
         azure_client_id="client",
         azure_client_secret="secret",
         calendar_user_email="user@example.com",
+        caller_id="+49123456789",
         greeting_text="Hallo!",
         llm_system_prompt="Du bist ein Assistent.",
     )
