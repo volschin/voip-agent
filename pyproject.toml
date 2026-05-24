@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.3",
     "webrtcvad>=2.0.10",
     "aiofiles>=23.2",
+    "audioop-lts>=0.2.1; python_version >= '3.13'",
 ]
 
 [project.optional-dependencies]
