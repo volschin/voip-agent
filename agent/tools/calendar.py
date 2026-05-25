@@ -16,12 +16,21 @@ class MSGraphCalendar:
         self._user_email = user_email
         self._scope = ["https://graph.microsoft.com/.default"]
 
-    def _token(self) -> str:
-        result = self._msal.acquire_token_for_client(scopes=self._scope)
+    async def _token(self) -> str:
+        import asyncio
+        result = await asyncio.to_thread(
+            self._msal.acquire_token_for_client, scopes=self._scope
+        )
+        if "access_token" not in result:
+            raise RuntimeError(result.get("error_description", str(result)))
         return result["access_token"]
 
     async def get_events(self, start: str, end: str) -> str:
-        headers = {"Authorization": f"Bearer {self._token()}"}
+        token = await self._token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Prefer": 'outlook.timezone="Europe/Berlin"',
+        }
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{GRAPH_BASE}/users/{self._user_email}/calendarView",
@@ -36,13 +45,15 @@ class MSGraphCalendar:
             return "Keine Termine in diesem Zeitraum."
         lines = []
         for e in events:
-            dt = e["start"]["dateTime"][:16].replace("T", " ")
-            lines.append(f"- {e['subject']} um {dt.split()[1]} Uhr")
+            start_raw = e["start"]["dateTime"][:16]  # "2026-05-25T10:00"
+            date_part, time_part = start_raw.split("T")
+            lines.append(f"- {e['subject']} am {date_part} um {time_part} Uhr")
         return "\n".join(lines)
 
     async def create_event(self, title: str, start: str, end: str, description: str = "") -> str:
+        token = await self._token()
         headers = {
-            "Authorization": f"Bearer {self._token()}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
         body = {
