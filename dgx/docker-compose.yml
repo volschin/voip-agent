@@ -1,39 +1,81 @@
 services:
   qwen3-asr:
     image: ghcr.io/volschin/voip-agent-asr:latest
+    container_name: qwen3-asr
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - ASR_MODEL=${ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
+      - ENABLE_NVFP4_SM100=0
+      - VLLM_TEST_FORCE_FP8_MARLIN=1
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      # - HF_TOKEN=...
     volumes:
-      - hf-models:/models
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
     ports:
       - "8001:8001"
+    shm_size: "4gb"
     restart: unless-stopped
+    labels:
+      - "autoheal=true"
+    # Override to use 1.7B or tune memory:
+    # command:
+    #   - vllm
+    #   - serve
+    #   - Qwen/Qwen3-ASR-1.7B
+    #   - --served-model-name=qwen3-asr
+    #   - --host=0.0.0.0
+    #   - --port=8001
+    #   - --gpu-memory-utilization=0.16
+    #   - --max-model-len=8192
+    #   - --max-num-seqs=4
+    #   - --trust-remote-code
 
   qwen3-tts:
     image: ghcr.io/volschin/voip-agent-tts:latest
+    container_name: qwen3-tts
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - TTS_MODEL=${TTS_MODEL:-Qwen/Qwen3-TTS}
+      # - QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+      # - QWEN_TTS_TOKENIZER=Qwen/Qwen3-TTS-Tokenizer-12Hz
+      # - QWEN_TTS_ATTN_IMPL=flash_attention_2
+      # - QWEN_TTS_DEFAULT_VOICE=A neutral, friendly adult voice ...
     volumes:
-      - hf-models:/models
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
     ports:
       - "8002:8002"
+    shm_size: "4gb"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health',timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    labels:
+      - "autoheal=true"
 
   embedding:
     image: ghcr.io/volschin/voip-agent-embedding:latest
+    container_name: voip-embedding
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}
     volumes:
-      - hf-models:/models
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
     ports:
       - "8003:8003"
     restart: unless-stopped
 
-volumes:
-  hf-models:
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: voip-autoheal
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=30
+      - AUTOHEAL_START_PERIOD=180
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=20
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
