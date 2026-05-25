@@ -1,30 +1,39 @@
 services:
   qwen3-asr:
-    image: ghcr.io/aeon-7/qwen3-asr-server:latest
+    image: ghcr.io/volschin/voip-agent-asr:latest
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - ASR_MODEL=${ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
+    volumes:
+      - hf-models:/models
     ports:
       - "8001:8001"
     restart: unless-stopped
 
   qwen3-tts:
-    image: ghcr.io/aeon-7/qwen3-tts-server:latest
+    image: ghcr.io/volschin/voip-agent-tts:latest
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - TTS_MODEL=${TTS_MODEL:-qwen3-tts}
+      - TTS_MODEL=${TTS_MODEL:-Qwen/Qwen3-TTS}
+    volumes:
+      - hf-models:/models
     ports:
       - "8002:8002"
     restart: unless-stopped
 
   embedding:
-    image: ghcr.io/huggingface/text-embeddings-inference:latest
+    image: ghcr.io/volschin/voip-agent-embedding:latest
     runtime: nvidia
-    command: --model-id intfloat/multilingual-e5-large --port 8003
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}
+    volumes:
+      - hf-models:/models
     ports:
       - "8003:8003"
     restart: unless-stopped
+
+volumes:
+  hf-models:
