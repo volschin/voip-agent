@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual env
+venv/
+.venv/
+env/
+
+# Env files
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# pytest
+.pytest_cache/
+
+# Claude worktrees
+.claude/
