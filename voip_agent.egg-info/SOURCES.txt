@@ -1,8 +1,0 @@
-pyproject.toml
-agent/__init__.py
-agent/tools/__init__.py
-voip_agent.egg-info/PKG-INFO
-voip_agent.egg-info/SOURCES.txt
-voip_agent.egg-info/dependency_links.txt
-voip_agent.egg-info/requires.txt
-voip_agent.egg-info/top_level.txt
