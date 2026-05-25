@@ -24,9 +24,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install system deps (webrtcvad build)
-        run: sudo apt-get install -y --no-install-recommends gcc
-
       - name: Install project
         run: pip install -e ".[dev]"
 
