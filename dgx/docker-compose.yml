@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   qwen3-asr:
     image: ghcr.io/aeon-7/qwen3-asr-server:latest
