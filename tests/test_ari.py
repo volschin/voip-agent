@@ -1,9 +1,10 @@
 import asyncio
 import json
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+
 from agent.ari import AriClient
-from agent.config import Settings
 
 
 @pytest.fixture
@@ -13,22 +14,26 @@ def ari(settings):
 
 
 def _stasis_start_event(channel_id: str = "ch-1", caller: str = "+49123") -> str:
-    return json.dumps({
-        "type": "StasisStart",
-        "channel": {
-            "id": channel_id,
-            "caller": {"number": caller},
-        },
-        "application": "voip-agent",
-    })
+    return json.dumps(
+        {
+            "type": "StasisStart",
+            "channel": {
+                "id": channel_id,
+                "caller": {"number": caller},
+            },
+            "application": "voip-agent",
+        }
+    )
 
 
 def _stasis_end_event(channel_id: str = "ch-1") -> str:
-    return json.dumps({
-        "type": "StasisEnd",
-        "channel": {"id": channel_id},
-        "application": "voip-agent",
-    })
+    return json.dumps(
+        {
+            "type": "StasisEnd",
+            "channel": {"id": channel_id},
+            "application": "voip-agent",
+        }
+    )
 
 
 async def test_stasis_start_creates_session(ari):
@@ -44,12 +49,15 @@ async def test_stasis_start_creates_session(ari):
 
 
 async def test_stasis_end_removes_session(ari):
-    from agent.session import CallSession, SessionState
     from datetime import datetime, timezone
 
+    from agent.session import CallSession, SessionState
+
     session = CallSession(
-        call_id="ch-1", caller_id="+49",
-        history=[], created_at=datetime.now(timezone.utc)
+        call_id="ch-1",
+        caller_id="+49",
+        history=[],
+        created_at=datetime.now(timezone.utc),
     )
     session.state = SessionState.LISTENING
     ari._sessions["ch-1"] = session

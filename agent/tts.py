@@ -1,9 +1,6 @@
 import httpx
 
-
-VOICE_INSTRUCT = (
-    "Eine warme, natürliche deutsche Stimme mit angemessenem Sprechtempo."
-)
+VOICE_INSTRUCT = "Eine warme, natürliche deutsche Stimme mit angemessenem Sprechtempo."
 
 
 class TtsClient:

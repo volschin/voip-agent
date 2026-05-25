@@ -1,13 +1,15 @@
 from typing import Protocol
-import httpx
 
+import httpx
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 
 class CalendarBackend(Protocol):
     async def get_events(self, start: str, end: str) -> str: ...
-    async def create_event(self, title: str, start: str, end: str, description: str = "") -> str: ...
+    async def create_event(
+        self, title: str, start: str, end: str, description: str = ""
+    ) -> str: ...
 
 
 class MSGraphCalendar:
@@ -18,9 +20,8 @@ class MSGraphCalendar:
 
     async def _token(self) -> str:
         import asyncio
-        result = await asyncio.to_thread(
-            self._msal.acquire_token_for_client, scopes=self._scope
-        )
+
+        result = await asyncio.to_thread(self._msal.acquire_token_for_client, scopes=self._scope)
         if "access_token" not in result:
             raise RuntimeError(result.get("error_description", str(result)))
         return result["access_token"]
@@ -34,8 +35,11 @@ class MSGraphCalendar:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{GRAPH_BASE}/users/{self._user_email}/calendarView",
-                params={"startDateTime": start, "endDateTime": end,
-                        "$select": "subject,start,end"},
+                params={
+                    "startDateTime": start,
+                    "endDateTime": end,
+                    "$select": "subject,start,end",
+                },
                 headers=headers,
                 timeout=15.0,
             )

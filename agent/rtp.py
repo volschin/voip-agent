@@ -72,7 +72,7 @@ class RtpServer(asyncio.DatagramProtocol):
         for i in range(0, len(alaw), self.SAMPLES_PER_FRAME):
             chunk = alaw[i : i + self.SAMPLES_PER_FRAME]
             if len(chunk) < self.SAMPLES_PER_FRAME:
-                chunk = chunk + _SILENCE[len(chunk):]
+                chunk = chunk + _SILENCE[len(chunk) :]
             self.send_frame(chunk)
             await asyncio.sleep(0.02)
 
@@ -82,6 +82,4 @@ class RtpServer(asyncio.DatagramProtocol):
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
-        await loop.create_datagram_endpoint(
-            lambda: self, local_addr=(self._host, self._port)
-        )
+        await loop.create_datagram_endpoint(lambda: self, local_addr=(self._host, self._port))

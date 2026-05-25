@@ -1,4 +1,5 @@
 """ARI client — connects to Asterisk WebSocket event stream and drives the voice pipeline."""
+
 import asyncio
 import json
 import logging
@@ -7,7 +8,7 @@ from datetime import datetime, timezone
 import httpx
 import websockets
 
-from agent.audio import alaw_decode, resample_8k_to_16k, VadBuffer
+from agent.audio import VadBuffer, alaw_decode, resample_8k_to_16k
 from agent.config import Settings
 from agent.pipeline import VoicePipeline
 from agent.rtp import RtpServer
@@ -68,9 +69,7 @@ class AriClient:
         rtp_server = RtpServer(
             host=self._s.rtp_bind_host,
             port=rtp_port,
-            on_audio=lambda payload: loop.create_task(
-                self._on_audio(channel_id, payload)
-            ),
+            on_audio=lambda payload: loop.create_task(self._on_audio(channel_id, payload)),
         )
         await rtp_server.start()
         self._rtp_servers[channel_id] = rtp_server

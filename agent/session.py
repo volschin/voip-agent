@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
@@ -11,17 +11,19 @@ class SessionState(str, Enum):
     ENDED = "ended"
 
 
-_VALID = frozenset({
-    (SessionState.ANSWER, SessionState.LISTENING),
-    (SessionState.LISTENING, SessionState.PROCESSING),
-    (SessionState.LISTENING, SessionState.ENDED),
-    (SessionState.PROCESSING, SessionState.LISTENING),
-    (SessionState.PROCESSING, SessionState.SPEAKING),
-    (SessionState.PROCESSING, SessionState.ENDED),
-    (SessionState.SPEAKING, SessionState.LISTENING),
-    (SessionState.SPEAKING, SessionState.PROCESSING),
-    (SessionState.SPEAKING, SessionState.ENDED),
-})
+_VALID = frozenset(
+    {
+        (SessionState.ANSWER, SessionState.LISTENING),
+        (SessionState.LISTENING, SessionState.PROCESSING),
+        (SessionState.LISTENING, SessionState.ENDED),
+        (SessionState.PROCESSING, SessionState.LISTENING),
+        (SessionState.PROCESSING, SessionState.SPEAKING),
+        (SessionState.PROCESSING, SessionState.ENDED),
+        (SessionState.SPEAKING, SessionState.LISTENING),
+        (SessionState.SPEAKING, SessionState.PROCESSING),
+        (SessionState.SPEAKING, SessionState.ENDED),
+    }
+)
 
 
 @dataclass

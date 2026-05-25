@@ -1,8 +1,10 @@
 import json
+from unittest.mock import AsyncMock
+
+import httpx
 import pytest
 import respx
-import httpx
-from unittest.mock import AsyncMock
+
 from agent.llm import LlmClient
 
 
@@ -22,24 +24,29 @@ def llm(settings):
 
 
 def _chat_response(content: str) -> dict:
-    return {
-        "choices": [{"message": {"role": "assistant", "content": content, "tool_calls": None}}]
-    }
+    return {"choices": [{"message": {"role": "assistant", "content": content, "tool_calls": None}}]}
 
 
 def _tool_call_response(name: str, arguments: dict) -> dict:
     return {
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(arguments)},
-                }],
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
+                    ],
+                }
             }
-        }]
+        ]
     }
 
 

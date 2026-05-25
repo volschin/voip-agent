@@ -1,7 +1,8 @@
-import pytest
-import respx
 import httpx
 import numpy as np
+import pytest
+import respx
+
 from agent.tts import TtsClient
 
 
@@ -32,6 +33,7 @@ async def test_synthesize_sends_text_and_voice(tts):
     await tts.synthesize("Test")
     body = route.calls[0].request.read()
     import json
+
     payload = json.loads(body)
     assert payload["input"] == "Test"
     assert "instruct" in payload

@@ -1,7 +1,12 @@
-import audioop
 import numpy as np
-import pytest
-from agent.audio import alaw_decode, alaw_encode, resample_8k_to_16k, resample_24k_to_8k, VadBuffer
+
+from agent.audio import (
+    VadBuffer,
+    alaw_decode,
+    alaw_encode,
+    resample_8k_to_16k,
+    resample_24k_to_8k,
+)
 
 
 def _sine_8k(duration_ms: int = 200, freq: int = 440) -> np.ndarray:

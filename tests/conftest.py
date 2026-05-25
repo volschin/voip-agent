@@ -1,4 +1,5 @@
 import pytest
+
 from agent.config import Settings
 
 

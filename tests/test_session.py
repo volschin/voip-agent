@@ -1,5 +1,7 @@
-import pytest
 from datetime import datetime, timezone
+
+import pytest
+
 from agent.session import CallSession, SessionState
 
 
@@ -18,10 +20,10 @@ def test_initial_state_is_answer():
 
 def test_full_happy_path():
     s = _make()
-    s.transition(SessionState.LISTENING)    # greeting finished
+    s.transition(SessionState.LISTENING)  # greeting finished
     s.transition(SessionState.PROCESSING)  # speech detected
-    s.transition(SessionState.SPEAKING)    # TTS ready
-    s.transition(SessionState.LISTENING)   # turn complete
+    s.transition(SessionState.SPEAKING)  # TTS ready
+    s.transition(SessionState.LISTENING)  # turn complete
     assert s.state == SessionState.LISTENING
 
 
@@ -35,7 +37,11 @@ def test_interruption():
 
 
 def test_any_state_to_ended():
-    for initial in (SessionState.LISTENING, SessionState.PROCESSING, SessionState.SPEAKING):
+    for initial in (
+        SessionState.LISTENING,
+        SessionState.PROCESSING,
+        SessionState.SPEAKING,
+    ):
         s = _make()
         s.state = initial
         s.transition(SessionState.ENDED)

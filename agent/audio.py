@@ -38,9 +38,7 @@ class VadBuffer:
         self._in_speech = False
 
     def add_frame(self, frame: np.ndarray) -> np.ndarray | None:
-        is_speech = self._vad.is_speech(
-            frame.astype(np.int16).tobytes(), self._sample_rate
-        )
+        is_speech = self._vad.is_speech(frame.astype(np.int16).tobytes(), self._sample_rate)
         if is_speech:
             self._speech_frames.append(frame)
             self._silence_count = 0

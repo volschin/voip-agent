@@ -1,8 +1,8 @@
 import asyncio
 import struct
-import pytest
 from unittest.mock import MagicMock
-from agent.rtp import RtpServer, parse_rtp_payload, build_rtp_packet
+
+from agent.rtp import RtpServer, build_rtp_packet, parse_rtp_payload
 
 
 def _rtp_packet(payload: bytes, seq: int = 1, ts: int = 160) -> bytes:
@@ -27,7 +27,7 @@ def test_build_rtp_packet_has_correct_header():
     assert len(packet) == 172  # 12 header + 160 payload
     v, pt, seq_out, ts_out, ssrc_out = struct.unpack("!BBHII", packet[:12])
     assert v == 0x80
-    assert pt == 0x08   # G.711 aLaw
+    assert pt == 0x08  # G.711 aLaw
     assert seq_out == 5
     assert ts_out == 800
     assert ssrc_out == 0xCAFE

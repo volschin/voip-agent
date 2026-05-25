@@ -3,7 +3,6 @@ from typing import Any
 
 import httpx
 
-
 TOOLS = [
     {
         "type": "function",
@@ -76,7 +75,11 @@ class LlmClient:
             while True:
                 resp = await client.post(
                     f"{self._base_url}/v1/chat/completions",
-                    json={"model": self._model, "messages": full_messages, "tools": TOOLS},
+                    json={
+                        "model": self._model,
+                        "messages": full_messages,
+                        "tools": TOOLS,
+                    },
                     timeout=60.0,
                 )
                 resp.raise_for_status()
@@ -91,11 +94,13 @@ class LlmClient:
                         tc["function"]["name"],
                         json.loads(tc["function"]["arguments"]),
                     )
-                    full_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": result,
-                    })
+                    full_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result,
+                        }
+                    )
 
     async def _dispatch(self, name: str, args: dict) -> str:
         if name == "rag_lookup":

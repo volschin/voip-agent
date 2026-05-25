@@ -1,5 +1,5 @@
-import httpx
 import asyncpg
+import httpx
 
 TOP_K = 5
 

@@ -1,4 +1,5 @@
 """Configuration management for VoIP agent."""
+
 from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 

@@ -4,14 +4,14 @@ import logging
 import asyncpg
 import msal
 
-from agent.config import Settings
 from agent.ari import AriClient
+from agent.config import Settings
+from agent.llm import LlmClient
 from agent.pipeline import VoicePipeline
 from agent.stt import SttClient
-from agent.tts import TtsClient
-from agent.llm import LlmClient
-from agent.tools.rag import RagTool
 from agent.tools.calendar import MSGraphCalendar
+from agent.tools.rag import RagTool
+from agent.tts import TtsClient
 
 logging.basicConfig(
     level=logging.INFO,

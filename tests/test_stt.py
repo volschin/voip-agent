@@ -1,9 +1,8 @@
-import io
-import wave
-import pytest
-import respx
 import httpx
 import numpy as np
+import pytest
+import respx
+
 from agent.stt import SttClient
 
 

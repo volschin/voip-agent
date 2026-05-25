@@ -1,9 +1,11 @@
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock
+
 import numpy as np
 import pytest
-from unittest.mock import AsyncMock
+
 from agent.pipeline import VoicePipeline
 from agent.session import CallSession, SessionState
-from datetime import datetime, timezone
 
 
 def _make_session() -> CallSession:
