@@ -76,6 +76,10 @@ class RtpServer(asyncio.DatagramProtocol):
             self.send_frame(chunk)
             await asyncio.sleep(0.02)
 
+    def close(self) -> None:
+        if self._transport:
+            self._transport.close()
+
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
         await loop.create_datagram_endpoint(

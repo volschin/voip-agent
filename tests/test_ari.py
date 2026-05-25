@@ -1,3 +1,4 @@
+import asyncio
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -31,9 +32,15 @@ def _stasis_end_event(channel_id: str = "ch-1") -> str:
 
 
 async def test_stasis_start_creates_session(ari):
-    with patch.object(ari, "_setup_call", new_callable=AsyncMock) as mock_setup:
-        await ari._handle_event(json.loads(_stasis_start_event("ch-1", "+49")))
-        mock_setup.assert_awaited_once_with("ch-1", "+49")
+    called_with = []
+
+    async def fake_setup(ch_id, caller_id):
+        called_with.append((ch_id, caller_id))
+
+    ari._setup_call = fake_setup
+    await ari._handle_event(json.loads(_stasis_start_event("ch-1", "+49")))
+    await asyncio.sleep(0)  # let the created task run
+    assert called_with == [("ch-1", "+49")]
 
 
 async def test_stasis_end_removes_session(ari):
@@ -47,8 +54,12 @@ async def test_stasis_end_removes_session(ari):
     session.state = SessionState.LISTENING
     ari._sessions["ch-1"] = session
 
+    mock_rtp = MagicMock()
+    ari._rtp_servers["ch-1"] = mock_rtp
+
     await ari._handle_event(json.loads(_stasis_end_event("ch-1")))
     assert "ch-1" not in ari._sessions
+    mock_rtp.close.assert_called_once()
 
 
 async def test_unknown_event_ignored(ari):

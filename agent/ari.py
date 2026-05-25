@@ -45,7 +45,7 @@ class AriClient:
         t = event.get("type")
         if t == "StasisStart":
             ch = event["channel"]
-            await self._setup_call(ch["id"], ch["caller"]["number"])
+            asyncio.create_task(self._setup_call(ch["id"], ch["caller"]["number"]))
         elif t == "StasisEnd":
             ch_id = event["channel"]["id"]
             await self._teardown_call(ch_id)
@@ -61,6 +61,8 @@ class AriClient:
 
         rtp_port = self._rtp_port_counter
         self._rtp_port_counter += 2
+        if self._rtp_port_counter > 65534:
+            self._rtp_port_counter = self._s.rtp_port  # wrap around
 
         loop = asyncio.get_running_loop()
         rtp_server = RtpServer(
@@ -78,8 +80,8 @@ class AriClient:
         await self._bridge_channels(channel_id, ext_channel_id)
 
         alaw = await self._pipeline.synthesize_alaw(self._s.greeting_text)
-        await rtp_server.stream_audio(alaw)
-        session.transition(SessionState.LISTENING)
+        task = asyncio.create_task(self._play_audio(channel_id, alaw, session))
+        self._playback_tasks[channel_id] = task
         log.info("Call %s from %s ready", channel_id, caller_id)
 
     async def _teardown_call(self, channel_id: str) -> None:
@@ -91,8 +93,8 @@ class AriClient:
         if session:
             session.transition(SessionState.ENDED)
         rtp = self._rtp_servers.pop(channel_id, None)
-        if rtp and rtp._transport:
-            rtp._transport.close()
+        if rtp:
+            rtp.close()
         log.info("Call %s ended", channel_id)
 
     async def _play_audio(self, channel_id: str, alaw: bytes, session: CallSession) -> None:
