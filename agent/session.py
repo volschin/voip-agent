@@ -15,6 +15,7 @@ _VALID = frozenset({
     (SessionState.ANSWER, SessionState.LISTENING),
     (SessionState.LISTENING, SessionState.PROCESSING),
     (SessionState.LISTENING, SessionState.ENDED),
+    (SessionState.PROCESSING, SessionState.LISTENING),
     (SessionState.PROCESSING, SessionState.SPEAKING),
     (SessionState.PROCESSING, SessionState.ENDED),
     (SessionState.SPEAKING, SessionState.LISTENING),

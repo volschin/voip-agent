@@ -51,3 +51,21 @@ async def test_process_turn_state_machine(pipeline):
     assert session.state == SessionState.LISTENING
     await pipeline.process_turn(session, _pcm_16k(200))
     assert session.state == SessionState.LISTENING  # back to LISTENING after full turn
+
+
+async def test_stt_failure_returns_fallback(pipeline):
+    pipeline._stt.side_effect = RuntimeError("STT down")
+    session = _make_session()
+    result = await pipeline.process_turn(session, _pcm_16k(200))
+    assert isinstance(result, bytes)
+    assert session.state == SessionState.LISTENING
+    assert len(session.history) == 0
+
+
+async def test_llm_failure_returns_fallback(pipeline):
+    pipeline._llm.side_effect = RuntimeError("LLM down")
+    session = _make_session()
+    result = await pipeline.process_turn(session, _pcm_16k(200))
+    assert isinstance(result, bytes)
+    assert session.state == SessionState.LISTENING
+    assert len(session.history) == 0

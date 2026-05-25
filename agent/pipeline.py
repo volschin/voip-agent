@@ -20,7 +20,6 @@ class VoicePipeline:
         self._tts = tts
 
     async def synthesize_alaw(self, text: str) -> bytes:
-        """Synthesize text → 8 kHz aLaw bytes (used for greeting and fallback)."""
         try:
             pcm_24k_bytes = await self._tts(text)
             pcm_24k = np.frombuffer(pcm_24k_bytes, dtype=np.int16)
