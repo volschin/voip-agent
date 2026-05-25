@@ -1,0 +1,21 @@
+FROM nvcr.io/nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/models
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-dev python3-pip libsndfile1 ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir \
+    fastapi uvicorn[standard] \
+    torch==2.3.1 torchaudio==2.3.1 \
+    transformers accelerate \
+    soundfile numpy
+
+WORKDIR /app
+COPY server.py .
+
+EXPOSE 8001
+CMD ["python3", "server.py"]
