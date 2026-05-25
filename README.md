@@ -1,0 +1,176 @@
+# voip-agent
+
+German-language voice AI agent for inbound and outbound calls via Fritzbox SIP. Fully offline — all inference runs on a DGX Spark over LAN.
+
+## Architecture
+
+```
+Fritzbox ──SIP──► Asterisk (NUC)
+                      │ ARI WebSocket + ExternalMedia RTP
+                      ▼
+              Python asyncio agent
+                      │
+          ┌───────────┼───────────┐
+          ▼           ▼           ▼
+    Qwen3-ASR   Nous Hermes   Qwen3-TTS
+      (STT)     (LLM/vLLM)     (TTS)
+                    │
+              ┌─────┴─────┐
+              ▼           ▼
+          pgvector    MS Graph
+           (RAG)     (Calendar)
+```
+
+**Voice turn:** aLaw RTP → VAD → 16 kHz PCM → Qwen3-ASR → LLM tool-call loop → Qwen3-TTS → 8 kHz aLaw RTP
+
+## Hardware
+
+| Host | Role |
+|------|------|
+| ASUS NUC | Asterisk 20, Python agent |
+| DGX Spark | Qwen3-ASR, Qwen3-TTS, multilingual-e5-large embedding, Nous Hermes via vLLM, pgvector |
+
+## Prerequisites
+
+- **NUC:** Asterisk 20 (`apt install asterisk`), Python 3.12+
+- **DGX:** Docker with NVIDIA runtime, `docker compose`
+- **Azure AD app** with `Calendars.ReadWrite` for MS Graph (optional — calendar tool disabled if unconfigured)
+
+## Setup
+
+### 1. DGX — start AI services
+
+```bash
+cd dgx
+cp .env.example .env   # adjust model names if needed
+docker compose up -d
+# wait ~60s for model loads
+docker compose logs -f qwen3-asr   # watch for "Uvicorn running"
+```
+
+Health checks:
+```bash
+curl -s http://dgx-spark:8001/health   # ASR
+curl -s http://dgx-spark:8002/health   # TTS
+curl -s http://dgx-spark:8003/health   # embedding
+```
+
+Nous Hermes via vLLM runs separately — set `LLM_BASE_URL` accordingly.
+
+### 2. NUC — Asterisk config
+
+```bash
+# Fill in Fritzbox credentials
+vim asterisk/pjsip.conf    # replace <FRITZBOX_IP>, <SIP_USER>, <SIP_PASSWORD>, <YOUR_PHONE_NUMBER>
+
+sudo cp asterisk/pjsip.conf asterisk/extensions.conf asterisk/ari.conf /etc/asterisk/
+sudo asterisk -rx "core reload"
+
+# Verify Fritzbox registration
+sudo asterisk -rx "pjsip show registrations"
+# Expected: fritzbox   Registered
+
+# Verify ARI
+curl -s -u voip-agent:changeme http://localhost:8088/ari/applications
+```
+
+### 3. NUC — pgvector schema
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE IF NOT EXISTS documents (
+    id SERIAL PRIMARY KEY,
+    content TEXT NOT NULL,
+    embedding vector(1024)
+);
+```
+
+### 4. NUC — agent
+
+```bash
+git clone <repo> voip-agent && cd voip-agent
+python -m venv venv && source venv/bin/activate
+pip install -e .
+
+cp .env.example .env
+vim .env   # fill in all values
+
+python -m agent.main
+```
+
+Expected log output:
+```
+INFO agent.ari Connecting to ARI at ws://localhost:8088/ari/events?...
+```
+
+### 5. Test call
+
+Dial `9999` from any phone on the Fritzbox network.
+
+Expected:
+1. Log: `Call ch-xxx from <number> ready`
+2. You hear the German greeting
+3. Speak a question → German response within ~3 s
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARI_BASE_URL` | `http://localhost:8088` | Asterisk ARI HTTP base |
+| `ARI_USERNAME` | `voip-agent` | ARI user (matches `asterisk/ari.conf`) |
+| `ARI_PASSWORD` | `changeme` | ARI password |
+| `RTP_PORT` | `5000` | First UDP port for ExternalMedia RTP (increments by 2 per call) |
+| `STT_BASE_URL` | `http://dgx-spark:8001` | Qwen3-ASR |
+| `TTS_BASE_URL` | `http://dgx-spark:8002` | Qwen3-TTS |
+| `LLM_BASE_URL` | `http://dgx-spark:8000` | Nous Hermes via vLLM |
+| `LLM_MODEL` | `nous-hermes` | Model name passed to `/v1/chat/completions` |
+| `EMBEDDING_BASE_URL` | `http://dgx-spark:8003` | multilingual-e5-large |
+| `DB_DSN` | — | asyncpg DSN for pgvector |
+| `AZURE_TENANT_ID` | — | MS Graph auth |
+| `AZURE_CLIENT_ID` | — | MS Graph auth |
+| `AZURE_CLIENT_SECRET` | — | MS Graph auth |
+| `CALENDAR_USER_EMAIL` | — | Calendar owner |
+| `CALLER_ID` | `+49123456789` | CLI shown on outbound calls |
+| `GREETING_TEXT` | `Hallo, wie kann ich Ihnen helfen?` | Spoken on answer |
+| `LLM_SYSTEM_PROMPT` | German assistant prompt | Injected as system message |
+
+## Development
+
+```bash
+# Install with dev deps
+pip install -e ".[dev]"
+
+# Run tests
+pytest -v
+
+# Run single module
+pytest tests/test_pipeline.py -v
+```
+
+## Module overview
+
+| Module | Responsibility |
+|--------|---------------|
+| `agent/config.py` | Typed settings from env via pydantic-settings |
+| `agent/session.py` | Per-call state machine (ANSWER→LISTENING→PROCESSING→SPEAKING→ENDED) |
+| `agent/audio.py` | G.711 aLaw codec, 8↔16/24 kHz resampling, WebRTC VAD buffer |
+| `agent/stt.py` | Qwen3-ASR HTTP client (16 kHz WAV → transcript) |
+| `agent/tts.py` | Qwen3-TTS HTTP client (text → 24 kHz PCM) |
+| `agent/llm.py` | OpenAI-compat chat + tool-call dispatch loop |
+| `agent/tools/rag.py` | pgvector cosine search via asyncpg |
+| `agent/tools/calendar.py` | MS Graph calendar (get/create events) |
+| `agent/pipeline.py` | One voice turn: VAD flush → STT → LLM → TTS → aLaw |
+| `agent/rtp.py` | asyncio UDP DatagramProtocol, RTP parse/build, paced streaming |
+| `agent/ari.py` | ARI WebSocket events, ExternalMedia bridge, VAD-driven turns, barge-in |
+| `agent/main.py` | Entry point: wire all components, start ARI event loop |
+
+## Latency targets
+
+| Stage | Target |
+|-------|--------|
+| STT (Qwen3-ASR-1.7B) | ~140 ms |
+| LLM (Nous Hermes, no tool) | ~500 ms |
+| TTS (Qwen3-TTS) | ~1500 ms |
+| Total turn | ~2200 ms |
+
+If TTS exceeds 3 s, switch to the 0.6B variant in `dgx/.env`.
