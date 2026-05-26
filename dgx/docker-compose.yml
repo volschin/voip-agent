@@ -1,6 +1,6 @@
 services:
   qwen3-asr:
-    image: ghcr.io/volschin/voip-agent-asr:latest
+    image: ghcr.io/aeon-7/qwen3-asr-server:latest
     container_name: qwen3-asr
     runtime: nvidia
     environment:
@@ -31,7 +31,7 @@ services:
     #   - --trust-remote-code
 
   qwen3-tts:
-    image: ghcr.io/volschin/voip-agent-tts:latest
+    image: ghcr.io/aeon-7/qwen3-tts-server:latest
     container_name: qwen3-tts
     runtime: nvidia
     environment:
