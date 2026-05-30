@@ -7,7 +7,7 @@ TOP_K = 5
 class RagTool:
     def __init__(self, pool: asyncpg.Pool, embedding_base_url: str) -> None:
         self._pool = pool
-        self._embed_url = embedding_base_url.rstrip("/") + "/embed"
+        self._embed_url = embedding_base_url.rstrip("/") + "/v1/embeddings"
 
     async def lookup(self, query: str) -> str:
         embedding = await self._embed(query)
@@ -20,11 +20,11 @@ class RagTool:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 self._embed_url,
-                json={"text": text},
+                json={"input": text},
                 timeout=10.0,
             )
         resp.raise_for_status()
-        return resp.json()["embedding"]
+        return resp.json()["data"][0]["embedding"]
 
     async def _search(self, embedding: list[float]) -> list[asyncpg.Record]:
         vec_literal = "[" + ",".join(str(x) for x in embedding) + "]"
