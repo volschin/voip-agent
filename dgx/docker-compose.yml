@@ -4,7 +4,8 @@ services:
     container_name: qwen3-asr
     runtime: nvidia
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
+      # Scope to specific GPUs in production to limit blast radius, e.g. "0".
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - ENABLE_NVFP4_SM100=0
       - VLLM_TEST_FORCE_FP8_MARLIN=1
       - VLLM_USE_FLASHINFER_SAMPLER=1
@@ -12,7 +13,10 @@ services:
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
     ports:
-      - "8001:8001"
+      # Defaults to all interfaces (backward compatible). Set DGX_BIND_IP to the
+      # DGX LAN IP and firewall to the agent host so inference ports are not
+      # world-reachable. Use 127.0.0.1 only if the agent runs on the DGX itself.
+      - "${DGX_BIND_IP:-0.0.0.0}:8001:8001"
     shm_size: "4gb"
     restart: unless-stopped
     labels:
@@ -35,7 +39,7 @@ services:
     container_name: qwen3-tts
     runtime: nvidia
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       # - QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign
       # - QWEN_TTS_TOKENIZER=Qwen/Qwen3-TTS-Tokenizer-12Hz
       # - QWEN_TTS_ATTN_IMPL=flash_attention_2
@@ -43,7 +47,7 @@ services:
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
     ports:
-      - "8002:8002"
+      - "${DGX_BIND_IP:-0.0.0.0}:8002:8002"
     shm_size: "4gb"
     restart: unless-stopped
     healthcheck:
@@ -60,12 +64,12 @@ services:
     container_name: voip-embedding
     runtime: nvidia
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
     ports:
-      - "8003:8003"
+      - "${DGX_BIND_IP:-0.0.0.0}:8003:8003"
     restart: unless-stopped
 
   autoheal:
