@@ -42,6 +42,7 @@ async def main() -> None:
         calendar=calendar,
         calendar_write_enabled=s.calendar_write_enabled,
         max_tool_rounds=s.max_tool_rounds,
+        trusted_callers=s.trusted_caller_set,
     )
     pipeline = VoicePipeline(stt=stt.transcribe, llm=llm.complete, tts=tts.synthesize)
     ari = AriClient(settings=s, pipeline=pipeline)

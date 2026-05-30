@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     # Tool / LLM safety
     calendar_write_enabled: bool = False  # fail-closed: callers cannot create events unless opted in
     max_tool_rounds: int = 5  # cap LLM tool-call loop to prevent runaway dispatch
+    # Comma-separated caller numbers allowed to use tools (RAG + calendar).
+    # Empty = no caller is authorized = tools off for everyone (fail closed).
+    trusted_callers: str = ""
+
+    @property
+    def trusted_caller_set(self) -> frozenset[str]:
+        return frozenset(c.strip() for c in self.trusted_callers.split(",") if c.strip())
 
     # Agent behaviour
     caller_id: str = "+49123456789"

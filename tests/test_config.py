@@ -29,6 +29,18 @@ def test_calendar_write_disabled_by_default(monkeypatch):
     assert s.max_tool_rounds == 5
 
 
+def test_trusted_callers_empty_by_default(monkeypatch):
+    monkeypatch.delenv("TRUSTED_CALLERS", raising=False)
+    s = Settings(**_valid_kwargs())
+    assert s.trusted_caller_set == frozenset()  # fail closed: tools off for all
+
+
+def test_trusted_caller_set_parses_and_trims(monkeypatch):
+    monkeypatch.delenv("TRUSTED_CALLERS", raising=False)
+    s = Settings(**_valid_kwargs(trusted_callers=" +49123, +49999 ,"))
+    assert s.trusted_caller_set == frozenset({"+49123", "+49999"})
+
+
 def test_settings_load_defaults_and_overrides(monkeypatch):
     monkeypatch.delenv("ARI_BASE_URL", raising=False)
     s = Settings(

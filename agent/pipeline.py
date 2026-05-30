@@ -73,7 +73,7 @@ class VoicePipeline:
         session.history.append({"role": "user", "content": transcript})
 
         try:
-            response_text = await self._llm(session.history)
+            response_text = await self._llm(session.history, session.caller_id)
         except Exception:
             log.exception("LLM failed")
             session.history.pop()

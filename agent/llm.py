@@ -22,6 +22,7 @@ _NEEDS_CONFIRM_MSG = (
     "Noch nicht bestätigt. Lies dem Anrufer den Termin vor und rufe erneut mit "
     "confirmed=true auf, sobald er zustimmt."
 )
+_UNAUTHORIZED_MSG = "Dieser Anrufer ist für diese Funktion nicht autorisiert."
 _FALLBACK_MSG = "Entschuldigung, das habe ich nicht geschafft."
 
 TOOLS = [
@@ -91,6 +92,7 @@ class LlmClient:
         calendar: Any,
         calendar_write_enabled: bool = False,
         max_tool_rounds: int = 5,
+        trusted_callers: frozenset[str] | set[str] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
@@ -99,8 +101,17 @@ class LlmClient:
         self._calendar = calendar
         self._calendar_write_enabled = calendar_write_enabled
         self._max_tool_rounds = max_tool_rounds
+        self._trusted_callers = frozenset(trusted_callers or ())
 
-    async def complete(self, messages: list[dict]) -> str:
+    def _is_authorized(self, caller_id: str | None) -> bool:
+        return caller_id is not None and caller_id.strip() in self._trusted_callers
+
+    async def complete(self, messages: list[dict], caller_id: str | None = None) -> str:
+        # Tools (RAG + calendar) are exposed only to allowlisted callers. An
+        # unknown caller still gets a conversational answer but no data access,
+        # which closes the read-side exfiltration path. Writes need the extra
+        # calendar_write_enabled + confirmed gates on top of this.
+        authorized = self._is_authorized(caller_id)
         full_messages = [
             {"role": "system", "content": self._system_prompt},
             *messages,
@@ -110,7 +121,7 @@ class LlmClient:
             # emitting tool_calls can never loop forever. The final round runs
             # without tools, forcing a text answer.
             for round_idx in range(self._max_tool_rounds + 1):
-                tools_allowed = round_idx < self._max_tool_rounds
+                tools_allowed = authorized and round_idx < self._max_tool_rounds
                 payload = {
                     "model": self._model,
                     "messages": full_messages,
