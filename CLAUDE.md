@@ -71,6 +71,7 @@ tests/            # pytest, asyncio_mode=auto, respx for HTTP mocking
 ## Key design decisions
 
 - **RTP port allocation:** Starts at `rtp_port` (default 5000), increments by 2 per call, wraps at 65534. `_bind_rtp_server` retries the next port on `OSError` (bind collision) instead of trusting the counter; gives up after `RTP_BIND_ATTEMPTS`.
+- **RTP bind vs advertise:** `rtp_bind_host` is the local socket bind (may be `0.0.0.0`). `rtp_advertise_host` is what `_create_external_media` puts in ExternalMedia's `external_host` — the address Asterisk dials RTP *to*. It must be routable from Asterisk; the validator rejects `0.0.0.0`/empty (fail closed — a wrong value is a silent-call bug). Default `127.0.0.1` assumes the agent is co-located with Asterisk; set the agent's LAN IP if separated.
 - **Resource lifecycle:** One `httpx.AsyncClient` is created in `main()` and injected into `SttClient`/`TtsClient`/`LlmClient`/`RagTool` (each closes only a client it *owns* — see `_owns_client`); `AriClient` reuses a single internal client via `_client()`. `main()` closes the shared client, the ARI client, and the pg pool in a `finally`. The ARI websocket reconnects with capped exponential backoff (`run()` loop).
 - **VAD frame size:** 20 ms at 16 kHz = 320 samples. Hard cap at `max_speech_ms` (default 15 s) to prevent unbounded buffer growth.
 - **TTS output:** server returns a 24 kHz PCM_16 **WAV** → `pipeline._decode_wav` (strips the RIFF header) → `resample_24k_to_8k` → aLaw encode → RTP. STT input: 8 kHz aLaw → `alaw_decode` → `resample_8k_to_16k` → WAV → Qwen3-ASR.

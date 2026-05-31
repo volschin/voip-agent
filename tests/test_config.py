@@ -22,6 +22,19 @@ def test_insecure_ari_password_rejected(monkeypatch, bad):
         Settings(**_valid_kwargs(ari_password=bad))
 
 
+@pytest.mark.parametrize("bad", ["0.0.0.0", "", "  "])
+def test_unroutable_rtp_advertise_host_rejected(monkeypatch, bad):
+    monkeypatch.delenv("RTP_ADVERTISE_HOST", raising=False)
+    with pytest.raises(ValueError, match="rtp_advertise_host"):
+        Settings(**_valid_kwargs(rtp_advertise_host=bad))
+
+
+def test_rtp_advertise_host_defaults_to_loopback(monkeypatch):
+    monkeypatch.delenv("RTP_ADVERTISE_HOST", raising=False)
+    s = Settings(**_valid_kwargs())
+    assert s.rtp_advertise_host == "127.0.0.1"
+
+
 def test_calendar_write_disabled_by_default(monkeypatch):
     monkeypatch.delenv("CALENDAR_WRITE_ENABLED", raising=False)
     s = Settings(**_valid_kwargs())

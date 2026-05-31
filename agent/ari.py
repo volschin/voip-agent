@@ -274,7 +274,7 @@ class AriClient:
             auth=(self._s.ari_username, self._s.ari_password),
             params={
                 "app": self._s.ari_app_name,
-                "external_host": f"{self._s.rtp_bind_host}:{rtp_port}",
+                "external_host": f"{self._s.rtp_advertise_host}:{rtp_port}",
                 "format": "alaw",
                 "channelId": f"ext-{channel_id}",
             },

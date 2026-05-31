@@ -31,7 +31,28 @@ class Settings(BaseSettings):
 
     # RTP
     rtp_bind_host: str = "0.0.0.0"
+    # IP that Asterisk's ExternalMedia sends RTP *to* (the destination it dials
+    # out to with connection_type=client). Must be an address reachable from
+    # Asterisk — never 0.0.0.0, which is a valid bind but an invalid
+    # destination. Defaults to loopback because the agent is co-located with
+    # Asterisk (see ari_base_url=localhost). Set to the agent host's LAN IP if
+    # the agent runs on a different machine than Asterisk.
+    rtp_advertise_host: str = "127.0.0.1"
     rtp_port: int = 5000
+
+    @field_validator("rtp_advertise_host")
+    @classmethod
+    def _reject_unroutable_advertise_host(cls, v: str) -> str:
+        # 0.0.0.0 binds every interface but cannot be a media destination:
+        # Asterisk would have nowhere to send RTP and the call would have no
+        # audio. Fail fast instead of shipping a silent call.
+        if v.strip() in {"", "0.0.0.0"}:
+            raise ValueError(
+                "rtp_advertise_host must be an address reachable from Asterisk "
+                "(e.g. 127.0.0.1 if co-located, or the agent host's LAN IP). "
+                "0.0.0.0 is a bind address, not a routable media destination."
+            )
+        return v
 
     # DGX Spark AI services
     stt_base_url: str = "http://dgx-spark:8001"
