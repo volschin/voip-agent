@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 import respx
 
-from agent.tts import TtsClient
+from agent.tts import VOICE_INSTRUCT, TtsClient
 
 
 @pytest.fixture
@@ -36,7 +36,8 @@ async def test_synthesize_sends_text_and_voice(tts):
 
     payload = json.loads(body)
     assert payload["input"] == "Test"
-    assert "instruct" in payload
+    # server reads `voice`, not `instruct`
+    assert payload["voice"] == VOICE_INSTRUCT
 
 
 @respx.mock

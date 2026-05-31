@@ -11,7 +11,7 @@ class TtsClient:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{self._base_url}/v1/audio/speech",
-                json={"input": text, "instruct": VOICE_INSTRUCT},
+                json={"input": text, "voice": VOICE_INSTRUCT},
                 timeout=30.0,
             )
         resp.raise_for_status()

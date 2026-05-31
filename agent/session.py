@@ -14,6 +14,7 @@ class SessionState(str, Enum):
 _VALID = frozenset(
     {
         (SessionState.ANSWER, SessionState.LISTENING),
+        (SessionState.ANSWER, SessionState.SPEAKING),  # agent speaks greeting first
         (SessionState.LISTENING, SessionState.PROCESSING),
         (SessionState.LISTENING, SessionState.ENDED),
         (SessionState.PROCESSING, SessionState.LISTENING),

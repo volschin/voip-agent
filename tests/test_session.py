@@ -18,6 +18,14 @@ def test_initial_state_is_answer():
     assert _make().state == SessionState.ANSWER
 
 
+def test_greeting_answer_to_speaking():
+    # Agent speaks the greeting first: ANSWER -> SPEAKING must be allowed,
+    # otherwise the greeting task raises and the call freezes in ANSWER.
+    s = _make()
+    s.transition(SessionState.SPEAKING)
+    assert s.state == SessionState.SPEAKING
+
+
 def test_full_happy_path():
     s = _make()
     s.transition(SessionState.LISTENING)  # greeting finished
