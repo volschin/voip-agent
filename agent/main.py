@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 import asyncpg
+import httpx
 import msal
 
 from agent.ari import AriClient
@@ -30,9 +31,12 @@ async def main() -> None:
         client_credential=s.azure_client_secret,
     )
 
-    stt = SttClient(base_url=s.stt_base_url)
-    tts = TtsClient(base_url=s.tts_base_url)
-    rag = RagTool(pool=pg_pool, embedding_base_url=s.embedding_base_url)
+    # One HTTP client shared by every DGX service call, closed on shutdown
+    # alongside the pg pool and the ARI client.
+    http_client = httpx.AsyncClient()
+    stt = SttClient(base_url=s.stt_base_url, client=http_client)
+    tts = TtsClient(base_url=s.tts_base_url, client=http_client)
+    rag = RagTool(pool=pg_pool, embedding_base_url=s.embedding_base_url, client=http_client)
     calendar = MSGraphCalendar(msal_app=msal_app, user_email=s.calendar_user_email)
     llm = LlmClient(
         base_url=s.llm_base_url,
@@ -43,11 +47,17 @@ async def main() -> None:
         calendar_write_enabled=s.calendar_write_enabled,
         max_tool_rounds=s.max_tool_rounds,
         trusted_callers=s.trusted_caller_set,
+        client=http_client,
     )
     pipeline = VoicePipeline(stt=stt.transcribe, llm=llm.complete, tts=tts.synthesize)
     ari = AriClient(settings=s, pipeline=pipeline)
 
-    await ari.run()
+    try:
+        await ari.run()
+    finally:
+        await ari.aclose()
+        await http_client.aclose()
+        await pg_pool.close()
 
 
 if __name__ == "__main__":

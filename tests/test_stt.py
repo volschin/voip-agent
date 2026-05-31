@@ -43,3 +43,17 @@ async def test_transcribe_raises_on_http_error(stt):
     )
     with pytest.raises(httpx.HTTPStatusError):
         await stt.transcribe(_pcm_16k())
+
+
+async def test_aclose_closes_owned_client():
+    client = SttClient(base_url="http://stt:8001")
+    await client.aclose()
+    assert client._client.is_closed
+
+
+async def test_aclose_leaves_injected_client_open():
+    shared = httpx.AsyncClient()
+    client = SttClient(base_url="http://stt:8001", client=shared)
+    await client.aclose()
+    assert not shared.is_closed
+    await shared.aclose()

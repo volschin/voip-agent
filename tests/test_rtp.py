@@ -1,5 +1,6 @@
 import asyncio
 import struct
+import time
 from unittest.mock import MagicMock
 
 from agent.rtp import RtpServer, build_rtp_packet, parse_rtp_payload
@@ -19,6 +20,53 @@ def test_parse_rtp_payload_strips_header():
 
 def test_parse_rtp_too_short_returns_empty():
     assert parse_rtp_payload(b"\x80\x08") == b""
+
+
+def test_parse_rtp_wrong_version_returns_empty():
+    # version bits must be 2 (0b10). 0x00 = version 0.
+    bad = struct.pack("!BBHII", 0x00, 0x08, 1, 160, 0xDEADBEEF) + b"\xd5" * 160
+    assert parse_rtp_payload(bad) == b""
+
+
+def test_parse_rtp_with_csrc_skips_csrc_list():
+    payload = b"\xd5" * 160
+    cc = 2  # 2 CSRC identifiers => 8 extra header bytes
+    b0 = 0x80 | cc
+    header = struct.pack("!BBHII", b0, 0x08, 1, 160, 0xDEADBEEF) + b"\x00" * (4 * cc)
+    assert parse_rtp_payload(header + payload) == payload
+
+
+def test_parse_rtp_with_extension_header_skipped():
+    payload = b"\xd5" * 160
+    b0 = 0x80 | 0x10  # extension bit set
+    base = struct.pack("!BBHII", b0, 0x08, 1, 160, 0xDEADBEEF)
+    ext_words = 3
+    ext = struct.pack("!HH", 0xBEDE, ext_words) + b"\x00" * (4 * ext_words)
+    assert parse_rtp_payload(base + ext + payload) == payload
+
+
+def test_parse_rtp_with_padding_stripped():
+    b0 = 0x80 | 0x20  # padding bit set
+    base = struct.pack("!BBHII", b0, 0x08, 1, 160, 0xDEADBEEF)
+    pad_len = 4
+    payload = b"\xd5" * 160 + b"\x00" * (pad_len - 1) + bytes([pad_len])
+    assert parse_rtp_payload(base + payload) == b"\xd5" * 160
+
+
+def test_parse_rtp_bad_padding_length_returns_empty():
+    b0 = 0x80 | 0x20
+    base = struct.pack("!BBHII", b0, 0x08, 1, 160, 0xDEADBEEF)
+    # claims 200 bytes of padding in a 4-byte payload
+    payload = b"\x01\x02\x03" + bytes([200])
+    assert parse_rtp_payload(base + payload) == b""
+
+
+def test_parse_rtp_truncated_extension_returns_empty():
+    b0 = 0x80 | 0x10
+    base = struct.pack("!BBHII", b0, 0x08, 1, 160, 0xDEADBEEF)
+    # extension declares 5 words but none follow
+    ext = struct.pack("!HH", 0xBEDE, 5)
+    assert parse_rtp_payload(base + ext) == b""
 
 
 def test_build_rtp_packet_has_correct_header():
@@ -79,3 +127,31 @@ async def test_stream_audio_sends_paced_frames():
     # Each RTP packet = 12-byte header + 160-byte payload
     for pkt in frames_sent:
         assert len(pkt) == 172
+
+
+async def test_stream_audio_paces_against_monotonic_clock():
+    """Total wall time tracks the absolute 20 ms/frame schedule and does not
+    drift longer when per-frame work consumes time."""
+    server = RtpServer(host="127.0.0.1", port=0, on_audio=lambda _: None)
+    fake_transport = MagicMock()
+
+    # Burn real time inside each send so naive per-frame sleeps would
+    # accumulate drift; absolute scheduling must absorb it.
+    def slow_sendto(_pkt, _addr):
+        time.sleep(0.005)
+
+    fake_transport.sendto = slow_sendto
+    server._transport = fake_transport
+    server._remote_addr = ("127.0.0.1", 9999)
+
+    n_frames = 10
+    alaw = b"\xd5" * (160 * n_frames)
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    await server.stream_audio(alaw)
+    elapsed = loop.time() - start
+
+    # Schedule is n_frames * 20 ms = 200 ms. The naive sleep(0.02)-after-work
+    # loop would need ~10 * (5 + 20) ms = 250 ms. Absolute pacing stays near
+    # 200 ms because each per-frame delay shrinks to swallow the work time.
+    assert 0.19 <= elapsed <= 0.225

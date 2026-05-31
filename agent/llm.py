@@ -93,6 +93,7 @@ class LlmClient:
         calendar_write_enabled: bool = False,
         max_tool_rounds: int = 5,
         trusted_callers: frozenset[str] | set[str] | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
@@ -102,6 +103,13 @@ class LlmClient:
         self._calendar_write_enabled = calendar_write_enabled
         self._max_tool_rounds = max_tool_rounds
         self._trusted_callers = frozenset(trusted_callers or ())
+        # Shared long-lived client; see SttClient for the rationale.
+        self._client = client or httpx.AsyncClient()
+        self._owns_client = client is None
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
 
     def _is_authorized(self, caller_id: str | None) -> bool:
         return caller_id is not None and caller_id.strip() in self._trusted_callers
@@ -116,39 +124,38 @@ class LlmClient:
             {"role": "system", "content": self._system_prompt},
             *messages,
         ]
-        async with httpx.AsyncClient() as client:
-            # Bounded: stop offering tools after the cap so a model that keeps
-            # emitting tool_calls can never loop forever. The final round runs
-            # without tools, forcing a text answer.
-            for round_idx in range(self._max_tool_rounds + 1):
-                tools_allowed = authorized and round_idx < self._max_tool_rounds
-                payload = {
-                    "model": self._model,
-                    "messages": full_messages,
-                }
-                if tools_allowed:
-                    payload["tools"] = TOOLS
-                resp = await client.post(
-                    f"{self._base_url}/v1/chat/completions",
-                    json=payload,
-                    timeout=60.0,
+        # Bounded: stop offering tools after the cap so a model that keeps
+        # emitting tool_calls can never loop forever. The final round runs
+        # without tools, forcing a text answer.
+        for round_idx in range(self._max_tool_rounds + 1):
+            tools_allowed = authorized and round_idx < self._max_tool_rounds
+            payload = {
+                "model": self._model,
+                "messages": full_messages,
+            }
+            if tools_allowed:
+                payload["tools"] = TOOLS
+            resp = await self._client.post(
+                f"{self._base_url}/v1/chat/completions",
+                json=payload,
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+            msg = resp.json()["choices"][0]["message"]
+
+            if not tools_allowed or not msg.get("tool_calls"):
+                return msg.get("content") or _FALLBACK_MSG
+
+            full_messages.append(msg)
+            for tc in msg["tool_calls"]:
+                result = await self._dispatch_safe(tc)
+                full_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result,
+                    }
                 )
-                resp.raise_for_status()
-                msg = resp.json()["choices"][0]["message"]
-
-                if not tools_allowed or not msg.get("tool_calls"):
-                    return msg.get("content") or _FALLBACK_MSG
-
-                full_messages.append(msg)
-                for tc in msg["tool_calls"]:
-                    result = await self._dispatch_safe(tc)
-                    full_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": result,
-                        }
-                    )
         return _FALLBACK_MSG
 
     async def _dispatch_safe(self, tool_call: dict) -> str:

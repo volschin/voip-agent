@@ -47,3 +47,17 @@ async def test_synthesize_raises_on_http_error(tts):
     )
     with pytest.raises(httpx.HTTPStatusError):
         await tts.synthesize("Test")
+
+
+async def test_aclose_closes_owned_client():
+    client = TtsClient(base_url="http://tts:8002")
+    await client.aclose()
+    assert client._client.is_closed
+
+
+async def test_aclose_leaves_injected_client_open():
+    shared = httpx.AsyncClient()
+    client = TtsClient(base_url="http://tts:8002", client=shared)
+    await client.aclose()
+    assert not shared.is_closed
+    await shared.aclose()
