@@ -63,9 +63,16 @@ security config. Numbering matches the original review.
 
 ## Residual security (lower priority)
 
-- [ ] **Scope `NVIDIA_VISIBLE_DEVICES`** off `all` in production (set per service).
-- [ ] **Bind SIP / inference ports** to the LAN interface + firewall (env knobs
-  added: `DGX_BIND_IP`, `dgx/.env.example`; `asterisk/pjsip.conf` documented).
-- [ ] **`external_host=0.0.0.0` is a bind address, not a routable media
-  destination** for Asterisk ExternalMedia (#7). Confirm the agent advertises a
-  reachable IP. `agent/config.py:19`, `agent/ari.py:153`.
+- [x] **Scope `NVIDIA_VISIBLE_DEVICES`** off `all` in production. Env knob
+  `${NVIDIA_VISIBLE_DEVICES:-all}` on all three DGX services + documented in
+  `dgx/.env.example` (set `NVIDIA_VISIBLE_DEVICES=0`). Actual scoping is a
+  deploy-time value, not a code change.
+- [x] **Bind SIP / inference ports** to the LAN interface + firewall. Env knobs
+  in place: `DGX_BIND_IP` (`dgx/.env.example`); `asterisk/pjsip.conf` documents
+  the LAN bind. Firewalling is deploy-time.
+- [x] **`external_host` advertised a bind address, not a routable media
+  destination** for Asterisk ExternalMedia (#7). Split bind from advertise: new
+  `rtp_advertise_host` config (default `127.0.0.1`, validator rejects `0.0.0.0`
+  and empty); `_create_external_media` now sends the advertise host. Tests
+  assert the POST advertises the routable host and the validator fails closed.
+  `agent/config.py`, `agent/ari.py`.

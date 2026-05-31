@@ -11,6 +11,7 @@ def settings():
         ari_password="test",
         ari_app_name="voip-agent",
         rtp_bind_host="127.0.0.1",
+        rtp_advertise_host="192.168.178.2",
         rtp_port=5000,
         stt_base_url="http://stt:8001",
         tts_base_url="http://tts:8002",

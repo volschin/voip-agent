@@ -178,3 +178,25 @@ async def test_bind_rtp_server_skips_busy_port(ari):
         sock.close()
         if server:
             server.close()
+
+
+# --- #7 ExternalMedia advertises a routable host, not the bind host -------
+
+
+async def test_external_media_advertises_routable_host(ari):
+    # Asterisk sends RTP *to* external_host. It must be the advertise host
+    # (reachable from Asterisk), never the bind host — which may be 0.0.0.0.
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value={"id": "ext-ch-1"})
+    client = MagicMock()
+    client.post = AsyncMock(return_value=resp)
+    ari._http = client
+
+    ext_id = await ari._create_external_media("ch-1", 5002)
+
+    assert ext_id == "ext-ch-1"
+    params = client.post.await_args.kwargs["params"]
+    assert params["external_host"] == "192.168.178.2:5002"
+    # bind host (127.0.0.1 in the fixture) must NOT be what we advertise
+    assert ari._s.rtp_bind_host not in params["external_host"]
