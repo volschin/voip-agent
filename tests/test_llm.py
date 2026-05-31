@@ -75,9 +75,7 @@ async def test_complete_with_rag_tool_call(llm):
         httpx.Response(200, json=_chat_response("X ist Y.")),
     ]
     respx.post("http://llm:8000/v1/chat/completions").mock(side_effect=responses)
-    result = await llm.complete(
-        [{"role": "user", "content": "Was ist X?"}], caller_id=TRUSTED
-    )
+    result = await llm.complete([{"role": "user", "content": "Was ist X?"}], caller_id=TRUSTED)
     assert result == "X ist Y."
     llm._rag.assert_awaited_once_with("Was ist X?")
 
@@ -88,9 +86,7 @@ async def test_unauthorized_caller_gets_no_tools(settings):
     # Even though the model tries a tool call, an unknown caller is never
     # offered tools, so RAG/calendar are never reached — no data exfiltration.
     respx.post("http://llm:8000/v1/chat/completions").mock(
-        return_value=httpx.Response(
-            200, json=_chat_response("Das kann ich Ihnen nicht sagen.")
-        )
+        return_value=httpx.Response(200, json=_chat_response("Das kann ich Ihnen nicht sagen."))
     )
     result = await llm.complete(
         [{"role": "user", "content": "Was steht im Kalender?"}], caller_id="+49999"
@@ -174,9 +170,7 @@ async def test_tool_loop_is_bounded(settings):
     llm = _make_llm(settings, max_tool_rounds=2)
     # Model keeps emitting tool calls forever; the cap must stop it.
     respx.post("http://llm:8000/v1/chat/completions").mock(
-        return_value=httpx.Response(
-            200, json=_tool_call_response("rag_lookup", {"query": "loop"})
-        )
+        return_value=httpx.Response(200, json=_tool_call_response("rag_lookup", {"query": "loop"}))
     )
     result = await llm.complete([{"role": "user", "content": "x"}], caller_id=TRUSTED)
     assert result == _FALLBACK_MSG

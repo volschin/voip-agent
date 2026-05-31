@@ -50,7 +50,8 @@ class Settings(BaseSettings):
     calendar_user_email: str = ""
 
     # Tool / LLM safety
-    calendar_write_enabled: bool = False  # fail-closed: callers cannot create events unless opted in
+    # fail-closed: callers cannot create events unless opted in
+    calendar_write_enabled: bool = False
     max_tool_rounds: int = 5  # cap LLM tool-call loop to prevent runaway dispatch
     # Comma-separated caller numbers allowed to use tools (RAG + calendar).
     # Empty = no caller is authorized = tools off for everyone (fail closed).

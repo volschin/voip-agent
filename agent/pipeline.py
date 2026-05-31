@@ -35,6 +35,7 @@ def _decode_wav(data: bytes) -> np.ndarray:
             pcm = pcm.reshape(-1, wf.getnchannels())[:, 0].copy()
     return pcm
 
+
 FALLBACK_ASR = "Ich habe Sie leider nicht verstanden."
 FALLBACK_LLM = "Technischer Fehler, bitte später erneut anrufen."
 

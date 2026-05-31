@@ -22,9 +22,7 @@ def pool():
 async def test_lookup_returns_joined_chunks(settings, pool):
     mock_pool, conn = pool
     embedding_response = MagicMock()
-    embedding_response.json = MagicMock(
-        return_value={"data": [{"embedding": [0.1] * 1024}]}
-    )
+    embedding_response.json = MagicMock(return_value={"data": [{"embedding": [0.1] * 1024}]})
 
     conn.fetch.return_value = [
         {"content": "Chunk A"},
@@ -48,9 +46,7 @@ async def test_lookup_returns_joined_chunks(settings, pool):
 async def test_lookup_empty_result(settings, pool):
     mock_pool, conn = pool
     embedding_response = MagicMock()
-    embedding_response.json = MagicMock(
-        return_value={"data": [{"embedding": [0.0] * 1024}]}
-    )
+    embedding_response.json = MagicMock(return_value={"data": [{"embedding": [0.0] * 1024}]})
     conn.fetch.return_value = []
 
     with patch("httpx.AsyncClient") as mock_client_cls:
