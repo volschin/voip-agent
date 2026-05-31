@@ -5,9 +5,21 @@ TOP_K = 5
 
 
 class RagTool:
-    def __init__(self, pool: asyncpg.Pool, embedding_base_url: str) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        embedding_base_url: str,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
         self._pool = pool
         self._embed_url = embedding_base_url.rstrip("/") + "/v1/embeddings"
+        # Shared long-lived client; one pool reused across embedding calls.
+        self._client = client or httpx.AsyncClient()
+        self._owns_client = client is None
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
 
     async def lookup(self, query: str) -> str:
         embedding = await self._embed(query)
@@ -17,12 +29,11 @@ class RagTool:
         return "\n\n".join(row["content"] for row in rows)
 
     async def _embed(self, text: str) -> list[float]:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                self._embed_url,
-                json={"input": text},
-                timeout=10.0,
-            )
+        resp = await self._client.post(
+            self._embed_url,
+            json={"input": text},
+            timeout=10.0,
+        )
         resp.raise_for_status()
         return resp.json()["data"][0]["embedding"]
 
