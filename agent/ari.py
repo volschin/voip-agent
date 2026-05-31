@@ -18,6 +18,12 @@ log = logging.getLogger(__name__)
 
 
 class AriClient:
+    # Bound the inbound audio backlog so a stalled consumer cannot grow memory
+    # without limit; ~100 frames = 2 s of 20 ms audio. Oldest-relevant frames
+    # are dropped on overflow rather than buffering a growing delay.
+    AUDIO_QUEUE_MAXSIZE = 100
+    RTP_BIND_ATTEMPTS = 50
+
     def __init__(self, settings: Settings, pipeline: VoicePipeline) -> None:
         self._s = settings
         self._pipeline = pipeline
@@ -25,22 +31,61 @@ class AriClient:
         self._rtp_servers: dict[str, RtpServer] = {}
         self._vad_buffers: dict[str, VadBuffer] = {}
         self._playback_tasks: dict[str, asyncio.Task] = {}
+        self._audio_queues: dict[str, asyncio.Queue[bytes]] = {}
+        self._consumer_tasks: dict[str, asyncio.Task] = {}
+        # Per-call turn lock + monotonically increasing generation id. The lock
+        # serializes the cancel-playback / process-turn / start-playback
+        # critical section; the generation id lets a playback or turn that was
+        # superseded by a barge-in detect that it is stale and emit nothing.
+        self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._generation: dict[str, int] = {}
         self._rtp_port_counter = settings.rtp_port
+        # One shared HTTP client for all ARI REST calls instead of a fresh
+        # connection pool per request.
+        self._http: httpx.AsyncClient | None = None
+        self._running = True
 
-    async def run(self) -> None:
-        url = (
+    def _client(self) -> httpx.AsyncClient:
+        if self._http is None:
+            self._http = httpx.AsyncClient()
+        return self._http
+
+    async def aclose(self) -> None:
+        self._running = False
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
+
+    def _ws_url(self) -> str:
+        return (
             f"ws://{self._s.ari_base_url.split('://', 1)[-1]}"
             f"/ari/events?api_key={self._s.ari_username}:{self._s.ari_password}"
             f"&app={self._s.ari_app_name}&subscribeAll=true"
         )
-        log.info("Connecting to ARI at %s", url)
-        async with websockets.connect(url) as ws:
-            async for raw in ws:
-                try:
-                    event = json.loads(raw)
-                    await self._handle_event(event)
-                except Exception:
-                    log.exception("Error handling ARI event")
+
+    async def run(self) -> None:
+        # Reconnect with capped exponential backoff so a transient ARI restart
+        # or network blip does not permanently drop the agent's event stream.
+        backoff = 1.0
+        while self._running:
+            try:
+                log.info("Connecting to ARI at %s", self._s.ari_base_url)
+                async with websockets.connect(self._ws_url()) as ws:
+                    backoff = 1.0  # reset on a successful connect
+                    async for raw in ws:
+                        try:
+                            event = json.loads(raw)
+                            await self._handle_event(event)
+                        except Exception:
+                            log.exception("Error handling ARI event")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if not self._running:
+                    break
+                log.warning("ARI websocket lost; reconnecting in %.1fs", backoff, exc_info=True)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
 
     async def _handle_event(self, event: dict) -> None:
         t = event.get("type")
@@ -60,33 +105,87 @@ class AriClient:
         )
         self._sessions[channel_id] = session
 
-        rtp_port = self._rtp_port_counter
-        self._rtp_port_counter += 2
-        if self._rtp_port_counter > 65534:
-            self._rtp_port_counter = self._s.rtp_port  # wrap around
-
-        loop = asyncio.get_running_loop()
-        rtp_server = RtpServer(
-            host=self._s.rtp_bind_host,
-            port=rtp_port,
-            on_audio=lambda payload: loop.create_task(self._on_audio(channel_id, payload)),
-        )
-        await rtp_server.start()
+        # Bind the RTP server, skipping ports that are already in use instead of
+        # assuming the next counter value is free (the old code wrapped the
+        # counter without checking live binds, so a long-lived call could
+        # collide with a reused port).
+        rtp_server, rtp_port = await self._bind_rtp_server(channel_id)
         self._rtp_servers[channel_id] = rtp_server
         self._vad_buffers[channel_id] = VadBuffer()
+
+        # Single consumer drains a bounded queue, so per-packet work no longer
+        # spawns a task per datagram (~50/s/call) and exceptions surface in one
+        # place. The datagram callback only enqueues.
+        self._audio_queues[channel_id] = asyncio.Queue(maxsize=self.AUDIO_QUEUE_MAXSIZE)
+        self._turn_locks[channel_id] = asyncio.Lock()
+        self._generation[channel_id] = 0
+        self._consumer_tasks[channel_id] = asyncio.create_task(self._audio_consumer(channel_id))
 
         ext_channel_id = await self._create_external_media(channel_id, rtp_port)
         await self._bridge_channels(channel_id, ext_channel_id)
 
         alaw = await self._pipeline.synthesize_alaw(self._s.greeting_text)
-        task = asyncio.create_task(self._play_audio(channel_id, alaw, session))
+        gen = self._generation[channel_id]
+        task = asyncio.create_task(self._play_audio(channel_id, alaw, session, gen))
         self._playback_tasks[channel_id] = task
         log.info("Call %s from %s ready", channel_id, caller_id)
 
+    def _next_rtp_port(self) -> int:
+        port = self._rtp_port_counter
+        self._rtp_port_counter += 2
+        if self._rtp_port_counter > 65534:
+            self._rtp_port_counter = self._s.rtp_port  # wrap around
+        return port
+
+    async def _bind_rtp_server(self, channel_id: str) -> tuple[RtpServer, int]:
+        for _ in range(self.RTP_BIND_ATTEMPTS):
+            port = self._next_rtp_port()
+            server = RtpServer(
+                host=self._s.rtp_bind_host,
+                port=port,
+                on_audio=lambda payload, cid=channel_id: self._enqueue_audio(cid, payload),
+            )
+            try:
+                await server.start()
+            except OSError:
+                log.warning("RTP port %d unavailable, trying next", port)
+                continue
+            return server, port
+        raise RuntimeError("no free RTP port available")
+
+    def _enqueue_audio(self, channel_id: str, payload: bytes) -> None:
+        queue = self._audio_queues.get(channel_id)
+        if queue is None:
+            return
+        try:
+            queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            log.warning("Audio queue full for %s; dropping frame", channel_id)
+
+    async def _audio_consumer(self, channel_id: str) -> None:
+        queue = self._audio_queues.get(channel_id)
+        if queue is None:
+            return
+        try:
+            while True:
+                payload = await queue.get()
+                try:
+                    await self._on_audio(channel_id, payload)
+                except Exception:
+                    log.exception("Audio processing failed for %s", channel_id)
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            pass
+
     async def _teardown_call(self, channel_id: str) -> None:
-        task = self._playback_tasks.pop(channel_id, None)
-        if task and not task.done():
-            task.cancel()
+        for tasks in (self._playback_tasks, self._consumer_tasks):
+            task = tasks.pop(channel_id, None)
+            if task and not task.done():
+                task.cancel()
+        self._audio_queues.pop(channel_id, None)
+        self._turn_locks.pop(channel_id, None)
+        self._generation.pop(channel_id, None)
         self._vad_buffers.pop(channel_id, None)
         session = self._sessions.pop(channel_id, None)
         if session:
@@ -96,18 +195,25 @@ class AriClient:
             rtp.close()
         log.info("Call %s ended", channel_id)
 
-    async def _play_audio(self, channel_id: str, alaw: bytes, session: CallSession) -> None:
+    async def _play_audio(
+        self, channel_id: str, alaw: bytes, session: CallSession, gen: int
+    ) -> None:
         rtp = self._rtp_servers.get(channel_id)
         if not rtp:
+            return
+        # A barge-in may have superseded this turn between scheduling and start.
+        if self._generation.get(channel_id) != gen:
             return
         session.transition(SessionState.SPEAKING)
         try:
             await rtp.stream_audio(alaw)
-            if session.state == SessionState.SPEAKING:
+            # Only return to LISTENING if we are still the current generation;
+            # otherwise a newer turn owns the state and we must not touch it.
+            if self._generation.get(channel_id) == gen and session.state == SessionState.SPEAKING:
                 session.transition(SessionState.LISTENING)
-            vad = self._vad_buffers.get(channel_id)
-            if vad:
-                vad.reset()
+                vad = self._vad_buffers.get(channel_id)
+                if vad:
+                    vad.reset()
         except asyncio.CancelledError:
             pass
 
@@ -116,8 +222,7 @@ class AriClient:
         if not session:
             return
 
-        state = session.state
-        if state not in (SessionState.LISTENING, SessionState.SPEAKING):
+        if session.state not in (SessionState.LISTENING, SessionState.SPEAKING):
             return
 
         vad = self._vad_buffers.get(channel_id)
@@ -131,62 +236,81 @@ class AriClient:
         if speech is None:
             return
 
-        task = self._playback_tasks.pop(channel_id, None)
-        if task and not task.done():
-            task.cancel()
+        lock = self._turn_locks.get(channel_id)
+        if lock is None:
+            return
+        async with lock:
+            # State may have advanced while we waited for the lock.
+            if session.state not in (SessionState.LISTENING, SessionState.SPEAKING):
+                return
 
-        if session.state == SessionState.SPEAKING:
-            session.transition(SessionState.LISTENING)
-        vad.reset()
+            # Bump the generation: any in-flight playback for the prior
+            # generation will now no-op on completion, and the turn we start
+            # below tags its own audio with this id.
+            gen = self._generation.get(channel_id, 0) + 1
+            self._generation[channel_id] = gen
 
-        response_alaw = await self._pipeline.process_turn(session, speech)
-        task = asyncio.create_task(self._play_audio(channel_id, response_alaw, session))
-        self._playback_tasks[channel_id] = task
+            task = self._playback_tasks.pop(channel_id, None)
+            if task and not task.done():
+                task.cancel()
+
+            if session.state == SessionState.SPEAKING:
+                session.transition(SessionState.LISTENING)
+            vad.reset()
+
+            response_alaw = await self._pipeline.process_turn(session, speech)
+
+            # If a newer barge-in superseded us during synthesis, drop the
+            # stale audio instead of playing it over the live turn.
+            if self._generation.get(channel_id) != gen:
+                return
+            task = asyncio.create_task(self._play_audio(channel_id, response_alaw, session, gen))
+            self._playback_tasks[channel_id] = task
 
     async def _create_external_media(self, channel_id: str, rtp_port: int) -> str:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{self._s.ari_base_url}/ari/channels/externalMedia",
-                auth=(self._s.ari_username, self._s.ari_password),
-                params={
-                    "app": self._s.ari_app_name,
-                    "external_host": f"{self._s.rtp_bind_host}:{rtp_port}",
-                    "format": "alaw",
-                    "channelId": f"ext-{channel_id}",
-                },
-                timeout=5.0,
-            )
+        client = self._client()
+        resp = await client.post(
+            f"{self._s.ari_base_url}/ari/channels/externalMedia",
+            auth=(self._s.ari_username, self._s.ari_password),
+            params={
+                "app": self._s.ari_app_name,
+                "external_host": f"{self._s.rtp_bind_host}:{rtp_port}",
+                "format": "alaw",
+                "channelId": f"ext-{channel_id}",
+            },
+            timeout=5.0,
+        )
         resp.raise_for_status()
         return resp.json()["id"]
 
     async def originate(self, to_number: str) -> None:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{self._s.ari_base_url}/ari/channels",
-                auth=(self._s.ari_username, self._s.ari_password),
-                params={
-                    "endpoint": f"PJSIP/{to_number}@fritzbox-endpoint",
-                    "callerId": self._s.caller_id,
-                    "app": self._s.ari_app_name,
-                },
-                timeout=10.0,
-            )
+        client = self._client()
+        resp = await client.post(
+            f"{self._s.ari_base_url}/ari/channels",
+            auth=(self._s.ari_username, self._s.ari_password),
+            params={
+                "endpoint": f"PJSIP/{to_number}@fritzbox-endpoint",
+                "callerId": self._s.caller_id,
+                "app": self._s.ari_app_name,
+            },
+            timeout=10.0,
+        )
         resp.raise_for_status()
         log.info("Outbound call to %s initiated", to_number)
 
     async def _bridge_channels(self, channel_id: str, ext_channel_id: str) -> None:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{self._s.ari_base_url}/ari/bridges",
-                auth=(self._s.ari_username, self._s.ari_password),
-                params={"type": "mixing", "bridgeId": f"bridge-{channel_id}"},
-                timeout=5.0,
-            )
-            resp.raise_for_status()
-            bridge_id = resp.json()["id"]
-            await client.post(
-                f"{self._s.ari_base_url}/ari/bridges/{bridge_id}/addChannel",
-                auth=(self._s.ari_username, self._s.ari_password),
-                params={"channel": f"{channel_id},{ext_channel_id}"},
-                timeout=5.0,
-            )
+        client = self._client()
+        resp = await client.post(
+            f"{self._s.ari_base_url}/ari/bridges",
+            auth=(self._s.ari_username, self._s.ari_password),
+            params={"type": "mixing", "bridgeId": f"bridge-{channel_id}"},
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        bridge_id = resp.json()["id"]
+        await client.post(
+            f"{self._s.ari_base_url}/ari/bridges/{bridge_id}/addChannel",
+            auth=(self._s.ari_username, self._s.ari_password),
+            params={"channel": f"{channel_id},{ext_channel_id}"},
+            timeout=5.0,
+        )
