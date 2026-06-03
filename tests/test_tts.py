@@ -38,6 +38,8 @@ async def test_synthesize_sends_text_and_voice(tts):
     assert payload["input"] == "Test"
     # server reads `voice`, not `instruct`
     assert payload["voice"] == VOICE_INSTRUCT
+    # full language name required — ISO "de" / omitting it both 500 server-side
+    assert payload["language"] == "german"
 
 
 @respx.mock
