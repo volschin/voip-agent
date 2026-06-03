@@ -35,7 +35,10 @@ services:
     #   - --trust-remote-code
 
   qwen3-tts:
-    image: ghcr.io/aeon-7/qwen3-tts-server:latest
+    # Built locally from ./tts — faster-qwen3-tts runtime with the custom
+    # /v1/audio/speech/stream endpoint the streaming pipeline (#3) depends on.
+    # The aeon-7 upstream image cannot carry this endpoint.
+    build: ./tts
     container_name: qwen3-tts
     runtime: nvidia
     environment:
