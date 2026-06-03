@@ -99,3 +99,86 @@ async def test_llm_failure_returns_fallback(pipeline):
     assert isinstance(result, bytes)
     assert session.state == SessionState.PROCESSING
     assert len(session.history) == 0
+
+
+def _strm_session() -> CallSession:
+    return CallSession(
+        call_id="c", caller_id="+49123", history=[], created_at=datetime.now(timezone.utc)
+    )
+
+
+def _pcm_zero() -> np.ndarray:
+    return np.zeros(320, dtype=np.int16)
+
+
+async def test_process_turn_stream_yields_alaw_incrementally():
+    async def stt(_b):
+        return "hallo"
+
+    async def llm_stream(_msgs, _caller, on_tool_round=None):
+        for tok in ["Hallo", " Welt", "."]:
+            yield tok
+
+    async def tts_stream(_text):
+        yield np.zeros(2400, dtype=np.int16)  # 100ms @ 24k -> ~33ms @ 8k
+
+    pipe = VoicePipeline(
+        stt=stt, llm=None, tts=None,
+        llm_stream=llm_stream, tts_stream=tts_stream,
+    )
+    s = _strm_session()
+    s.transition(SessionState.LISTENING)
+    chunks = [c async for c in pipe.process_turn_stream(s, _pcm_zero())]
+
+    assert chunks and all(isinstance(c, bytes) for c in chunks)
+    assert s.history[-1]["role"] == "assistant"
+    assert s.history[-1]["content"] == "Hallo Welt."
+
+
+async def test_process_turn_stream_plays_filler_on_tool_round():
+    async def stt(_b):
+        return "frage"
+
+    async def llm_stream(_msgs, _caller, on_tool_round=None):
+        if on_tool_round:
+            on_tool_round()  # simulate a tool round
+        for tok in ["Antwort", "."]:
+            yield tok
+
+    seen = {"filler": 0}
+
+    async def tts_stream(text):
+        if "Moment" in text:
+            seen["filler"] += 1
+        yield np.zeros(2400, dtype=np.int16)
+
+    pipe = VoicePipeline(
+        stt=stt, llm=None, tts=None,
+        llm_stream=llm_stream, tts_stream=tts_stream,
+    )
+    s = _strm_session()
+    s.transition(SessionState.LISTENING)
+    _ = [c async for c in pipe.process_turn_stream(s, _pcm_zero())]
+    assert seen["filler"] == 1
+
+
+async def test_process_turn_stream_recovers_on_midstream_error():
+    async def stt(_b):
+        return "hallo"
+
+    async def llm_stream(_msgs, _caller, on_tool_round=None):
+        yield "Teil"
+        raise RuntimeError("llm died mid-stream")
+
+    async def tts_stream(_text):
+        yield np.zeros(2400, dtype=np.int16)
+
+    pipe = VoicePipeline(
+        stt=stt, llm=None, tts=None,
+        llm_stream=llm_stream, tts_stream=tts_stream,
+    )
+    s = _strm_session()
+    s.transition(SessionState.LISTENING)
+    # Must not raise; should still produce audio (the recovery prompt).
+    chunks = [c async for c in pipe.process_turn_stream(s, _pcm_zero())]
+    assert chunks
