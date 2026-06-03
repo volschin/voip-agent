@@ -49,7 +49,13 @@ async def main() -> None:
         trusted_callers=s.trusted_caller_set,
         client=http_client,
     )
-    pipeline = VoicePipeline(stt=stt.transcribe, llm=llm.complete, tts=tts.synthesize)
+    pipeline = VoicePipeline(
+        stt=stt.transcribe,
+        llm=llm.complete,
+        tts=tts.synthesize,
+        llm_stream=llm.complete_stream,
+        tts_stream=tts.synthesize_stream,
+    )
     ari = AriClient(settings=s, pipeline=pipeline)
 
     try:

@@ -216,9 +216,7 @@ def _sse(*events: str) -> bytes:
 
 
 def _text_delta(content: str) -> str:
-    return (
-        '{"choices":[{"delta":{"content":' + f'"{content}"' + '},"finish_reason":null}]}'
-    )
+    return '{"choices":[{"delta":{"content":' + f'"{content}"' + '},"finish_reason":null}]}'
 
 
 def _make_client(handler, **over):
@@ -238,13 +236,15 @@ def _make_client(handler, **over):
 
 async def test_complete_stream_yields_text_deltas():
     def handler(request):
-        return httpx.Response(200, stream=httpx.ByteStream(
-            _sse(_text_delta("Hallo"), _text_delta(" Welt"))
-        ))
+        return httpx.Response(
+            200, stream=httpx.ByteStream(_sse(_text_delta("Hallo"), _text_delta(" Welt")))
+        )
 
     llm = _make_client(handler)
-    out = [t async for t in llm.complete_stream(
-        [{"role": "user", "content": "hi"}], caller_id="+49123")]
+    out = [
+        t
+        async for t in llm.complete_stream([{"role": "user", "content": "hi"}], caller_id="+49123")
+    ]
     assert "".join(out) == "Hallo Welt"
     await llm._client.aclose()
 
@@ -260,7 +260,9 @@ async def test_complete_stream_unauthorized_caller_gets_no_tools():
         return httpx.Response(200, stream=httpx.ByteStream(_sse(_text_delta("ok"))))
 
     llm = _make_client(handler)
-    _ = [t async for t in llm.complete_stream(
-        [{"role": "user", "content": "hi"}], caller_id="+49999")]  # not trusted
+    _ = [
+        t
+        async for t in llm.complete_stream([{"role": "user", "content": "hi"}], caller_id="+49999")
+    ]  # not trusted
     assert "tools" not in seen["payload"]
     await llm._client.aclose()

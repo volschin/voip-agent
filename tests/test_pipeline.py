@@ -123,8 +123,11 @@ async def test_process_turn_stream_yields_alaw_incrementally():
         yield np.zeros(2400, dtype=np.int16)  # 100ms @ 24k -> ~33ms @ 8k
 
     pipe = VoicePipeline(
-        stt=stt, llm=None, tts=None,
-        llm_stream=llm_stream, tts_stream=tts_stream,
+        stt=stt,
+        llm=None,
+        tts=None,
+        llm_stream=llm_stream,
+        tts_stream=tts_stream,
     )
     s = _strm_session()
     s.transition(SessionState.LISTENING)
@@ -153,8 +156,11 @@ async def test_process_turn_stream_plays_filler_on_tool_round():
         yield np.zeros(2400, dtype=np.int16)
 
     pipe = VoicePipeline(
-        stt=stt, llm=None, tts=None,
-        llm_stream=llm_stream, tts_stream=tts_stream,
+        stt=stt,
+        llm=None,
+        tts=None,
+        llm_stream=llm_stream,
+        tts_stream=tts_stream,
     )
     s = _strm_session()
     s.transition(SessionState.LISTENING)
@@ -174,8 +180,11 @@ async def test_process_turn_stream_recovers_on_midstream_error():
         yield np.zeros(2400, dtype=np.int16)
 
     pipe = VoicePipeline(
-        stt=stt, llm=None, tts=None,
-        llm_stream=llm_stream, tts_stream=tts_stream,
+        stt=stt,
+        llm=None,
+        tts=None,
+        llm_stream=llm_stream,
+        tts_stream=tts_stream,
     )
     s = _strm_session()
     s.transition(SessionState.LISTENING)

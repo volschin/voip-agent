@@ -207,7 +207,9 @@ async def test_external_media_advertises_routable_host(ari):
 
 async def test_streaming_play_enters_speaking_on_first_chunk(ari):
     session = CallSession(
-        call_id="ch-1", caller_id="+49123", history=[],
+        call_id="ch-1",
+        caller_id="+49123",
+        history=[],
         created_at=datetime.now(timezone.utc),
     )
     session.transition(SessionState.LISTENING)
@@ -241,7 +243,9 @@ async def test_bargein_during_processing_cancels_and_starts_stream(ari):
     # Verifies the WIRING (generation bump + _play_stream dispatch), not just
     # that PROCESSING is in the interruptible-state constant.
     session = CallSession(
-        call_id="ch-1", caller_id="+49123", history=[],
+        call_id="ch-1",
+        caller_id="+49123",
+        history=[],
         created_at=datetime.now(timezone.utc),
     )
     session.transition(SessionState.LISTENING)

@@ -132,9 +132,7 @@ class RtpServer(asyncio.DatagramProtocol):
             if delay > 0:
                 await asyncio.sleep(delay)
 
-    async def stream_audio_chunks(
-        self, queue: "asyncio.Queue", prebuffer_frames: int = 5
-    ) -> None:
+    async def stream_audio_chunks(self, queue: "asyncio.Queue", prebuffer_frames: int = 5) -> None:
         """Drain aLaw bytes from a queue as 20ms frames on the monotonic clock.
 
         The queue carries aLaw byte blobs of arbitrary length; a None sentinel
@@ -185,7 +183,7 @@ class RtpServer(asyncio.DatagramProtocol):
                 del pending[: self.SAMPLES_PER_FRAME]
             elif done:
                 if pending:  # final short frame, pad to a full frame
-                    frame = bytes(pending) + silence[len(pending):]
+                    frame = bytes(pending) + silence[len(pending) :]
                     pending.clear()
                 else:
                     break

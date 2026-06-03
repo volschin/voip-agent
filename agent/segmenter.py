@@ -8,8 +8,23 @@ period that belongs to a known German abbreviation.
 _SENTENCE_END = {".", "!", "?"}
 # Abbreviations whose trailing period must not end a sentence.
 _ABBREVIATIONS = {
-    "z.b.", "u.a.", "d.h.", "u.s.w.", "usw.", "etc.", "bzw.", "ca.",
-    "nr.", "abs.", "vgl.", "z.t.", "evtl.", "ggf.", "inkl.", "max.", "min.",
+    "z.b.",
+    "u.a.",
+    "d.h.",
+    "u.s.w.",
+    "usw.",
+    "etc.",
+    "bzw.",
+    "ca.",
+    "nr.",
+    "abs.",
+    "vgl.",
+    "z.t.",
+    "evtl.",
+    "ggf.",
+    "inkl.",
+    "max.",
+    "min.",
 }
 
 

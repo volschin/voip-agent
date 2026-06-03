@@ -97,8 +97,7 @@ class _ToolCallAccumulator:
         for d in deltas:
             i = d.get("index", 0)
             call = self._calls.setdefault(
-                i, {"id": "", "type": "function",
-                     "function": {"name": "", "arguments": ""}}
+                i, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
             )
             if d.get("id"):
                 call["id"] = d["id"]
@@ -228,7 +227,7 @@ class LlmClient:
                 async for line in resp.aiter_lines():
                     if not line.startswith("data:"):
                         continue
-                    data = line[len("data:"):].strip()
+                    data = line[len("data:") :].strip()
                     if data == "[DONE]":
                         break
                     delta = json.loads(data)["choices"][0]["delta"]
@@ -253,9 +252,7 @@ class LlmClient:
             full_messages.append(assistant_msg)
             for tc in assistant_msg["tool_calls"]:
                 result = await self._dispatch_safe(tc)
-                full_messages.append(
-                    {"role": "tool", "tool_call_id": tc["id"], "content": result}
-                )
+                full_messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
         # Cap reached without a text answer.
         yield _FALLBACK_MSG
 
