@@ -155,3 +155,54 @@ async def test_stream_audio_paces_against_monotonic_clock():
     # loop would need ~10 * (5 + 20) ms = 250 ms. Absolute pacing stays near
     # 200 ms because each per-frame delay shrinks to swallow the work time.
     assert 0.19 <= elapsed <= 0.225
+
+
+class _FakeTransport:
+    def __init__(self):
+        self.sent = []
+
+    def sendto(self, packet, addr):
+        self.sent.append(packet)
+
+    def close(self):
+        pass
+
+
+def _ready_server():
+    srv = RtpServer(host="127.0.0.1", port=0, on_audio=lambda p: None)
+    srv._transport = _FakeTransport()
+    srv._remote_addr = ("127.0.0.1", 5000)
+    return srv
+
+
+async def test_stream_chunks_drains_all_frames():
+    srv = _ready_server()
+    queue: asyncio.Queue = asyncio.Queue()
+    # 2 frames of aLaw per chunk.
+    frame = b"\xd5" * RtpServer.SAMPLES_PER_FRAME
+    await queue.put(frame * 2)
+    await queue.put(frame)
+    await queue.put(None)  # sentinel: producer done
+
+    await srv.stream_audio_chunks(queue, prebuffer_frames=0)
+
+    assert len(srv._transport.sent) == 3  # 2 + 1 frames
+
+
+async def test_stream_chunks_underrun_does_not_stop():
+    srv = _ready_server()
+    queue: asyncio.Queue = asyncio.Queue()
+    frame = b"\xd5" * RtpServer.SAMPLES_PER_FRAME
+
+    async def slow_producer():
+        await queue.put(frame)
+        await asyncio.sleep(0.05)  # gap > one frame: forces underrun
+        await queue.put(frame)
+        await queue.put(None)
+
+    asyncio.create_task(slow_producer())
+    await srv.stream_audio_chunks(queue, prebuffer_frames=0)
+
+    # Both real frames sent despite the gap; underrun filled with silence,
+    # so total frames > 2 and the stream did not abort early.
+    assert len(srv._transport.sent) >= 2
