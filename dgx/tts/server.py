@@ -10,6 +10,7 @@ import io
 import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import torch
 import soundfile as sf
@@ -41,33 +42,11 @@ def _load() -> None:
     global _model, _tokenizer
     if _model is not None:
         return
-    from qwen_tts import Qwen3TTSModel, Qwen3TTSTokenizer
-    print(f"[load] tokenizer {TOKENIZER_ID}", flush=True)
-    _tokenizer = Qwen3TTSTokenizer.from_pretrained(TOKENIZER_ID)
-    print(f"[load] model {MODEL_ID}  device_map={DEVICE!r}  dtype={DTYPE}  attn_impl={ATTN_IMPL}", flush=True)
-    kwargs = {"device_map": DEVICE, "dtype": DTYPE, "attn_implementation": ATTN_IMPL}
-    try:
-        _model = Qwen3TTSModel.from_pretrained(MODEL_ID, **kwargs)
-    except Exception as e:
-        print(f"[load] ERROR with attn_impl={ATTN_IMPL}: {e!r}; retrying with sdpa", flush=True)
-        kwargs["attn_implementation"] = "sdpa"
-        _model = Qwen3TTSModel.from_pretrained(MODEL_ID, **kwargs)
-
-    try:
-        first_param = next(_model.model.parameters())
-        nparams = sum(p.numel() for p in _model.model.parameters())
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            cuda_mb = torch.cuda.memory_allocated() / (1024**2)
-            print(f"[load] OK  param0.device={first_param.device} dtype={first_param.dtype} "
-                  f"params={nparams/1e6:.1f}M  cuda_alloc={cuda_mb:.0f} MB", flush=True)
-        else:
-            print(f"[load] OK  param0.device={first_param.device} dtype={first_param.dtype} "
-                  f"params={nparams/1e6:.1f}M", flush=True)
-    except Exception as e:
-        print(f"[load] (introspection failed: {e})", flush=True)
-
-    print(f"[load] supported_languages={_model.get_supported_languages()}", flush=True)
+    from faster_qwen3_tts import FasterQwen3TTS
+    print(f"[load] faster-qwen3-tts model {MODEL_ID} device={DEVICE}", flush=True)
+    _model = FasterQwen3TTS.from_pretrained(MODEL_ID, device=DEVICE, dtype=DTYPE)
+    _tokenizer = None  # faster runtime manages tokenization internally
+    print("[load] OK", flush=True)
 
 
 @asynccontextmanager
@@ -149,6 +128,30 @@ def synthesize(req: SpeechRequest):
         raise HTTPException(400, f"unsupported response_format: {fmt}")
     buf.seek(0)
     return Response(content=buf.read(), media_type=media)
+
+
+@app.post("/v1/audio/speech/stream")
+def synthesize_stream(req: SpeechRequest):
+    if _model is None:
+        _load()
+    instruct = req.voice or DEFAULT_INSTRUCT
+
+    def gen():
+        import numpy as np
+        for audio_chunk, sample_rate, _timing in _model.generate_voice_design_streaming(
+            text=req.input,
+            instruct=instruct,
+            language=req.language,
+            chunk_size=8,  # ~667ms audio per chunk; tune later
+        ):
+            arr = np.asarray(audio_chunk)
+            if np.issubdtype(arr.dtype, np.floating):
+                # Normalized float [-1, 1] → int16 PCM (mirror soundfile's WAV scaling).
+                # Direct astype("<i2") would truncate every in-range sample to 0 → silence.
+                arr = np.clip(arr, -1.0, 1.0) * 32767.0
+            yield arr.astype("<i2").tobytes()
+
+    return StreamingResponse(gen(), media_type="application/octet-stream")
 
 
 if __name__ == "__main__":

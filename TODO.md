@@ -11,12 +11,15 @@ security config. Numbering matches the original review.
 
 ## Real-time correctness (highest value for call quality)
 
-- [ ] **#3 Streaming pipeline.** Turn loop is fully serialized and non-streaming:
-  VAD waits 800 ms of silence, then STT → LLM → TTS run end to end before any
-  audio plays. Phone target (~300–800 ms to first audio) is impossible. Stream
-  STT partials, stream LLM tokens into TTS, stream TTS first-chunk into RTP.
-  Pairs with the faster-qwen3-tts adoption below. `agent/audio.py:29`,
-  `agent/pipeline.py`.
+- [x] **#3 Streaming pipeline.** LLM streams tokens → German-aware
+  `SentenceSegmenter` batches clauses → `tts.synthesize_stream` yields 24 kHz
+  PCM chunks → resample/aLaw → `rtp.stream_audio_chunks` (prebuffer +
+  underrun comfort silence). `PROCESSING`/`SPEAKING` overlap; SPEAKING enters on
+  the first chunk; barge-in (now interruptible during PROCESSING) cancels the
+  per-turn `TaskGroup`. STT stays whole-turn (Qwen3-ASR is fine offline).
+  Spec: `docs/superpowers/specs/2026-05-31-streaming-pipeline-design.md`,
+  plan: `docs/superpowers/plans/2026-05-31-streaming-pipeline.md`.
+  `agent/{segmenter,tts,llm,rtp,pipeline,ari,main}.py`.
 - [x] **#4 RTP hardening (header validation).** `parse_rtp_payload` now
   validates the RFC 3550 header — version check, CSRC list, header extension,
   and padding — and returns `b""` on anything malformed so a bad datagram can
@@ -50,12 +53,15 @@ security config. Numbering matches the original review.
 
 ## Models
 
-- [ ] **faster-qwen3-tts (with streaming).** TTFA on DGX Spark 567→280 ms (0.6B),
-  661→400 ms (1.7B) via CUDA graphs; supports streaming chunks. Worth adopting,
-  but only alongside #3 — change the TTS contract from "POST text → WAV" to
-  "stream text → yield 24 kHz PCM chunks → downsample/RTP immediately". A
-  non-streaming drop-in leaves the latency bug intact.
-  https://github.com/andimarafioti/faster-qwen3-tts
+- [x] **faster-qwen3-tts (with streaming).** TTFA on DGX Spark 567→280 ms (0.6B),
+  661→400 ms (1.7B) via CUDA graphs; supports streaming chunks. Adopted with #3:
+  `dgx/tts/server.py` adds `/v1/audio/speech/stream` via
+  `generate_voice_design_streaming` (same `Qwen3-TTS-12Hz-1.7B-VoiceDesign`
+  weights), keeping the legacy `/v1/audio/speech` for greeting/fallback.
+  **On-box wire verification still pending** (DGX unreachable from dev box):
+  confirm streamed chunk sample-rate/dtype and the vLLM SSE `delta.tool_calls`
+  fragment shape, then replace the ASSUMPTION fixtures in `tests/test_tts.py`
+  and `tests/test_llm.py`. https://github.com/andimarafioti/faster-qwen3-tts
 - [ ] **Parakeet ASR: do NOT switch yet.** Qwen3-ASR already streams; the code
   just uses it offline/batch. Parakeet-TDT v3 is also offline per NVIDIA NIM
   docs. If NVIDIA is ever wanted, use Parakeet RNNT Multilingual (streaming) via

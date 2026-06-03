@@ -132,6 +132,74 @@ class RtpServer(asyncio.DatagramProtocol):
             if delay > 0:
                 await asyncio.sleep(delay)
 
+    async def stream_audio_chunks(self, queue: "asyncio.Queue", prebuffer_frames: int = 5) -> None:
+        """Drain aLaw bytes from a queue as 20ms frames on the monotonic clock.
+
+        The queue carries aLaw byte blobs of arbitrary length; a None sentinel
+        marks producer completion. Frames are paced against an absolute
+        schedule (start + n*20ms) like stream_audio. On underrun (no frame
+        ready at its slot) a silence frame is sent so the RTP clock never
+        stalls and the caller hears comfort silence, not a glitch.
+
+        prebuffer_frames delays the start until that many frames are buffered,
+        trading a little first-audio latency for underrun resilience.
+        """
+        silence = b"\xd5" * self.SAMPLES_PER_FRAME
+        pending = bytearray()
+        done = False
+        loop = asyncio.get_running_loop()
+
+        async def refill(block: bool) -> None:
+            nonlocal done
+            try:
+                item = await queue.get() if block else queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if item is None:
+                done = True
+            else:
+                pending.extend(item)
+
+        # Prebuffer.
+        while not done and len(pending) < prebuffer_frames * self.SAMPLES_PER_FRAME:
+            await refill(block=True)
+
+        start = loop.time()
+        frame_idx = 0
+        while True:
+            # Pull any ready items without blocking.
+            while not done:
+                try:
+                    item = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is None:
+                    done = True
+                else:
+                    pending.extend(item)
+
+            if len(pending) >= self.SAMPLES_PER_FRAME:
+                frame = bytes(pending[: self.SAMPLES_PER_FRAME])
+                del pending[: self.SAMPLES_PER_FRAME]
+            elif done:
+                if pending:  # final short frame, pad to a full frame
+                    frame = bytes(pending) + silence[len(pending) :]
+                    pending.clear()
+                else:
+                    break
+            else:
+                frame = silence  # underrun: comfort silence, keep the clock
+
+            self.send_frame(frame)
+            frame_idx += 1
+            target = start + frame_idx * FRAME_DURATION_S
+            delay = target - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            elif not done and len(pending) < self.SAMPLES_PER_FRAME:
+                # Behind schedule and starved: yield so the producer can run.
+                await refill(block=True)
+
     def close(self) -> None:
         if self._transport:
             self._transport.close()

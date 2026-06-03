@@ -1,4 +1,7 @@
+from collections.abc import AsyncIterator
+
 import httpx
+import numpy as np
 
 VOICE_INSTRUCT = "Eine warme, natürliche deutsche Stimme mit angemessenem Sprechtempo."
 
@@ -21,3 +24,27 @@ class TtsClient:
         )
         resp.raise_for_status()
         return resp.content
+
+    async def synthesize_stream(self, text: str) -> AsyncIterator[np.ndarray]:
+        """Yield 24kHz int16 PCM chunks as the server produces them.
+
+        Buffers across reads so each yielded array is whole int16 samples
+        (a chunk boundary can fall mid-sample on the wire).
+        """
+        async with self._client.stream(
+            "POST",
+            f"{self._base_url}/v1/audio/speech/stream",
+            json={"input": text, "voice": VOICE_INSTRUCT},
+            timeout=30.0,
+        ) as resp:
+            resp.raise_for_status()
+            carry = b""
+            async for raw in resp.aiter_bytes():
+                buf = carry + raw
+                n = len(buf) - (len(buf) % 2)  # whole int16 samples only
+                if n:
+                    yield np.frombuffer(buf[:n], dtype="<i2")
+                carry = buf[n:]
+            if carry:
+                # Trailing odd byte should not happen; drop with no crash.
+                pass

@@ -61,3 +61,25 @@ async def test_aclose_leaves_injected_client_open():
     await client.aclose()
     assert not shared.is_closed
     await shared.aclose()
+
+
+async def test_synthesize_stream_yields_pcm_chunks():
+    # ASSUMPTION: server streams raw little-endian int16 PCM at 24kHz.
+    # Replace this fixture with a captured /v1/audio/speech/stream response
+    # once verified on the DGX box (see Task 1 Step 4).
+    chunk_a = (np.arange(240, dtype="<i2")).tobytes()
+    chunk_b = (np.arange(240, 480, dtype="<i2")).tobytes()
+
+    async def handler(request):
+        return httpx.Response(200, stream=httpx.ByteStream(chunk_a + chunk_b))
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    tts = TtsClient(base_url="http://tts:8002", client=client)
+
+    chunks = [c async for c in tts.synthesize_stream("Hallo")]
+    joined = np.concatenate(chunks)
+
+    assert joined.dtype == np.int16
+    assert joined.size == 480
+    await client.aclose()

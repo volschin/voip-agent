@@ -205,3 +205,125 @@ async def test_malformed_tool_arguments_do_not_crash(llm):
     result = await llm.complete([{"role": "user", "content": "x"}], caller_id=TRUSTED)
     assert result == "recovered"
     llm._rag.assert_not_awaited()
+
+
+def _sse(*events: str) -> bytes:
+    # ASSUMPTION: OpenAI/vLLM SSE framing `data: {json}\n\n`, terminated by
+    # `data: [DONE]`. Replace with a captured dgx-spark:8000 stream once
+    # reachable (see plan wire-contract caveat).
+    body = "".join(f"data: {e}\n\n" for e in events) + "data: [DONE]\n\n"
+    return body.encode()
+
+
+def _text_delta(content: str) -> str:
+    return '{"choices":[{"delta":{"content":' + f'"{content}"' + '},"finish_reason":null}]}'
+
+
+def _make_client(handler, **over):
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    return LlmClient(
+        base_url="http://llm:8000",
+        model="hermes",
+        system_prompt="prompt",
+        rag=None,
+        calendar=None,
+        trusted_callers={"+49123"},
+        client=client,
+        **over,
+    )
+
+
+async def test_complete_stream_yields_text_deltas():
+    def handler(request):
+        return httpx.Response(
+            200, stream=httpx.ByteStream(_sse(_text_delta("Hallo"), _text_delta(" Welt")))
+        )
+
+    llm = _make_client(handler)
+    out = [
+        t
+        async for t in llm.complete_stream([{"role": "user", "content": "hi"}], caller_id="+49123")
+    ]
+    assert "".join(out) == "Hallo Welt"
+    await llm._client.aclose()
+
+
+async def test_complete_stream_unauthorized_caller_gets_no_tools():
+    # The request payload must NOT include "tools" for an untrusted caller.
+    seen = {}
+
+    def handler(request):
+        import json as _j
+
+        seen["payload"] = _j.loads(request.content)
+        return httpx.Response(200, stream=httpx.ByteStream(_sse(_text_delta("ok"))))
+
+    llm = _make_client(handler)
+    _ = [
+        t
+        async for t in llm.complete_stream([{"role": "user", "content": "hi"}], caller_id="+49999")
+    ]  # not trusted
+    assert "tools" not in seen["payload"]
+    await llm._client.aclose()
+
+
+def _tc_delta(index=0, call_id=None, name=None, args=None) -> str:
+    # One streamed tool_calls fragment. ASSUMPTION: vLLM fragments tool_calls
+    # by `index`, with id/name on the first fragment and `arguments` accreting
+    # across fragments. Replace once captured on dgx-spark:8000.
+    tc = {"index": index, "function": {}}
+    if call_id is not None:
+        tc["id"] = call_id
+        tc["type"] = "function"
+    if name is not None:
+        tc["function"]["name"] = name
+    if args is not None:
+        tc["function"]["arguments"] = args
+    return json.dumps({"choices": [{"delta": {"tool_calls": [tc]}, "finish_reason": None}]})
+
+
+async def test_complete_stream_trusted_caller_runs_tool_round():
+    # Streaming parity with test_complete_with_rag_tool_call: an authorized
+    # caller's fragmented tool_call (round 0) is reassembled, dispatched, and
+    # the round-1 text answer is streamed. Exercises _ToolCallAccumulator and
+    # the streaming dispatch loop (the "advisor #2" guard path).
+    rounds = {"n": 0}
+
+    def handler(request):
+        i = rounds["n"]
+        rounds["n"] += 1
+        if i == 0:
+            body = _sse(
+                _tc_delta(0, call_id="call_1", name="rag_lookup"),
+                _tc_delta(0, args='{"query": "'),
+                _tc_delta(0, args='X"}'),
+            )
+        else:
+            body = _sse(_text_delta("X ist Y."))
+        return httpx.Response(200, stream=httpx.ByteStream(body))
+
+    rag = AsyncMock(return_value="RAG result")
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    llm = LlmClient(
+        base_url="http://llm:8000",
+        model="hermes",
+        system_prompt="prompt",
+        rag=rag,
+        calendar=None,
+        trusted_callers={"+49123"},
+        client=client,
+    )
+
+    out = [
+        t
+        async for t in llm.complete_stream(
+            [{"role": "user", "content": "Was ist X?"}], caller_id="+49123"
+        )
+    ]
+
+    assert "".join(out) == "X ist Y."  # only the final answer is streamed
+    rag.assert_awaited_once_with("X")  # fragments reassembled correctly
+    assert rounds["n"] == 2  # one tool round + one answer round
+    await client.aclose()
