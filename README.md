@@ -23,6 +23,8 @@ Fritzbox ──SIP──► Asterisk (NUC)
 
 **Voice turn:** aLaw RTP → VAD → 16 kHz PCM → Qwen3-ASR → LLM tool-call loop → Qwen3-TTS → 8 kHz aLaw RTP
 
+The live turn is **streaming**: LLM tokens → German sentence segmenter → Qwen3-TTS `/v1/audio/speech/stream` → resample → aLaw chunks play while generation continues (compute and playback overlap). Audio starts on the first synthesized chunk rather than after the whole turn. Barge-in (caller speaks over the agent) cancels the in-flight turn mid-stream; RTP underruns are filled with comfort silence so the clock never stalls. The non-streaming whole-turn path is retained for the greeting and as a fallback.
+
 ## Hardware
 
 | Host | Role |
@@ -166,6 +168,8 @@ pytest tests/test_pipeline.py -v
 
 ## Latency targets
 
+Per-stage targets for the **non-streaming** whole-turn path (greeting / fallback):
+
 | Stage | Target |
 |-------|--------|
 | STT (Qwen3-ASR-1.7B) | ~140 ms |
@@ -173,4 +177,14 @@ pytest tests/test_pipeline.py -v
 | TTS (Qwen3-TTS) | ~1500 ms |
 | Total turn | ~2200 ms |
 
+On the streaming live path these stages overlap, so the metric that matters is
+**time-to-first-audio** (STT + first LLM tokens + first TTS chunk), not the
+full-turn sum — the caller hears the start of the reply while the rest is still
+generating. On-box streaming numbers are not yet measured (see below).
+
 If TTS exceeds 3 s, switch to the 0.6B variant in `dgx/.env`.
+
+> **Status:** the streaming pipeline (#3, faster-qwen3-tts) is implemented and
+> unit-tested but **not yet verified on-box** — the DGX TTS server is built
+> locally from `dgx/tts/` and its streaming endpoint has not been wire-tested
+> against the live agent.

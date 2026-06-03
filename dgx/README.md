@@ -8,6 +8,10 @@ cp .env.example .env
 docker compose up -d
 ```
 
+`qwen3-tts` builds locally from `./tts` (faster-qwen3-tts + the custom
+`/v1/audio/speech/stream` endpoint). First `up` compiles flash-attn —
+expect ~10–15 min on the Spark; later boots reuse the cached layer.
+
 ## Health checks
 
 ```bash

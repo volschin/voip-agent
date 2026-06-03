@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends sox libsox-fmt-
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir --break-system-packages \
+      "faster-qwen3-tts" \
       "qwen-tts" \
       "fastapi>=0.110" \
       "uvicorn[standard]>=0.27" \
