@@ -200,3 +200,69 @@ async def test_external_media_advertises_routable_host(ari):
     assert params["external_host"] == "192.168.178.2:5002"
     # bind host (127.0.0.1 in the fixture) must NOT be what we advertise
     assert ari._s.rtp_bind_host not in params["external_host"]
+
+
+# --- #3 streaming playback + overlap FSM --------------------------------
+
+
+async def test_streaming_play_enters_speaking_on_first_chunk(ari):
+    session = CallSession(
+        call_id="ch-1", caller_id="+49123", history=[],
+        created_at=datetime.now(timezone.utc),
+    )
+    session.transition(SessionState.LISTENING)
+    ari._sessions["ch-1"] = session
+    ari._generation["ch-1"] = 1
+
+    states = []
+
+    async def fake_stream(_sess, _pcm):
+        # Mirror the real process_turn_stream: it owns the PROCESSING entry.
+        session.transition(SessionState.PROCESSING)
+        states.append(session.state)  # PROCESSING (before first chunk)
+        yield b"\xd5" * 160
+        states.append(session.state)  # SPEAKING (after first chunk)
+        yield b"\xd5" * 160
+
+    rtp = MagicMock()
+    rtp.stream_audio_chunks = AsyncMock()
+    ari._rtp_servers["ch-1"] = rtp
+    ari._pipeline.process_turn_stream = fake_stream
+
+    await ari._play_stream("ch-1", session, gen=1, pcm=None)
+
+    assert SessionState.PROCESSING in states
+    assert SessionState.SPEAKING in states
+    assert session.state == SessionState.LISTENING  # back to listening at end
+
+
+async def test_bargein_during_processing_cancels_and_starts_stream(ari):
+    # Drives _on_audio for real: VAD fires while the session is PROCESSING.
+    # Verifies the WIRING (generation bump + _play_stream dispatch), not just
+    # that PROCESSING is in the interruptible-state constant.
+    session = CallSession(
+        call_id="ch-1", caller_id="+49123", history=[],
+        created_at=datetime.now(timezone.utc),
+    )
+    session.transition(SessionState.LISTENING)
+    session.transition(SessionState.PROCESSING)  # mid-generation
+    ari._sessions["ch-1"] = session
+    ari._generation["ch-1"] = 1
+    ari._turn_locks["ch-1"] = asyncio.Lock()
+
+    vad = MagicMock()
+    vad.add_frame = MagicMock(return_value=b"speech-pcm")  # VAD fires
+    ari._vad_buffers["ch-1"] = vad
+
+    ari._play_stream = AsyncMock()
+
+    assert SessionState.PROCESSING in ari._INTERRUPTIBLE_STATES
+
+    await ari._on_audio("ch-1", b"\xd5" * 160)  # valid aLaw -> real decode path
+    await asyncio.sleep(0)  # let the dispatched task run
+
+    assert ari._generation["ch-1"] == 2  # generation bumped
+    ari._play_stream.assert_awaited_once()
+    args = ari._play_stream.await_args.args
+    assert args[0] == "ch-1" and args[2] == 2  # channel_id, gen
+    vad.reset.assert_called_once()

@@ -24,6 +24,15 @@ class AriClient:
     AUDIO_QUEUE_MAXSIZE = 100
     RTP_BIND_ATTEMPTS = 50
 
+    # States from which a caller may barge in. PROCESSING is included because
+    # in the streaming pipeline the PROCESSING->first-chunk window lasts
+    # seconds; the caller must be able to interrupt mid-generation.
+    _INTERRUPTIBLE_STATES = (
+        SessionState.LISTENING,
+        SessionState.SPEAKING,
+        SessionState.PROCESSING,
+    )
+
     def __init__(self, settings: Settings, pipeline: VoicePipeline) -> None:
         self._s = settings
         self._pipeline = pipeline
@@ -32,6 +41,7 @@ class AriClient:
         self._vad_buffers: dict[str, VadBuffer] = {}
         self._playback_tasks: dict[str, asyncio.Task] = {}
         self._audio_queues: dict[str, asyncio.Queue[bytes]] = {}
+        self._out_queues: dict[str, asyncio.Queue] = {}
         self._consumer_tasks: dict[str, asyncio.Task] = {}
         # Per-call turn lock + monotonically increasing generation id. The lock
         # serializes the cancel-playback / process-turn / start-playback
@@ -184,6 +194,7 @@ class AriClient:
             if task and not task.done():
                 task.cancel()
         self._audio_queues.pop(channel_id, None)
+        self._out_queues.pop(channel_id, None)
         self._turn_locks.pop(channel_id, None)
         self._generation.pop(channel_id, None)
         self._vad_buffers.pop(channel_id, None)
@@ -217,12 +228,61 @@ class AriClient:
         except asyncio.CancelledError:
             pass
 
+    async def _play_stream(self, channel_id, session, gen, pcm) -> None:
+        """Drive a streaming turn: feed pipeline aLaw chunks into the RTP
+        chunk drain, entering SPEAKING on the first chunk. A supervising
+        TaskGroup owns producer (pipeline) + consumer (RTP drain); a single
+        cancel on barge-in tears both down."""
+        rtp = self._rtp_servers.get(channel_id)
+        if not rtp:
+            return
+        if self._generation.get(channel_id) != gen:
+            return
+
+        out: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self._out_queues[channel_id] = out
+        first = {"seen": False}
+
+        async def produce():
+            try:
+                async for alaw in self._pipeline.process_turn_stream(session, pcm):
+                    if self._generation.get(channel_id) != gen:
+                        break
+                    if not first["seen"]:
+                        first["seen"] = True
+                        if session.state == SessionState.PROCESSING:
+                            session.transition(SessionState.SPEAKING)
+                    await out.put(alaw)
+            finally:
+                await out.put(None)  # sentinel
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(produce())
+                tg.create_task(rtp.stream_audio_chunks(out))
+        except* Exception:
+            log.exception("streaming turn failed for %s", channel_id)
+        finally:
+            self._out_queues.pop(channel_id, None)
+
+        # Return to LISTENING if still current. Cover both SPEAKING (audio
+        # emitted) and PROCESSING (turn yielded nothing) so the FSM never
+        # strands the call mid-turn.
+        if self._generation.get(channel_id) == gen and session.state in (
+            SessionState.SPEAKING,
+            SessionState.PROCESSING,
+        ):
+            session.transition(SessionState.LISTENING)
+            vad = self._vad_buffers.get(channel_id)
+            if vad:
+                vad.reset()
+
     async def _on_audio(self, channel_id: str, alaw_payload: bytes) -> None:
         session = self._sessions.get(channel_id)
         if not session:
             return
 
-        if session.state not in (SessionState.LISTENING, SessionState.SPEAKING):
+        if session.state not in self._INTERRUPTIBLE_STATES:
             return
 
         vad = self._vad_buffers.get(channel_id)
@@ -241,7 +301,7 @@ class AriClient:
             return
         async with lock:
             # State may have advanced while we waited for the lock.
-            if session.state not in (SessionState.LISTENING, SessionState.SPEAKING):
+            if session.state not in self._INTERRUPTIBLE_STATES:
                 return
 
             # Bump the generation: any in-flight playback for the prior
@@ -250,21 +310,24 @@ class AriClient:
             gen = self._generation.get(channel_id, 0) + 1
             self._generation[channel_id] = gen
 
+            # Tear down the in-flight turn (streaming producer chain or a
+            # greeting playback). The bumped generation already neutralizes any
+            # late chunk; the cancel stops the work immediately.
             task = self._playback_tasks.pop(channel_id, None)
             if task and not task.done():
                 task.cancel()
 
-            if session.state == SessionState.SPEAKING:
+            # Move back to LISTENING before the new turn enters PROCESSING.
+            # Both SPEAKING and the now-interruptible PROCESSING are valid
+            # sources for this transition.
+            if session.state in (SessionState.SPEAKING, SessionState.PROCESSING):
                 session.transition(SessionState.LISTENING)
             vad.reset()
 
-            response_alaw = await self._pipeline.process_turn(session, speech)
-
-            # If a newer barge-in superseded us during synthesis, drop the
-            # stale audio instead of playing it over the live turn.
-            if self._generation.get(channel_id) != gen:
-                return
-            task = asyncio.create_task(self._play_audio(channel_id, response_alaw, session, gen))
+            # Streaming turn: process_turn_stream owns PROCESSING entry,
+            # _play_stream drives SPEAKING (first chunk) -> LISTENING. The
+            # stale-generation guard now lives inside _play_stream.
+            task = asyncio.create_task(self._play_stream(channel_id, session, gen, speech))
             self._playback_tasks[channel_id] = task
 
     async def _create_external_media(self, channel_id: str, rtp_port: int) -> str:
