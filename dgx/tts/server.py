@@ -144,7 +144,12 @@ def synthesize_stream(req: SpeechRequest):
             language=req.language,
             chunk_size=8,  # ~667ms audio per chunk; tune later
         ):
-            yield np.asarray(audio_chunk).astype("<i2").tobytes()
+            arr = np.asarray(audio_chunk)
+            if np.issubdtype(arr.dtype, np.floating):
+                # Normalized float [-1, 1] → int16 PCM (mirror soundfile's WAV scaling).
+                # Direct astype("<i2") would truncate every in-range sample to 0 → silence.
+                arr = np.clip(arr, -1.0, 1.0) * 32767.0
+            yield arr.astype("<i2").tobytes()
 
     return StreamingResponse(gen(), media_type="application/octet-stream")
 
