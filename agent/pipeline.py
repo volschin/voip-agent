@@ -1,6 +1,8 @@
+import asyncio
 import io
 import logging
 import wave
+from contextlib import suppress
 
 import numpy as np
 
@@ -119,28 +121,52 @@ class VoicePipeline:
 
         seg = SentenceSegmenter()
         parts: list[str] = []
-        tool_round = {"hit": False}
+
+        # Drive the LLM stream from a producer task feeding a queue. A tool
+        # round signals via on_tool_round *before* the producer awaits dispatch
+        # + the second LLM request, so the consumer below can emit the filler
+        # immediately during that latency window — a generator cannot yield
+        # from the synchronous callback, hence the queue hand-off.
+        queue: asyncio.Queue = asyncio.Queue()
 
         def _on_tool_round() -> None:
-            tool_round["hit"] = True
+            queue.put_nowait(("tool_round", None))
 
+        async def _produce() -> None:
+            try:
+                async for token in self._llm_stream(
+                    session.history, session.caller_id, on_tool_round=_on_tool_round
+                ):
+                    await queue.put(("token", token))
+                await queue.put(("done", None))
+            except Exception:
+                log.exception("LLM stream failed")
+                await queue.put(("error", None))
+
+        producer = asyncio.create_task(_produce())
+        filler_played = False
         try:
-            async for token in self._llm_stream(
-                session.history, session.caller_id, on_tool_round=_on_tool_round
-            ):
-                # Play filler once, the first time a tool round is signalled.
-                if tool_round["hit"] and tool_round.get("filler_played") is not True:
-                    tool_round["filler_played"] = True
-                    async for c in self._tts_alaw_chunks(FILLER_TEXT):
-                        yield c
-                parts.append(token)
-                for sentence in seg.feed(token):
+            while True:
+                kind, payload = await queue.get()
+                if kind == "tool_round":
+                    if not filler_played:
+                        filler_played = True
+                        async for c in self._tts_alaw_chunks(FILLER_TEXT):
+                            yield c
+                    continue
+                if kind == "error":
+                    raise RuntimeError("llm stream failed")
+                if kind == "done":
+                    tail = seg.flush()
+                    if tail:
+                        async for c in self._tts_alaw_chunks(tail):
+                            yield c
+                    break
+                # kind == "token"
+                parts.append(payload)
+                for sentence in seg.feed(payload):
                     async for c in self._tts_alaw_chunks(sentence):
                         yield c
-            tail = seg.flush()
-            if tail:
-                async for c in self._tts_alaw_chunks(tail):
-                    yield c
         except Exception:
             log.exception("LLM/TTS failed mid-stream")
             # Leave the user turn in history (the model saw it); do not append
@@ -148,5 +174,10 @@ class VoicePipeline:
             async for c in self._tts_alaw_chunks(FALLBACK_RECOVERY):
                 yield c
             return
+        finally:
+            if not producer.done():
+                producer.cancel()
+            with suppress(asyncio.CancelledError):
+                await producer
 
         session.history.append({"role": "assistant", "content": "".join(parts)})
