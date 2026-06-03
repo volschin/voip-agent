@@ -1,5 +1,6 @@
 import json
 import logging
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
@@ -82,6 +83,39 @@ TOOLS = [
 ]
 
 
+class _ToolCallAccumulator:
+    """Reassemble streamed tool_calls deltas (fragmented by index)."""
+
+    def __init__(self) -> None:
+        self._calls: dict[int, dict] = {}
+
+    @property
+    def started(self) -> bool:
+        return bool(self._calls)
+
+    def add(self, deltas: list[dict]) -> None:
+        for d in deltas:
+            i = d.get("index", 0)
+            call = self._calls.setdefault(
+                i, {"id": "", "type": "function",
+                     "function": {"name": "", "arguments": ""}}
+            )
+            if d.get("id"):
+                call["id"] = d["id"]
+            fn = d.get("function", {})
+            if fn.get("name"):
+                call["function"]["name"] += fn["name"]
+            if fn.get("arguments"):
+                call["function"]["arguments"] += fn["arguments"]
+
+    def to_message(self) -> dict:
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [self._calls[i] for i in sorted(self._calls)],
+        }
+
+
 class LlmClient:
     def __init__(
         self,
@@ -157,6 +191,73 @@ class LlmClient:
                     }
                 )
         return _FALLBACK_MSG
+
+    async def complete_stream(
+        self,
+        messages: list[dict],
+        caller_id: str | None = None,
+        on_tool_round: Callable[[], None] | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream the final assistant answer as text deltas.
+
+        Tool rounds are resolved internally (not yielded). Same auth/cap as
+        complete(): tools are offered only to authorized callers and only
+        below the round cap. on_tool_round fires once when a tool round is
+        entered, so the caller can play a filler utterance during dispatch.
+        """
+        authorized = self._is_authorized(caller_id)
+        full_messages = [
+            {"role": "system", "content": self._system_prompt},
+            *messages,
+        ]
+        for round_idx in range(self._max_tool_rounds + 1):
+            tools_allowed = authorized and round_idx < self._max_tool_rounds
+            payload = {"model": self._model, "messages": full_messages, "stream": True}
+            if tools_allowed:
+                payload["tools"] = TOOLS
+
+            content_parts: list[str] = []
+            tool_calls = _ToolCallAccumulator()
+            async with self._client.stream(
+                "POST",
+                f"{self._base_url}/v1/chat/completions",
+                json=payload,
+                timeout=60.0,
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    delta = json.loads(data)["choices"][0]["delta"]
+                    if delta.get("content"):
+                        # Only stream text out when no tool round is pending —
+                        # otherwise this is an intermediate tool turn.
+                        if tools_allowed and tool_calls.started:
+                            pass
+                        else:
+                            content_parts.append(delta["content"])
+                            yield delta["content"]
+                    if tools_allowed and delta.get("tool_calls"):
+                        tool_calls.add(delta["tool_calls"])
+
+            if not tools_allowed or not tool_calls.started:
+                return  # final answer already yielded
+
+            # Tool round: notify (for filler) and dispatch, then loop.
+            if on_tool_round is not None:
+                on_tool_round()
+            assistant_msg = tool_calls.to_message()
+            full_messages.append(assistant_msg)
+            for tc in assistant_msg["tool_calls"]:
+                result = await self._dispatch_safe(tc)
+                full_messages.append(
+                    {"role": "tool", "tool_call_id": tc["id"], "content": result}
+                )
+        # Cap reached without a text answer.
+        yield _FALLBACK_MSG
 
     async def _dispatch_safe(self, tool_call: dict) -> str:
         name = tool_call["function"]["name"]

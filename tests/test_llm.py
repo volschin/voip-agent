@@ -205,3 +205,62 @@ async def test_malformed_tool_arguments_do_not_crash(llm):
     result = await llm.complete([{"role": "user", "content": "x"}], caller_id=TRUSTED)
     assert result == "recovered"
     llm._rag.assert_not_awaited()
+
+
+def _sse(*events: str) -> bytes:
+    # ASSUMPTION: OpenAI/vLLM SSE framing `data: {json}\n\n`, terminated by
+    # `data: [DONE]`. Replace with a captured dgx-spark:8000 stream once
+    # reachable (see plan wire-contract caveat).
+    body = "".join(f"data: {e}\n\n" for e in events) + "data: [DONE]\n\n"
+    return body.encode()
+
+
+def _text_delta(content: str) -> str:
+    return (
+        '{"choices":[{"delta":{"content":' + f'"{content}"' + '},"finish_reason":null}]}'
+    )
+
+
+def _make_client(handler, **over):
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    return LlmClient(
+        base_url="http://llm:8000",
+        model="hermes",
+        system_prompt="prompt",
+        rag=None,
+        calendar=None,
+        trusted_callers={"+49123"},
+        client=client,
+        **over,
+    )
+
+
+async def test_complete_stream_yields_text_deltas():
+    def handler(request):
+        return httpx.Response(200, stream=httpx.ByteStream(
+            _sse(_text_delta("Hallo"), _text_delta(" Welt"))
+        ))
+
+    llm = _make_client(handler)
+    out = [t async for t in llm.complete_stream(
+        [{"role": "user", "content": "hi"}], caller_id="+49123")]
+    assert "".join(out) == "Hallo Welt"
+    await llm._client.aclose()
+
+
+async def test_complete_stream_unauthorized_caller_gets_no_tools():
+    # The request payload must NOT include "tools" for an untrusted caller.
+    seen = {}
+
+    def handler(request):
+        import json as _j
+
+        seen["payload"] = _j.loads(request.content)
+        return httpx.Response(200, stream=httpx.ByteStream(_sse(_text_delta("ok"))))
+
+    llm = _make_client(handler)
+    _ = [t async for t in llm.complete_stream(
+        [{"role": "user", "content": "hi"}], caller_id="+49999")]  # not trusted
+    assert "tools" not in seen["payload"]
+    await llm._client.aclose()
