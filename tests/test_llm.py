@@ -146,7 +146,10 @@ async def test_calendar_write_enabled_needs_confirmation(settings):
 
 
 @respx.mock
-async def test_calendar_write_enabled_and_confirmed_creates(settings):
+async def test_calendar_write_first_call_only_proposes(settings):
+    # The first create_event call (even with confirmed=true) must NOT write —
+    # it only records a pending proposal to be read back. The model-set
+    # `confirmed` flag is no longer the boundary.
     llm = _make_llm(settings, calendar_write_enabled=True)
     respx.post("http://llm:8000/v1/chat/completions").mock(
         side_effect=[
@@ -157,12 +160,178 @@ async def test_calendar_write_enabled_and_confirmed_creates(settings):
                     {"title": "X", "start": "s", "end": "e", "confirmed": True},
                 ),
             ),
-            httpx.Response(200, json=_chat_response("angelegt")),
+            httpx.Response(200, json=_chat_response("Soll ich den Termin anlegen?")),
         ]
     )
-    result = await llm.complete([{"role": "user", "content": "Termin"}], caller_id=TRUSTED)
-    assert result == "angelegt"
+    result = await llm.complete(
+        [{"role": "user", "content": "Termin morgen 10 Uhr"}], caller_id=TRUSTED
+    )
+    assert result == "Soll ich den Termin anlegen?"
+    llm._calendar.create_event.assert_not_awaited()
+    assert TRUSTED in llm._pending_writes  # proposal recorded
+
+
+@respx.mock
+async def test_calendar_write_commits_after_new_turn_confirms(settings):
+    # Turn 1 proposes; turn 2 (a new user turn that reads as agreement) commits
+    # the *same* event. This is the deterministic, conversation-advanced gate.
+    llm = _make_llm(settings, calendar_write_enabled=True)
+    event_args = {"title": "X", "start": "s", "end": "e"}
+
+    # Turn 1: propose.
+    respx.post("http://llm:8000/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(200, json=_tool_call_response("calendar_create_event", event_args)),
+            httpx.Response(200, json=_chat_response("Ich lege X von s bis e an. Richtig?")),
+        ]
+    )
+    turn1 = [{"role": "user", "content": "Termin X anlegen"}]
+    await llm.complete(turn1, caller_id=TRUSTED)
+    llm._calendar.create_event.assert_not_awaited()
+
+    # Turn 2: history has grown by an assistant reply + a new affirmative user turn.
+    respx.post("http://llm:8000/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(200, json=_tool_call_response("calendar_create_event", event_args)),
+            httpx.Response(200, json=_chat_response("Angelegt.")),
+        ]
+    )
+    turn2 = [
+        *turn1,
+        {"role": "assistant", "content": "Ich lege X von s bis e an. Richtig?"},
+        {"role": "user", "content": "Ja, genau"},
+    ]
+    result = await llm.complete(turn2, caller_id=TRUSTED)
+    assert result == "Angelegt."
     llm._calendar.create_event.assert_awaited_once()
+    assert TRUSTED not in llm._pending_writes  # cleared after commit
+
+
+@respx.mock
+async def test_calendar_write_blocked_when_confirmation_in_same_turn(settings):
+    # Guards the same-turn false-positive: the request itself says "Ja", and the
+    # model tries to propose+write in one turn. The conversation-advanced gate
+    # must still block the write (no new user turn has arrived).
+    llm = _make_llm(settings, calendar_write_enabled=True)
+    event_args = {"title": "X", "start": "s", "end": "e"}
+    respx.post("http://llm:8000/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(200, json=_tool_call_response("calendar_create_event", event_args)),
+            httpx.Response(200, json=_tool_call_response("calendar_create_event", event_args)),
+            httpx.Response(200, json=_chat_response("Bitte bestätigen.")),
+        ]
+    )
+    result = await llm.complete(
+        [{"role": "user", "content": "Ja, trag mir morgen 10 Uhr X ein"}], caller_id=TRUSTED
+    )
+    assert result == "Bitte bestätigen."
+    llm._calendar.create_event.assert_not_awaited()
+
+
+@respx.mock
+async def test_calendar_write_blocked_by_negation_with_affirmative_substring(settings):
+    # The next turn rejects but contains an affirmative substring ("passt"):
+    # "nein, das passt nicht". Negation must veto consent — no write.
+    llm = _make_llm(settings, calendar_write_enabled=True)
+    event_args = {"title": "X", "start": "s", "end": "e"}
+
+    respx.post("http://llm:8000/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(200, json=_tool_call_response("calendar_create_event", event_args)),
+            httpx.Response(200, json=_chat_response("Richtig?")),
+        ]
+    )
+    turn1 = [{"role": "user", "content": "Termin X"}]
+    await llm.complete(turn1, caller_id=TRUSTED)
+
+    respx.post("http://llm:8000/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(200, json=_tool_call_response("calendar_create_event", event_args)),
+            httpx.Response(200, json=_chat_response("Okay, was möchten Sie ändern?")),
+        ]
+    )
+    turn2 = [
+        *turn1,
+        {"role": "assistant", "content": "Richtig?"},
+        {"role": "user", "content": "Nein, das passt nicht"},
+    ]
+    await llm.complete(turn2, caller_id=TRUSTED)
+    llm._calendar.create_event.assert_not_awaited()
+
+
+@respx.mock
+async def test_calendar_write_stale_proposal_does_not_commit_late(settings):
+    # A proposal that wasn't confirmed in the immediately following turn must not
+    # silently commit several turns later on an unrelated affirmation.
+    llm = _make_llm(settings, calendar_write_enabled=True)
+    event_args = {"title": "X", "start": "s", "end": "e"}
+
+    respx.post("http://llm:8000/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(200, json=_tool_call_response("calendar_create_event", event_args)),
+            httpx.Response(200, json=_chat_response("Richtig?")),
+        ]
+    )
+    turn1 = [{"role": "user", "content": "Termin X"}]
+    await llm.complete(turn1, caller_id=TRUSTED)
+
+    # Two unrelated turns pass, then the model re-emits the same event on a turn
+    # that is no longer turn+1 relative to the proposal.
+    respx.post("http://llm:8000/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(200, json=_tool_call_response("calendar_create_event", event_args)),
+            httpx.Response(200, json=_chat_response("Soll ich das anlegen?")),
+        ]
+    )
+    turn3 = [
+        *turn1,
+        {"role": "assistant", "content": "Richtig?"},
+        {"role": "user", "content": "Wie ist das Wetter?"},
+        {"role": "assistant", "content": "..."},
+        {"role": "user", "content": "Ja, gerne"},
+    ]
+    await llm.complete(turn3, caller_id=TRUSTED)
+    llm._calendar.create_event.assert_not_awaited()  # not the next turn -> re-propose
+
+
+@respx.mock
+async def test_calendar_write_correction_reproposes(settings):
+    # A new turn that changes the event params must re-propose, never commit the
+    # stale pending event.
+    llm = _make_llm(settings, calendar_write_enabled=True)
+
+    respx.post("http://llm:8000/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json=_tool_call_response(
+                    "calendar_create_event", {"title": "X", "start": "s", "end": "e"}
+                ),
+            ),
+            httpx.Response(200, json=_chat_response("Richtig?")),
+        ]
+    )
+    turn1 = [{"role": "user", "content": "Termin X um 10"}]
+    await llm.complete(turn1, caller_id=TRUSTED)
+
+    respx.post("http://llm:8000/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json=_tool_call_response(
+                    "calendar_create_event", {"title": "X", "start": "s2", "end": "e2"}
+                ),
+            ),
+            httpx.Response(200, json=_chat_response("Neuer Vorschlag, richtig?")),
+        ]
+    )
+    turn2 = [
+        *turn1,
+        {"role": "assistant", "content": "Richtig?"},
+        {"role": "user", "content": "Ja, aber lieber 11 Uhr"},
+    ]
+    await llm.complete(turn2, caller_id=TRUSTED)
+    llm._calendar.create_event.assert_not_awaited()  # changed params -> re-propose
 
 
 @respx.mock

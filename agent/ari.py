@@ -24,6 +24,13 @@ class AriClient:
     AUDIO_QUEUE_MAXSIZE = 100
     RTP_BIND_ATTEMPTS = 50
 
+    # Prefix for the ExternalMedia channels we create. Asterisk routes such a
+    # channel into the same Stasis app, firing a second StasisStart — without a
+    # filter that would recursively spawn a call (session/RTP/bridge) for our
+    # own media leg. Shared by the StasisStart filter and _create_external_media
+    # so the two can never drift.
+    _EXT_PREFIX = "ext-"
+
     # States from which a caller may barge in. PROCESSING is included because
     # in the streaming pipeline the PROCESSING->first-chunk window lasts
     # seconds; the caller must be able to interrupt mid-generation.
@@ -101,44 +108,65 @@ class AriClient:
         t = event.get("type")
         if t == "StasisStart":
             ch = event["channel"]
-            asyncio.create_task(self._setup_call(ch["id"], ch["caller"]["number"]))
+            ch_id = ch["id"]
+            # Our own ExternalMedia leg re-enters Stasis; ignore it or we
+            # recurse (new session/RTP/bridge for the media channel).
+            if ch_id.startswith(self._EXT_PREFIX):
+                log.debug("Ignoring StasisStart for ExternalMedia channel %s", ch_id)
+                return
+            caller_id = ch.get("caller", {}).get("number", "")
+            asyncio.create_task(self._setup_call(ch_id, caller_id))
         elif t == "StasisEnd":
             ch_id = event["channel"]["id"]
             await self._teardown_call(ch_id)
 
     async def _setup_call(self, channel_id: str, caller_id: str) -> None:
-        session = CallSession(
-            call_id=channel_id,
-            caller_id=caller_id,
-            history=[],
-            created_at=datetime.now(timezone.utc),
-        )
-        self._sessions[channel_id] = session
+        # Transactional: any failure after we start registering per-call state
+        # must roll the whole thing back, otherwise a half-built call leaks a
+        # session, RTP socket, and consumer task. _setup_call runs in a detached
+        # task, so we also can't rely on a caller to observe the exception.
+        try:
+            session = CallSession(
+                call_id=channel_id,
+                caller_id=caller_id,
+                history=[],
+                created_at=datetime.now(timezone.utc),
+            )
+            self._sessions[channel_id] = session
 
-        # Bind the RTP server, skipping ports that are already in use instead of
-        # assuming the next counter value is free (the old code wrapped the
-        # counter without checking live binds, so a long-lived call could
-        # collide with a reused port).
-        rtp_server, rtp_port = await self._bind_rtp_server(channel_id)
-        self._rtp_servers[channel_id] = rtp_server
-        self._vad_buffers[channel_id] = VadBuffer()
+            # Bind the RTP server, skipping ports that are already in use instead
+            # of assuming the next counter value is free (the old code wrapped the
+            # counter without checking live binds, so a long-lived call could
+            # collide with a reused port).
+            rtp_server, rtp_port = await self._bind_rtp_server(channel_id)
+            self._rtp_servers[channel_id] = rtp_server
+            self._vad_buffers[channel_id] = VadBuffer()
 
-        # Single consumer drains a bounded queue, so per-packet work no longer
-        # spawns a task per datagram (~50/s/call) and exceptions surface in one
-        # place. The datagram callback only enqueues.
-        self._audio_queues[channel_id] = asyncio.Queue(maxsize=self.AUDIO_QUEUE_MAXSIZE)
-        self._turn_locks[channel_id] = asyncio.Lock()
-        self._generation[channel_id] = 0
-        self._consumer_tasks[channel_id] = asyncio.create_task(self._audio_consumer(channel_id))
+            # Single consumer drains a bounded queue, so per-packet work no longer
+            # spawns a task per datagram (~50/s/call) and exceptions surface in one
+            # place. The datagram callback only enqueues.
+            self._audio_queues[channel_id] = asyncio.Queue(maxsize=self.AUDIO_QUEUE_MAXSIZE)
+            self._turn_locks[channel_id] = asyncio.Lock()
+            self._generation[channel_id] = 0
+            self._consumer_tasks[channel_id] = asyncio.create_task(
+                self._audio_consumer(channel_id)
+            )
 
-        ext_channel_id = await self._create_external_media(channel_id, rtp_port)
-        await self._bridge_channels(channel_id, ext_channel_id)
+            ext_channel_id = await self._create_external_media(channel_id, rtp_port)
+            await self._bridge_channels(channel_id, ext_channel_id)
 
-        alaw = await self._pipeline.synthesize_alaw(self._s.greeting_text)
-        gen = self._generation[channel_id]
-        task = asyncio.create_task(self._play_audio(channel_id, alaw, session, gen))
-        self._playback_tasks[channel_id] = task
-        log.info("Call %s from %s ready", channel_id, caller_id)
+            alaw = await self._pipeline.synthesize_alaw(self._s.greeting_text)
+            gen = self._generation[channel_id]
+            task = asyncio.create_task(self._play_audio(channel_id, alaw, session, gen))
+            self._playback_tasks[channel_id] = task
+            log.info("Call %s from %s ready", channel_id, caller_id)
+        except Exception:
+            # Local teardown frees session/RTP/consumer/queue (the leaked
+            # resources from the review). It does NOT hang up the Asterisk-side
+            # channels / ext leg — StasisEnd will fire its own _teardown_call
+            # when Asterisk tears the channel down.
+            log.exception("Call setup failed for %s; tearing down", channel_id)
+            await self._teardown_call(channel_id)
 
     def _next_rtp_port(self) -> int:
         port = self._rtp_port_counter
@@ -339,7 +367,7 @@ class AriClient:
                 "app": self._s.ari_app_name,
                 "external_host": f"{self._s.rtp_advertise_host}:{rtp_port}",
                 "format": "alaw",
-                "channelId": f"ext-{channel_id}",
+                "channelId": f"{self._EXT_PREFIX}{channel_id}",
             },
             timeout=5.0,
         )
