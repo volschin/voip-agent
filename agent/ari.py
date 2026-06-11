@@ -148,9 +148,7 @@ class AriClient:
             self._audio_queues[channel_id] = asyncio.Queue(maxsize=self.AUDIO_QUEUE_MAXSIZE)
             self._turn_locks[channel_id] = asyncio.Lock()
             self._generation[channel_id] = 0
-            self._consumer_tasks[channel_id] = asyncio.create_task(
-                self._audio_consumer(channel_id)
-            )
+            self._consumer_tasks[channel_id] = asyncio.create_task(self._audio_consumer(channel_id))
 
             ext_channel_id = await self._create_external_media(channel_id, rtp_port)
             await self._bridge_channels(channel_id, ext_channel_id)
