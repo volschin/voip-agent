@@ -78,6 +78,60 @@ async def test_unknown_event_ignored(ari):
     # no exception
 
 
+async def test_stasis_start_ignores_external_media_channel(ari):
+    # Our own ExternalMedia leg re-enters Stasis with an ext- id. It must NOT
+    # spawn a call, or each call recursively creates another session/RTP/bridge.
+    called = []
+
+    async def fake_setup(ch_id, caller_id):
+        called.append(ch_id)
+
+    ari._setup_call = fake_setup
+    await ari._handle_event(
+        {
+            "type": "StasisStart",
+            "channel": {"id": f"{ari._EXT_PREFIX}ch-1", "caller": {"number": ""}},
+            "application": "voip-agent",
+        }
+    )
+    await asyncio.sleep(0)
+    assert called == []
+
+
+async def test_stasis_start_tolerates_missing_caller_number(ari):
+    # ExternalMedia / originated channels may lack caller.number; must not raise.
+    called = []
+
+    async def fake_setup(ch_id, caller_id):
+        called.append((ch_id, caller_id))
+
+    ari._setup_call = fake_setup
+    await ari._handle_event({"type": "StasisStart", "channel": {"id": "ch-9"}})
+    await asyncio.sleep(0)
+    assert called == [("ch-9", "")]
+
+
+async def test_setup_call_rolls_back_on_failure(ari):
+    # A failure after per-call state is registered must tear everything back
+    # down — no leaked session, RTP socket, queue, or consumer task.
+    rtp = MagicMock()
+
+    async def fake_bind(channel_id):
+        return rtp, 5002
+
+    ari._bind_rtp_server = fake_bind
+    ari._create_external_media = AsyncMock(side_effect=RuntimeError("boom"))
+
+    await ari._setup_call("ch-1", "+49")
+
+    assert "ch-1" not in ari._sessions
+    assert "ch-1" not in ari._rtp_servers
+    assert "ch-1" not in ari._audio_queues
+    assert "ch-1" not in ari._consumer_tasks
+    assert "ch-1" not in ari._vad_buffers
+    rtp.close.assert_called_once()
+
+
 # --- #9 per-call queue + consumer ---------------------------------------
 
 
