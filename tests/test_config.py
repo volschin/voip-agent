@@ -80,3 +80,11 @@ def test_settings_load_defaults_and_overrides(monkeypatch):
     assert s.rtp_port == 5001
     assert s.llm_model == "hermes"
     assert s.greeting_text == "Hi!"
+
+
+def test_turn_detection_defaults(settings):
+    assert settings.turn_detection_enabled is False
+    assert settings.turn_detector_url == "http://dgx-spark:8004"
+    assert settings.turn_complete_threshold == 0.5
+    assert settings.turn_classify_timeout_ms == 150
+    assert settings.turn_vad_silence_ms == 200

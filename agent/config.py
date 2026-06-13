@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     def trusted_caller_set(self) -> frozenset[str]:
         return frozenset(c.strip() for c in self.trusted_callers.split(",") if c.strip())
 
+    # Turn detection (Smart Turn v2 on DGX). Fail closed: off by default so the
+    # legacy single-buffer 800ms silence path is unchanged until explicitly
+    # enabled AND German precision has been verified live.
+    turn_detection_enabled: bool = False
+    turn_detector_url: str = "http://dgx-spark:8004"
+    turn_complete_threshold: float = 0.5  # prob >= this => caller's turn is complete
+    turn_classify_timeout_ms: int = 150  # latency budget; exceed => degrade to flush
+    turn_vad_silence_ms: int = 200  # endpoint-candidate floor for the turn-end VAD
+
     # Agent behaviour
     caller_id: str = "+49123456789"
     greeting_text: str = "Hallo, wie kann ich Ihnen helfen?"
