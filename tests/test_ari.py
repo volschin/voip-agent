@@ -324,3 +324,31 @@ async def test_bargein_during_processing_cancels_and_starts_stream(ari):
     args = ari._play_stream.await_args.args
     assert args[0] == "ch-1" and args[2] == 2  # channel_id, gen
     vad.reset.assert_called_once()
+
+
+@pytest.fixture
+def ari_td(settings):
+    settings.turn_detection_enabled = True
+    pipeline = AsyncMock(return_value=b"\xd5" * 160)
+    td = AsyncMock()
+    ari = AriClient(settings=settings, pipeline=pipeline, turn_detector=td)
+    return ari, td
+
+
+def test_turn_active_reflects_flag_and_detector(ari_td, settings):
+    ari, _td = ari_td
+    assert ari._turn_active() is True
+    # No detector => inactive even with the flag on.
+    settings.turn_detection_enabled = True
+    ari_no_td = AriClient(settings=settings, pipeline=AsyncMock(), turn_detector=None)
+    assert ari_no_td._turn_active() is False
+
+
+async def test_teardown_pops_bargein_buffer(ari):
+    session = CallSession(
+        call_id="ch-1", caller_id="+49", history=[], created_at=datetime.now(timezone.utc)
+    )
+    ari._sessions["ch-1"] = session
+    ari._bargein_buffers["ch-1"] = MagicMock()
+    await ari._teardown_call("ch-1")
+    assert "ch-1" not in ari._bargein_buffers

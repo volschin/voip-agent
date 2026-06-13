@@ -13,6 +13,7 @@ from agent.config import Settings
 from agent.pipeline import VoicePipeline
 from agent.rtp import RtpServer
 from agent.session import CallSession, SessionState
+from agent.turn_detector import TurnDetectorClient
 
 log = logging.getLogger(__name__)
 
@@ -40,12 +41,22 @@ class AriClient:
         SessionState.PROCESSING,
     )
 
-    def __init__(self, settings: Settings, pipeline: VoicePipeline) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        pipeline: VoicePipeline,
+        turn_detector: TurnDetectorClient | None = None,
+    ) -> None:
         self._s = settings
         self._pipeline = pipeline
+        self._turn_detector = turn_detector
         self._sessions: dict[str, CallSession] = {}
         self._rtp_servers: dict[str, RtpServer] = {}
         self._vad_buffers: dict[str, VadBuffer] = {}
+        # Second buffer used only when turn detection is active: barge-in
+        # (SPEAKING/PROCESSING) keeps the legacy 800ms floor here while the
+        # primary buffer runs the lowered turn-end floor.
+        self._bargein_buffers: dict[str, VadBuffer] = {}
         self._playback_tasks: dict[str, asyncio.Task] = {}
         self._audio_queues: dict[str, asyncio.Queue[bytes]] = {}
         self._out_queues: dict[str, asyncio.Queue] = {}
@@ -66,6 +77,9 @@ class AriClient:
         if self._http is None:
             self._http = httpx.AsyncClient()
         return self._http
+
+    def _turn_active(self) -> bool:
+        return self._turn_detector is not None and self._s.turn_detection_enabled
 
     async def aclose(self) -> None:
         self._running = False
@@ -140,7 +154,13 @@ class AriClient:
             # collide with a reused port).
             rtp_server, rtp_port = await self._bind_rtp_server(channel_id)
             self._rtp_servers[channel_id] = rtp_server
-            self._vad_buffers[channel_id] = VadBuffer()
+            if self._turn_active():
+                self._vad_buffers[channel_id] = VadBuffer(
+                    silence_threshold_ms=self._s.turn_vad_silence_ms
+                )
+                self._bargein_buffers[channel_id] = VadBuffer()
+            else:
+                self._vad_buffers[channel_id] = VadBuffer()
 
             # Single consumer drains a bounded queue, so per-packet work no longer
             # spawns a task per datagram (~50/s/call) and exceptions surface in one
@@ -224,6 +244,7 @@ class AriClient:
         self._turn_locks.pop(channel_id, None)
         self._generation.pop(channel_id, None)
         self._vad_buffers.pop(channel_id, None)
+        self._bargein_buffers.pop(channel_id, None)
         session = self._sessions.pop(channel_id, None)
         if session:
             session.transition(SessionState.ENDED)
