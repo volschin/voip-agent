@@ -35,6 +35,17 @@ class TtsClient:
 
         Buffers across reads so each yielded array is whole int16 samples
         (a chunk boundary can fall mid-sample on the wire).
+
+        Wire contract is pinned to the *deployed* qwen3-tts-server, not the
+        OpenAI standard. Verified against its live /openapi.json: streaming is a
+        custom POST /v1/audio/speech/stream subpath returning raw s16le mono
+        24kHz (application/octet-stream, chunked, no RIFF header, no
+        x-audio-sample-rate header) — so we read raw int16 and the 24kHz rate is
+        hardcoded downstream (resample_24k_to_8k). The server's SpeechRequest has
+        no `stream`/`stream_format`/`response_format=pcm` fields; sending the
+        OpenAI-canonical body (stream_format on the base endpoint, pcm format)
+        would 422/break here. Migrate to stream_format once the server adopts it:
+        https://github.com/AEON-7/qwen3-tts-server/issues/1
         """
         async with self._client.stream(
             "POST",
