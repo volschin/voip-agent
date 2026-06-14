@@ -84,7 +84,7 @@ def test_settings_load_defaults_and_overrides(monkeypatch):
 
 def test_turn_detection_defaults(settings):
     assert settings.turn_detection_enabled is False
-    assert settings.turn_complete_threshold == 0.5
+    assert settings.turn_complete_threshold == 0.70
     assert settings.turn_vad_silence_ms == 200
     assert settings.turn_model_repo == "pipecat-ai/smart-turn-v3"
     assert settings.turn_model_filename == "smart-turn-v3.2-cpu.onnx"

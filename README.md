@@ -130,7 +130,7 @@ Expected:
 | `LLM_MODEL` | `nous-hermes` | Model name passed to `/v1/chat/completions` |
 | `EMBEDDING_BASE_URL` | `http://dgx-spark:8003` | multilingual-e5-large |
 | `TURN_DETECTION_ENABLED` | `false` | Enable Smart Turn v3 in-process end-of-turn gating (fail-closed; verify German live first) |
-| `TURN_COMPLETE_THRESHOLD` | `0.5` | `prob` ≥ this ⇒ turn complete |
+| `TURN_COMPLETE_THRESHOLD` | `0.70` | `prob` ≥ this ⇒ turn complete (0.70 biases toward fewer cut-ins on telephony) |
 | `TURN_VAD_SILENCE_MS` | `200` | Lowered VAD silence floor for the turn-end candidate |
 | `TURN_MODEL_REPO` | `pipecat-ai/smart-turn-v3` | HF repo for the ONNX model |
 | `TURN_MODEL_FILENAME` | `smart-turn-v3.2-cpu.onnx` | Model file (use `-gpu.onnx` with an OpenVINO/CUDA provider) |

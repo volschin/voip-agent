@@ -87,7 +87,11 @@ class Settings(BaseSettings):
     # explicitly enabled AND German precision has been verified live. When
     # enabled the model is downloaded once (revision-pinned) and run on CPU.
     turn_detection_enabled: bool = False
-    turn_complete_threshold: float = 0.5  # prob >= this => caller's turn is complete
+    # prob >= this => caller's turn is complete. Default 0.70 (not 0.50): on the
+    # telephony 8 kHz aLaw path this lowers false cut-ins (~14.5%->10.6%) at a
+    # small added-wait cost — fewer talk-overs is the right bias for a phone
+    # agent. See docs/research/2026-06-14-smart-turn-german-accuracy.md.
+    turn_complete_threshold: float = 0.70
     turn_vad_silence_ms: int = 200  # endpoint-candidate floor for the turn-end VAD
     turn_model_repo: str = "pipecat-ai/smart-turn-v3"
     turn_model_filename: str = "smart-turn-v3.2-cpu.onnx"
