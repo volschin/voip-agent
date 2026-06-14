@@ -13,6 +13,7 @@ from agent.config import Settings
 from agent.pipeline import VoicePipeline
 from agent.rtp import RtpServer
 from agent.session import CallSession, SessionState
+from agent.turn_detector import TurnDetectorClient
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,10 @@ class AriClient:
     # so the two can never drift.
     _EXT_PREFIX = "ext-"
 
+    # Below this many samples a candidate is too short to be worth a classify
+    # round-trip; flush it (fail toward responding). 1600 = 100 ms at 16 kHz.
+    _MIN_CLASSIFY_SAMPLES = 1600
+
     # States from which a caller may barge in. PROCESSING is included because
     # in the streaming pipeline the PROCESSING->first-chunk window lasts
     # seconds; the caller must be able to interrupt mid-generation.
@@ -40,12 +45,22 @@ class AriClient:
         SessionState.PROCESSING,
     )
 
-    def __init__(self, settings: Settings, pipeline: VoicePipeline) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        pipeline: VoicePipeline,
+        turn_detector: TurnDetectorClient | None = None,
+    ) -> None:
         self._s = settings
         self._pipeline = pipeline
+        self._turn_detector = turn_detector
         self._sessions: dict[str, CallSession] = {}
         self._rtp_servers: dict[str, RtpServer] = {}
         self._vad_buffers: dict[str, VadBuffer] = {}
+        # Second buffer used only when turn detection is active: barge-in
+        # (SPEAKING/PROCESSING) keeps the legacy 800ms floor here while the
+        # primary buffer runs the lowered turn-end floor.
+        self._bargein_buffers: dict[str, VadBuffer] = {}
         self._playback_tasks: dict[str, asyncio.Task] = {}
         self._audio_queues: dict[str, asyncio.Queue[bytes]] = {}
         self._out_queues: dict[str, asyncio.Queue] = {}
@@ -66,6 +81,20 @@ class AriClient:
         if self._http is None:
             self._http = httpx.AsyncClient()
         return self._http
+
+    def _turn_active(self) -> bool:
+        return self._turn_detector is not None and self._s.turn_detection_enabled
+
+    def _reset_vad(self, channel_id: str) -> None:
+        # Reset BOTH per-call buffers. The barge-in buffer accumulates frames
+        # during SPEAKING/PROCESSING; if a caller's short noise never reaches
+        # its silence threshold before playback ends, that partial buffer (with
+        # _in_speech=True) would survive into the next response and a later
+        # silence could flush it as a false barge-in. Clear both on every
+        # return to LISTENING and on every new-turn dispatch.
+        for buf in (self._vad_buffers.get(channel_id), self._bargein_buffers.get(channel_id)):
+            if buf:
+                buf.reset()
 
     async def aclose(self) -> None:
         self._running = False
@@ -140,7 +169,13 @@ class AriClient:
             # collide with a reused port).
             rtp_server, rtp_port = await self._bind_rtp_server(channel_id)
             self._rtp_servers[channel_id] = rtp_server
-            self._vad_buffers[channel_id] = VadBuffer()
+            if self._turn_active():
+                self._vad_buffers[channel_id] = VadBuffer(
+                    silence_threshold_ms=self._s.turn_vad_silence_ms
+                )
+                self._bargein_buffers[channel_id] = VadBuffer()
+            else:
+                self._vad_buffers[channel_id] = VadBuffer()
 
             # Single consumer drains a bounded queue, so per-packet work no longer
             # spawns a task per datagram (~50/s/call) and exceptions surface in one
@@ -224,6 +259,7 @@ class AriClient:
         self._turn_locks.pop(channel_id, None)
         self._generation.pop(channel_id, None)
         self._vad_buffers.pop(channel_id, None)
+        self._bargein_buffers.pop(channel_id, None)
         session = self._sessions.pop(channel_id, None)
         if session:
             session.transition(SessionState.ENDED)
@@ -248,9 +284,7 @@ class AriClient:
             # otherwise a newer turn owns the state and we must not touch it.
             if self._generation.get(channel_id) == gen and session.state == SessionState.SPEAKING:
                 session.transition(SessionState.LISTENING)
-                vad = self._vad_buffers.get(channel_id)
-                if vad:
-                    vad.reset()
+                self._reset_vad(channel_id)
         except asyncio.CancelledError:
             pass
 
@@ -299,9 +333,7 @@ class AriClient:
             SessionState.PROCESSING,
         ):
             session.transition(SessionState.LISTENING)
-            vad = self._vad_buffers.get(channel_id)
-            if vad:
-                vad.reset()
+            self._reset_vad(channel_id)
 
     async def _on_audio(self, channel_id: str, alaw_payload: bytes) -> None:
         session = self._sessions.get(channel_id)
@@ -311,16 +343,36 @@ class AriClient:
         if session.state not in self._INTERRUPTIBLE_STATES:
             return
 
-        vad = self._vad_buffers.get(channel_id)
-        if vad is None:
-            return
-
         pcm_8k = alaw_decode(alaw_payload)
         pcm_16k = resample_8k_to_16k(pcm_8k)
-        speech = vad.add_frame(pcm_16k)
 
-        if speech is None:
-            return
+        if self._turn_active() and session.state == SessionState.LISTENING:
+            # Turn-end path: low VAD floor proposes a candidate, Smart Turn v2
+            # confirms. _gate_turn_end returns the speech to flush, or None to
+            # keep listening (incomplete / state changed mid-classify).
+            vad = self._vad_buffers.get(channel_id)
+            if vad is None:
+                return
+            candidate = vad.add_frame_candidate(pcm_16k)
+            if candidate is None:
+                return
+            speech = await self._gate_turn_end(channel_id, vad, candidate)
+            if speech is None:
+                return
+        else:
+            # Legacy / barge-in path: unchanged 800ms silence flush. When turn
+            # detection is active the barge-in buffer is separate so SPEAKING/
+            # PROCESSING interrupts keep their original timing.
+            vad = (
+                self._bargein_buffers.get(channel_id)
+                if self._turn_active()
+                else self._vad_buffers.get(channel_id)
+            )
+            if vad is None:
+                return
+            speech = vad.add_frame(pcm_16k)
+            if speech is None:
+                return
 
         lock = self._turn_locks.get(channel_id)
         if lock is None:
@@ -348,13 +400,37 @@ class AriClient:
             # sources for this transition.
             if session.state in (SessionState.SPEAKING, SessionState.PROCESSING):
                 session.transition(SessionState.LISTENING)
-            vad.reset()
+            self._reset_vad(channel_id)
 
             # Streaming turn: process_turn_stream owns PROCESSING entry,
             # _play_stream drives SPEAKING (first chunk) -> LISTENING. The
             # stale-generation guard now lives inside _play_stream.
             task = asyncio.create_task(self._play_stream(channel_id, session, gen, speech))
             self._playback_tasks[channel_id] = task
+
+    async def _gate_turn_end(self, channel_id, vad, candidate):
+        # Returns the speech buffer to flush, or None to keep listening.
+        # Hard cap first: never let the incomplete loop run past max_speech.
+        if vad.at_cap:
+            return candidate
+        # Too short to classify: flush (fail toward responding).
+        if len(candidate) < self._MIN_CLASSIFY_SAMPLES:
+            return candidate
+        try:
+            complete = await self._turn_detector.classify(candidate)
+        except Exception:
+            # Degrade: model slow/unavailable -> flush on the candidate.
+            log.warning("Turn classify failed for %s; flushing (degrade)", channel_id)
+            return candidate
+        # State may have changed while we awaited the verdict (e.g. hangup).
+        session = self._sessions.get(channel_id)
+        if session is None or session.state != SessionState.LISTENING:
+            return None
+        if complete:
+            return candidate
+        # Incomplete: caller paused mid-thought. Keep the buffer, keep listening.
+        vad.continue_speech()
+        return None
 
     async def _create_external_media(self, channel_id: str, rtp_port: int) -> str:
         client = self._client()

@@ -81,3 +81,57 @@ def test_vad_buffer_hard_cap_flushes_at_15s():
 
     assert len(results) == 1
     assert results[0].dtype == np.int16
+
+
+class _FakeVad:
+    """Scripted webrtcvad replacement: is_speech returns the next scripted bool."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self._i = 0
+
+    def is_speech(self, _frame_bytes, _sample_rate):
+        v = self._script[min(self._i, len(self._script) - 1)]
+        self._i += 1
+        return v
+
+
+def test_add_frame_candidate_returns_without_reset():
+    vad = VadBuffer(silence_threshold_ms=40, frame_ms=20)  # _silence_threshold = 2
+    vad._vad = _FakeVad([False, True, True, False, False])
+    f = np.zeros(320, dtype=np.int16)
+    assert vad.add_frame_candidate(f) is None  # pre-speech silence -> None, nothing buffered
+    assert vad.add_frame_candidate(f) is None  # speech 1
+    assert vad.add_frame_candidate(f) is None  # speech 2
+    assert vad.add_frame_candidate(f) is None  # silence 1
+    cand = vad.add_frame_candidate(f)  # silence 2 -> threshold
+    assert cand is not None
+    assert len(cand) == 320 * 4  # 4 buffered (pre-speech silence dropped), no reset
+    assert vad._in_speech is True  # buffer retained
+
+
+def test_continue_speech_retains_buffer():
+    vad = VadBuffer(silence_threshold_ms=40, frame_ms=20)  # _silence_threshold = 2
+    vad._vad = _FakeVad([True, False, False, True, False, False])
+    f = np.ones(320, dtype=np.int16)
+    vad.add_frame_candidate(f)  # speech 1
+    vad.add_frame_candidate(f)  # silence 1
+    cand1 = vad.add_frame_candidate(f)  # silence 2 -> candidate (3 frames)
+    assert cand1 is not None and len(cand1) == 320 * 3
+    vad.continue_speech()  # keep listening
+    vad.add_frame_candidate(f)  # speech 2 (frame 4)
+    vad.add_frame_candidate(f)  # silence 1
+    cand2 = vad.add_frame_candidate(f)  # silence 2 -> candidate (6 frames)
+    assert cand2 is not None and len(cand2) == 320 * 6  # earlier frames retained
+
+
+def test_at_cap_forces_candidate_without_silence():
+    vad = VadBuffer(silence_threshold_ms=10000, frame_ms=20, max_speech_ms=60)  # cap = 3
+    vad._vad = _FakeVad([True, True, True])
+    f = np.zeros(320, dtype=np.int16)
+    assert vad.at_cap is False
+    assert vad.add_frame_candidate(f) is None
+    assert vad.add_frame_candidate(f) is None
+    cand = vad.add_frame_candidate(f)  # 3rd frame -> at cap
+    assert cand is not None
+    assert vad.at_cap is True

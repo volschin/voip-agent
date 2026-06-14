@@ -13,6 +13,7 @@ from agent.stt import SttClient
 from agent.tools.calendar import MSGraphCalendar
 from agent.tools.rag import RagTool
 from agent.tts import TtsClient
+from agent.turn_detector import TurnDetectorClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +37,12 @@ async def main() -> None:
     http_client = httpx.AsyncClient()
     stt = SttClient(base_url=s.stt_base_url, client=http_client)
     tts = TtsClient(base_url=s.tts_base_url, client=http_client)
+    turn_detector = TurnDetectorClient(
+        base_url=s.turn_detector_url,
+        threshold=s.turn_complete_threshold,
+        timeout_ms=s.turn_classify_timeout_ms,
+        client=http_client,
+    )
     rag = RagTool(pool=pg_pool, embedding_base_url=s.embedding_base_url, client=http_client)
     calendar = MSGraphCalendar(msal_app=msal_app, user_email=s.calendar_user_email)
     llm = LlmClient(
@@ -56,7 +63,7 @@ async def main() -> None:
         llm_stream=llm.complete_stream,
         tts_stream=tts.synthesize_stream,
     )
-    ari = AriClient(settings=s, pipeline=pipeline)
+    ari = AriClient(settings=s, pipeline=pipeline, turn_detector=turn_detector)
 
     try:
         await ari.run()
