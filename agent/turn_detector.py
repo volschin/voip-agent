@@ -40,9 +40,7 @@ class TurnDetector:
         from huggingface_hub import hf_hub_download
         from transformers import WhisperFeatureExtractor
 
-        path = hf_hub_download(
-            repo_id=model_repo, filename=model_filename, revision=model_revision
-        )
+        path = hf_hub_download(repo_id=model_repo, filename=model_filename, revision=model_revision)
         so = ort.SessionOptions()
         so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         so.inter_op_num_threads = 1  # never starve the RTP pacing loop
