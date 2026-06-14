@@ -13,7 +13,7 @@ from agent.config import Settings
 from agent.pipeline import VoicePipeline
 from agent.rtp import RtpServer
 from agent.session import CallSession, SessionState
-from agent.turn_detector import TurnDetectorClient
+from agent.turn_detector import TurnDetector
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class AriClient:
         self,
         settings: Settings,
         pipeline: VoicePipeline,
-        turn_detector: TurnDetectorClient | None = None,
+        turn_detector: TurnDetector | None = None,
     ) -> None:
         self._s = settings
         self._pipeline = pipeline
