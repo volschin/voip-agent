@@ -54,6 +54,12 @@ async def test_classify_incomplete_below_threshold():
     assert await det.classify(np.zeros(2000, dtype=np.int16)) is False
 
 
+async def test_classify_threshold_boundary_is_inclusive():
+    # prob == threshold counts as complete (matches config "prob >= this").
+    det = _detector(_FakeSession(0.5), _FakeFeatureExtractor(), threshold=0.5)
+    assert await det.classify(np.zeros(2000, dtype=np.int16)) is True
+
+
 async def test_classify_truncates_to_last_8s():
     fx = _FakeFeatureExtractor()
     det = _detector(_FakeSession(0.9), fx)

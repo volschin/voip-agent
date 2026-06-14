@@ -43,7 +43,10 @@ class TurnDetector:
         path = hf_hub_download(repo_id=model_repo, filename=model_filename, revision=model_revision)
         so = ort.SessionOptions()
         so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        so.inter_op_num_threads = 1  # never starve the RTP pacing loop
+        # Cap BOTH pools: inter-op alone leaves the intra-op pool defaulting to
+        # all cores, which can oversubscribe the box and jitter RTP pacing.
+        so.inter_op_num_threads = 1
+        so.intra_op_num_threads = 1
         self._session = ort.InferenceSession(path, sess_options=so, providers=providers)
         self._fx = WhisperFeatureExtractor(chunk_length=8)
 
@@ -68,4 +71,6 @@ class TurnDetector:
         )
         outputs = self._session.run(None, {"input_features": inputs.input_features})
         prob = float(np.asarray(outputs[0]).reshape(-1)[0])
-        return prob > self._threshold
+        # Inclusive boundary: prob == threshold counts as complete (matches the
+        # config comment and the prior HTTP client's semantics).
+        return prob >= self._threshold
