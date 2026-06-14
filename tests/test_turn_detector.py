@@ -67,6 +67,30 @@ async def test_classify_truncates_to_last_8s():
     assert fx.last_audio_len == 8 * 16000  # truncated to model max
 
 
+async def test_classify_left_pads_short_audio_to_window_end():
+    # The model was trained with speech anchored to the END of the 8 s window
+    # (left zero-pad). Short turns must be padded at the FRONT, not the back,
+    # or the model reads trailing silence as "complete" and the agent cuts in.
+    captured = {}
+
+    class _CapturingFx:
+        def __call__(self, audio, **_kwargs):
+            captured["audio"] = np.asarray(audio)
+
+            class _Batch:
+                input_features = np.zeros((1, 80, 800), dtype=np.float32)
+
+            return _Batch()
+
+    det = _detector(_FakeSession(0.9), _CapturingFx())
+    pcm = np.ones(16000, dtype=np.int16)  # 1 s of non-zero speech
+    await det.classify(pcm)
+    a = captured["audio"]
+    assert len(a) == 8 * 16000  # padded up to the full window
+    assert a[0] == 0.0 and a[100] == 0.0  # zeros at the FRONT
+    assert a[-1] != 0.0  # speech anchored at the END
+
+
 async def test_classify_passes_input_features_to_session():
     session = _FakeSession(0.9)
     det = _detector(session, _FakeFeatureExtractor())
