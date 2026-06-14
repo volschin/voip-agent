@@ -60,6 +60,13 @@ class TurnDetector:
 
     def _classify_sync(self, pcm_16k: np.ndarray) -> bool:
         audio = pcm_16k[-_MAX_SAMPLES:].astype(np.float32) / 32768.0
+        # Anchor speech to the END of the 8 s window: the model was trained and
+        # benchmarked with LEFT zero-padding (pipecat audio_utils
+        # truncate_audio_to_last_n_seconds). Letting WhisperFeatureExtractor
+        # right-pad instead puts trailing silence after the speech, which the
+        # model reads as "turn complete" -> false cut-ins on short turns.
+        if len(audio) < _MAX_SAMPLES:
+            audio = np.pad(audio, (_MAX_SAMPLES - len(audio), 0))
         inputs = self._fx(
             audio,
             sampling_rate=_SAMPLE_RATE,

@@ -82,12 +82,18 @@ class Settings(BaseSettings):
     def trusted_caller_set(self) -> frozenset[str]:
         return frozenset(c.strip() for c in self.trusted_callers.split(",") if c.strip())
 
-    # Turn detection (Smart Turn v3, in-process ONNX). Fail closed: off by
-    # default so the legacy single-buffer 800ms silence path is unchanged until
-    # explicitly enabled AND German precision has been verified live. When
-    # enabled the model is downloaded once (revision-pinned) and run on CPU.
-    turn_detection_enabled: bool = False
-    turn_complete_threshold: float = 0.5  # prob >= this => caller's turn is complete
+    # Turn detection (Smart Turn v3, in-process ONNX). ON by default: the model
+    # is downloaded once (revision-pinned) at startup and run on CPU; if it
+    # can't be loaded the agent fails fast rather than silently degrading. Set
+    # False to fall back to the legacy single-buffer 800ms silence path.
+    # German verified offline at ~95% (synthetic test split); a real-call
+    # smoke test on the live trunk is still recommended.
+    turn_detection_enabled: bool = True
+    # prob >= this => caller's turn is complete. Default 0.70 (not 0.50): on the
+    # telephony 8 kHz aLaw path this lowers false cut-ins (~14.5%->10.6%) at a
+    # small added-wait cost — fewer talk-overs is the right bias for a phone
+    # agent. See docs/research/2026-06-14-smart-turn-german-accuracy.md.
+    turn_complete_threshold: float = 0.70
     turn_vad_silence_ms: int = 200  # endpoint-candidate floor for the turn-end VAD
     turn_model_repo: str = "pipecat-ai/smart-turn-v3"
     turn_model_filename: str = "smart-turn-v3.2-cpu.onnx"
