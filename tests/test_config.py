@@ -84,7 +84,13 @@ def test_settings_load_defaults_and_overrides(monkeypatch):
 
 def test_turn_detection_defaults(settings):
     assert settings.turn_detection_enabled is False
-    assert settings.turn_detector_url == "http://dgx-spark:8004"
     assert settings.turn_complete_threshold == 0.5
-    assert settings.turn_classify_timeout_ms == 150
     assert settings.turn_vad_silence_ms == 200
+    assert settings.turn_model_repo == "pipecat-ai/smart-turn-v3"
+    assert settings.turn_model_filename == "smart-turn-v3.2-cpu.onnx"
+    assert settings.turn_model_revision == "f766f81d3cfdf7737ac64aad813d91bbfd56bf93"
+    assert settings.turn_onnx_providers == "CPUExecutionProvider"
+    assert settings.turn_onnx_provider_list == ["CPUExecutionProvider"]
+    # Removed HTTP-only fields must be gone.
+    assert not hasattr(settings, "turn_detector_url")
+    assert not hasattr(settings, "turn_classify_timeout_ms")

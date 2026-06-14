@@ -13,7 +13,7 @@ from agent.stt import SttClient
 from agent.tools.calendar import MSGraphCalendar
 from agent.tools.rag import RagTool
 from agent.tts import TtsClient
-from agent.turn_detector import TurnDetectorClient
+from agent.turn_detector import TurnDetector
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,11 +37,18 @@ async def main() -> None:
     http_client = httpx.AsyncClient()
     stt = SttClient(base_url=s.stt_base_url, client=http_client)
     tts = TtsClient(base_url=s.tts_base_url, client=http_client)
-    turn_detector = TurnDetectorClient(
-        base_url=s.turn_detector_url,
-        threshold=s.turn_complete_threshold,
-        timeout_ms=s.turn_classify_timeout_ms,
-        client=http_client,
+    # Build the detector (downloads the model) only when the feature is on;
+    # otherwise pass None and AriClient runs the legacy silence path.
+    turn_detector = (
+        TurnDetector(
+            model_repo=s.turn_model_repo,
+            model_filename=s.turn_model_filename,
+            model_revision=s.turn_model_revision,
+            providers=s.turn_onnx_provider_list,
+            threshold=s.turn_complete_threshold,
+        )
+        if s.turn_detection_enabled
+        else None
     )
     rag = RagTool(pool=pg_pool, embedding_base_url=s.embedding_base_url, client=http_client)
     calendar = MSGraphCalendar(msal_app=msal_app, user_email=s.calendar_user_email)

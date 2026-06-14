@@ -82,14 +82,24 @@ class Settings(BaseSettings):
     def trusted_caller_set(self) -> frozenset[str]:
         return frozenset(c.strip() for c in self.trusted_callers.split(",") if c.strip())
 
-    # Turn detection (Smart Turn v2 on DGX). Fail closed: off by default so the
-    # legacy single-buffer 800ms silence path is unchanged until explicitly
-    # enabled AND German precision has been verified live.
+    # Turn detection (Smart Turn v3, in-process ONNX). Fail closed: off by
+    # default so the legacy single-buffer 800ms silence path is unchanged until
+    # explicitly enabled AND German precision has been verified live. When
+    # enabled the model is downloaded once (revision-pinned) and run on CPU.
     turn_detection_enabled: bool = False
-    turn_detector_url: str = "http://dgx-spark:8004"
     turn_complete_threshold: float = 0.5  # prob >= this => caller's turn is complete
-    turn_classify_timeout_ms: int = 150  # latency budget; exceed => degrade to flush
     turn_vad_silence_ms: int = 200  # endpoint-candidate floor for the turn-end VAD
+    turn_model_repo: str = "pipecat-ai/smart-turn-v3"
+    turn_model_filename: str = "smart-turn-v3.2-cpu.onnx"
+    turn_model_revision: str = "f766f81d3cfdf7737ac64aad813d91bbfd56bf93"
+    # Comma-separated onnxruntime execution providers. Default CPU; for the
+    # NUC iGPU install onnxruntime-openvino and set
+    # "OpenVINOExecutionProvider" + turn_model_filename=smart-turn-v3.2-gpu.onnx.
+    turn_onnx_providers: str = "CPUExecutionProvider"
+
+    @property
+    def turn_onnx_provider_list(self) -> list[str]:
+        return [p.strip() for p in self.turn_onnx_providers.split(",") if p.strip()]
 
     # Agent behaviour
     caller_id: str = "+49123456789"
