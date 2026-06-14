@@ -32,6 +32,10 @@ class AriClient:
     # so the two can never drift.
     _EXT_PREFIX = "ext-"
 
+    # Below this many samples a candidate is too short to be worth a classify
+    # round-trip; flush it (fail toward responding). 1600 = 100 ms at 16 kHz.
+    _MIN_CLASSIFY_SAMPLES = 1600
+
     # States from which a caller may barge in. PROCESSING is included because
     # in the streaming pipeline the PROCESSING->first-chunk window lasts
     # seconds; the caller must be able to interrupt mid-generation.
@@ -332,16 +336,36 @@ class AriClient:
         if session.state not in self._INTERRUPTIBLE_STATES:
             return
 
-        vad = self._vad_buffers.get(channel_id)
-        if vad is None:
-            return
-
         pcm_8k = alaw_decode(alaw_payload)
         pcm_16k = resample_8k_to_16k(pcm_8k)
-        speech = vad.add_frame(pcm_16k)
 
-        if speech is None:
-            return
+        if self._turn_active() and session.state == SessionState.LISTENING:
+            # Turn-end path: low VAD floor proposes a candidate, Smart Turn v2
+            # confirms. _gate_turn_end returns the speech to flush, or None to
+            # keep listening (incomplete / state changed mid-classify).
+            vad = self._vad_buffers.get(channel_id)
+            if vad is None:
+                return
+            candidate = vad.add_frame_candidate(pcm_16k)
+            if candidate is None:
+                return
+            speech = await self._gate_turn_end(channel_id, vad, candidate)
+            if speech is None:
+                return
+        else:
+            # Legacy / barge-in path: unchanged 800ms silence flush. When turn
+            # detection is active the barge-in buffer is separate so SPEAKING/
+            # PROCESSING interrupts keep their original timing.
+            vad = (
+                self._bargein_buffers.get(channel_id)
+                if self._turn_active()
+                else self._vad_buffers.get(channel_id)
+            )
+            if vad is None:
+                return
+            speech = vad.add_frame(pcm_16k)
+            if speech is None:
+                return
 
         lock = self._turn_locks.get(channel_id)
         if lock is None:
@@ -376,6 +400,30 @@ class AriClient:
             # stale-generation guard now lives inside _play_stream.
             task = asyncio.create_task(self._play_stream(channel_id, session, gen, speech))
             self._playback_tasks[channel_id] = task
+
+    async def _gate_turn_end(self, channel_id, vad, candidate):
+        # Returns the speech buffer to flush, or None to keep listening.
+        # Hard cap first: never let the incomplete loop run past max_speech.
+        if vad.at_cap:
+            return candidate
+        # Too short to classify: flush (fail toward responding).
+        if len(candidate) < self._MIN_CLASSIFY_SAMPLES:
+            return candidate
+        try:
+            complete = await self._turn_detector.classify(candidate)
+        except Exception:
+            # Degrade: model slow/unavailable -> flush on the candidate.
+            log.warning("Turn classify failed for %s; flushing (degrade)", channel_id)
+            return candidate
+        # State may have changed while we awaited the verdict (e.g. hangup).
+        session = self._sessions.get(channel_id)
+        if session is None or session.state != SessionState.LISTENING:
+            return None
+        if complete:
+            return candidate
+        # Incomplete: caller paused mid-thought. Keep the buffer, keep listening.
+        vad.continue_speech()
+        return None
 
     async def _create_external_media(self, channel_id: str, rtp_port: int) -> str:
         client = self._client()

@@ -4,6 +4,8 @@ import socket
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
+import numpy as np
 import pytest
 
 from agent.ari import AriClient
@@ -352,3 +354,151 @@ async def test_teardown_pops_bargein_buffer(ari):
     ari._bargein_buffers["ch-1"] = MagicMock()
     await ari._teardown_call("ch-1")
     assert "ch-1" not in ari._bargein_buffers
+
+
+def _listening_session():
+    s = CallSession(
+        call_id="ch-1", caller_id="+49123", history=[], created_at=datetime.now(timezone.utc)
+    )
+    s.transition(SessionState.LISTENING)
+    return s
+
+
+async def test_turn_gate_complete_dispatches(ari_td):
+    ari, td = ari_td
+    td.classify = AsyncMock(return_value=True)
+    ari._sessions["ch-1"] = _listening_session()
+    ari._generation["ch-1"] = 0
+    ari._turn_locks["ch-1"] = asyncio.Lock()
+    vad = MagicMock()
+    vad.add_frame_candidate = MagicMock(return_value=np.ones(2000, dtype=np.int16))
+    vad.at_cap = False
+    ari._vad_buffers["ch-1"] = vad
+    ari._play_stream = AsyncMock()
+
+    await ari._on_audio("ch-1", b"\xd5" * 160)
+    await asyncio.sleep(0)
+
+    td.classify.assert_awaited_once()
+    ari._play_stream.assert_awaited_once()
+    assert ari._generation["ch-1"] == 1
+
+
+async def test_turn_gate_incomplete_keeps_listening(ari_td):
+    ari, td = ari_td
+    td.classify = AsyncMock(return_value=False)
+    session = _listening_session()
+    ari._sessions["ch-1"] = session
+    ari._turn_locks["ch-1"] = asyncio.Lock()
+    vad = MagicMock()
+    vad.add_frame_candidate = MagicMock(return_value=np.ones(2000, dtype=np.int16))
+    vad.at_cap = False
+    ari._vad_buffers["ch-1"] = vad
+    ari._play_stream = AsyncMock()
+
+    await ari._on_audio("ch-1", b"\xd5" * 160)
+    await asyncio.sleep(0)
+
+    td.classify.assert_awaited_once()
+    vad.continue_speech.assert_called_once()
+    ari._play_stream.assert_not_awaited()
+    assert session.state == SessionState.LISTENING
+
+
+async def test_turn_gate_degrades_to_flush_on_error(ari_td):
+    ari, td = ari_td
+    td.classify = AsyncMock(side_effect=httpx.ConnectError("boom"))
+    ari._sessions["ch-1"] = _listening_session()
+    ari._generation["ch-1"] = 0
+    ari._turn_locks["ch-1"] = asyncio.Lock()
+    vad = MagicMock()
+    vad.add_frame_candidate = MagicMock(return_value=np.ones(2000, dtype=np.int16))
+    vad.at_cap = False
+    ari._vad_buffers["ch-1"] = vad
+    ari._play_stream = AsyncMock()
+
+    await ari._on_audio("ch-1", b"\xd5" * 160)
+    await asyncio.sleep(0)
+
+    ari._play_stream.assert_awaited_once()  # flushed despite error
+
+
+async def test_turn_gate_cap_flushes_without_classify(ari_td):
+    ari, td = ari_td
+    td.classify = AsyncMock(return_value=False)
+    ari._sessions["ch-1"] = _listening_session()
+    ari._generation["ch-1"] = 0
+    ari._turn_locks["ch-1"] = asyncio.Lock()
+    vad = MagicMock()
+    vad.add_frame_candidate = MagicMock(return_value=np.ones(2000, dtype=np.int16))
+    vad.at_cap = True
+    ari._vad_buffers["ch-1"] = vad
+    ari._play_stream = AsyncMock()
+
+    await ari._on_audio("ch-1", b"\xd5" * 160)
+    await asyncio.sleep(0)
+
+    td.classify.assert_not_awaited()
+    ari._play_stream.assert_awaited_once()
+
+
+async def test_turn_gate_discards_if_state_changed_during_await(ari_td):
+    ari, td = ari_td
+    session = _listening_session()
+
+    async def _classify(_pcm):
+        session.transition(SessionState.PROCESSING)  # state moves mid-await
+        return True
+
+    td.classify = AsyncMock(side_effect=_classify)
+    ari._sessions["ch-1"] = session
+    ari._generation["ch-1"] = 0
+    ari._turn_locks["ch-1"] = asyncio.Lock()
+    vad = MagicMock()
+    vad.add_frame_candidate = MagicMock(return_value=np.ones(2000, dtype=np.int16))
+    vad.at_cap = False
+    ari._vad_buffers["ch-1"] = vad
+    ari._play_stream = AsyncMock()
+
+    await ari._on_audio("ch-1", b"\xd5" * 160)
+    await asyncio.sleep(0)
+
+    ari._play_stream.assert_not_awaited()
+
+
+async def test_bargein_skips_turn_detector(ari_td):
+    ari, td = ari_td
+    td.classify = AsyncMock(return_value=True)
+    session = _listening_session()
+    session.transition(SessionState.PROCESSING)  # barge-in window
+    ari._sessions["ch-1"] = session
+    ari._generation["ch-1"] = 1
+    ari._turn_locks["ch-1"] = asyncio.Lock()
+    bvad = MagicMock()
+    bvad.add_frame = MagicMock(return_value=np.ones(800, dtype=np.int16))
+    ari._bargein_buffers["ch-1"] = bvad
+    ari._play_stream = AsyncMock()
+
+    await ari._on_audio("ch-1", b"\xd5" * 160)
+    await asyncio.sleep(0)
+
+    td.classify.assert_not_awaited()
+    ari._play_stream.assert_awaited_once()
+    assert ari._generation["ch-1"] == 2
+
+
+async def test_turn_detection_disabled_uses_legacy_add_frame(ari):
+    # ari fixture: turn_detection_enabled False, no turn_detector => legacy path.
+    ari._sessions["ch-1"] = _listening_session()
+    ari._generation["ch-1"] = 0
+    ari._turn_locks["ch-1"] = asyncio.Lock()
+    vad = MagicMock()
+    vad.add_frame = MagicMock(return_value=np.ones(800, dtype=np.int16))
+    ari._vad_buffers["ch-1"] = vad
+    ari._play_stream = AsyncMock()
+
+    await ari._on_audio("ch-1", b"\xd5" * 160)
+    await asyncio.sleep(0)
+
+    vad.add_frame.assert_called_once()
+    ari._play_stream.assert_awaited_once()
