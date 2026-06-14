@@ -17,6 +17,9 @@ dependencies = [
     "pydantic-settings>=2.3",
     "webrtcvad-wheels>=2.0.14",
     "aiofiles>=23.2",
+    "onnxruntime>=1.18",
+    "transformers>=4.44",
+    "huggingface_hub>=0.24",
     "audioop-lts>=0.2.1; python_version >= '3.13'",
 ]
 
@@ -31,6 +34,9 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "realmodel: downloads the real Smart Turn v3 ONNX model (skipped in CI)",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
