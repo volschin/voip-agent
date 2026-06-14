@@ -85,6 +85,17 @@ class AriClient:
     def _turn_active(self) -> bool:
         return self._turn_detector is not None and self._s.turn_detection_enabled
 
+    def _reset_vad(self, channel_id: str) -> None:
+        # Reset BOTH per-call buffers. The barge-in buffer accumulates frames
+        # during SPEAKING/PROCESSING; if a caller's short noise never reaches
+        # its silence threshold before playback ends, that partial buffer (with
+        # _in_speech=True) would survive into the next response and a later
+        # silence could flush it as a false barge-in. Clear both on every
+        # return to LISTENING and on every new-turn dispatch.
+        for buf in (self._vad_buffers.get(channel_id), self._bargein_buffers.get(channel_id)):
+            if buf:
+                buf.reset()
+
     async def aclose(self) -> None:
         self._running = False
         if self._http is not None:
@@ -273,9 +284,7 @@ class AriClient:
             # otherwise a newer turn owns the state and we must not touch it.
             if self._generation.get(channel_id) == gen and session.state == SessionState.SPEAKING:
                 session.transition(SessionState.LISTENING)
-                vad = self._vad_buffers.get(channel_id)
-                if vad:
-                    vad.reset()
+                self._reset_vad(channel_id)
         except asyncio.CancelledError:
             pass
 
@@ -324,9 +333,7 @@ class AriClient:
             SessionState.PROCESSING,
         ):
             session.transition(SessionState.LISTENING)
-            vad = self._vad_buffers.get(channel_id)
-            if vad:
-                vad.reset()
+            self._reset_vad(channel_id)
 
     async def _on_audio(self, channel_id: str, alaw_payload: bytes) -> None:
         session = self._sessions.get(channel_id)
@@ -393,7 +400,7 @@ class AriClient:
             # sources for this transition.
             if session.state in (SessionState.SPEAKING, SessionState.PROCESSING):
                 session.transition(SessionState.LISTENING)
-            vad.reset()
+            self._reset_vad(channel_id)
 
             # Streaming turn: process_turn_stream owns PROCESSING entry,
             # _play_stream drives SPEAKING (first chunk) -> LISTENING. The

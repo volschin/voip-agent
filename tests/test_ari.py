@@ -356,6 +356,20 @@ async def test_teardown_pops_bargein_buffer(ari):
     assert "ch-1" not in ari._bargein_buffers
 
 
+def test_reset_vad_clears_both_buffers(ari_td):
+    # Codex P2: stale barge-in buffer must be cleared on return to LISTENING,
+    # not just the turn-end buffer, or a partial noise survives into the next
+    # response and can fire a false barge-in.
+    ari, _td = ari_td
+    turn_vad = MagicMock()
+    bargein_vad = MagicMock()
+    ari._vad_buffers["ch-1"] = turn_vad
+    ari._bargein_buffers["ch-1"] = bargein_vad
+    ari._reset_vad("ch-1")
+    turn_vad.reset.assert_called_once()
+    bargein_vad.reset.assert_called_once()
+
+
 def _listening_session():
     s = CallSession(
         call_id="ch-1", caller_id="+49123", history=[], created_at=datetime.now(timezone.utc)
