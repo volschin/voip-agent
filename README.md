@@ -25,7 +25,7 @@ Fritzbox ──SIP──► Asterisk (NUC)
 
 The live turn is **streaming**: LLM tokens → German sentence segmenter → Qwen3-TTS `/v1/audio/speech/stream` → resample → aLaw chunks play while generation continues (compute and playback overlap). Audio starts on the first synthesized chunk rather than after the whole turn. Barge-in (caller speaks over the agent) cancels the in-flight turn mid-stream; RTP underruns are filled with comfort silence so the clock never stalls. The non-streaming whole-turn path is retained for the greeting and as a fallback.
 
-**Turn detection (opt-in):** by default the caller's turn ends on a fixed 800 ms silence — a long thinking pause is misread as end-of-turn and the agent talks over them. With `TURN_DETECTION_ENABLED=true` the listen path drops the VAD floor to ~200 ms and confirms each candidate with a [Smart Turn v2](https://huggingface.co/pipecat-ai/smart-turn-v2) classifier on the DGX (prosody-aware, multilingual): a complete turn flushes immediately, an incomplete one keeps listening (bounded by `max_speech_ms`). Classifier timeout/error or hard cap degrades to the legacy silence flush (fail toward responding). Barge-in is unchanged. Default off and fail-closed — German precision needs live verification first. Wire contract: `dgx/SMART_TURN.md`.
+**Turn detection (opt-in):** by default the caller's turn ends on a fixed 800 ms silence — a long thinking pause is misread as end-of-turn and the agent talks over them. With `TURN_DETECTION_ENABLED=true` the listen path drops the VAD floor to ~200 ms and confirms each candidate with an **in-process** [Smart Turn v3](https://huggingface.co/pipecat-ai/smart-turn-v3) ONNX model (Whisper-Tiny encoder, 8 MB, ~12 ms CPU, 23 languages incl. German): a complete turn flushes immediately, an incomplete one keeps listening (bounded by `max_speech_ms`). The model is downloaded once (revision-pinned) on first start when enabled; inference runs off the event loop. Classifier error or hard cap degrades to the legacy silence flush (fail toward responding). Barge-in is unchanged. Default off and fail-closed — German precision needs live verification first.
 
 ## Hardware
 
@@ -129,11 +129,13 @@ Expected:
 | `LLM_BASE_URL` | `http://dgx-spark:8000` | Nous Hermes via vLLM |
 | `LLM_MODEL` | `nous-hermes` | Model name passed to `/v1/chat/completions` |
 | `EMBEDDING_BASE_URL` | `http://dgx-spark:8003` | multilingual-e5-large |
-| `TURN_DETECTION_ENABLED` | `false` | Enable Smart Turn v2 end-of-turn gating (fail-closed; verify German live first) |
-| `TURN_DETECTOR_URL` | `http://dgx-spark:8004` | Smart Turn v2 service (`/v1/turn/classify`) |
+| `TURN_DETECTION_ENABLED` | `false` | Enable Smart Turn v3 in-process end-of-turn gating (fail-closed; verify German live first) |
 | `TURN_COMPLETE_THRESHOLD` | `0.5` | `prob` ≥ this ⇒ turn complete |
-| `TURN_CLASSIFY_TIMEOUT_MS` | `150` | Classify latency budget; exceeding it degrades to silence flush |
 | `TURN_VAD_SILENCE_MS` | `200` | Lowered VAD silence floor for the turn-end candidate |
+| `TURN_MODEL_REPO` | `pipecat-ai/smart-turn-v3` | HF repo for the ONNX model |
+| `TURN_MODEL_FILENAME` | `smart-turn-v3.2-cpu.onnx` | Model file (use `-gpu.onnx` with an OpenVINO/CUDA provider) |
+| `TURN_MODEL_REVISION` | `f766f81…` | Pinned HF revision |
+| `TURN_ONNX_PROVIDERS` | `CPUExecutionProvider` | Comma-separated onnxruntime execution providers |
 | `DB_DSN` | — | asyncpg DSN for pgvector |
 | `AZURE_TENANT_ID` | — | MS Graph auth |
 | `AZURE_CLIENT_ID` | — | MS Graph auth |
@@ -165,13 +167,13 @@ pytest tests/test_pipeline.py -v
 | `agent/audio.py` | G.711 aLaw codec, 8↔16/24 kHz resampling, WebRTC VAD buffer |
 | `agent/stt.py` | Qwen3-ASR HTTP client (16 kHz WAV → transcript) |
 | `agent/tts.py` | Qwen3-TTS HTTP client (text → 24 kHz PCM) |
-| `agent/turn_detector.py` | Smart Turn v2 HTTP client (PCM → complete/incomplete) |
+| `agent/turn_detector.py` | In-process Smart Turn v3 ONNX detector (PCM → complete/incomplete) |
 | `agent/llm.py` | OpenAI-compat chat + tool-call dispatch loop |
 | `agent/tools/rag.py` | pgvector cosine search via asyncpg |
 | `agent/tools/calendar.py` | MS Graph calendar (get/create events) |
 | `agent/pipeline.py` | One voice turn: VAD flush → STT → LLM → TTS → aLaw |
 | `agent/rtp.py` | asyncio UDP DatagramProtocol, RTP parse/build, paced streaming |
-| `agent/ari.py` | ARI WebSocket events, ExternalMedia bridge, VAD-driven turns, optional Smart Turn v2 gating, barge-in |
+| `agent/ari.py` | ARI WebSocket events, ExternalMedia bridge, VAD-driven turns, optional Smart Turn v3 gating, barge-in |
 | `agent/main.py` | Entry point: wire all components, start ARI event loop |
 
 ## Latency targets
