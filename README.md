@@ -1,19 +1,17 @@
 # voip-agent
 
-German-language voice AI agent for inbound and outbound calls via Fritzbox SIP. Fully offline — all inference runs on a DGX Spark over LAN.
+German-language voice AI answering agent for inbound calls via FRITZ!Box SIP. All inference
+runs on a DGX Spark over LAN.
 
 ## Architecture
 
 ```
-Fritzbox ──SIP──► Asterisk (NUC)
-                      │ ARI WebSocket + ExternalMedia RTP
-                      ▼
-              Python asyncio agent
-                      │
-          ┌───────────┼───────────┐
-          ▼           ▼           ▼
-    Qwen3-ASR   Nous Hermes   Qwen3-TTS
-      (STT)     (LLM/vLLM)     (TTS)
+Fritzbox ──SIP/RTP──► PJSUA2 + Python asyncio agent (Docker/NUC)
+                              │
+                    ┌───────────┼───────────┐
+                    ▼           ▼           ▼
+              Qwen3-ASR   Nous Hermes   Qwen3-TTS
+                (STT)     (LLM/vLLM)     (TTS)
                     │
               ┌─────┴─────┐
               ▼           ▼
@@ -21,22 +19,26 @@ Fritzbox ──SIP──► Asterisk (NUC)
            (RAG)     (Calendar)
 ```
 
-**Voice turn:** aLaw RTP → VAD → 16 kHz PCM → Qwen3-ASR → LLM tool-call loop → Qwen3-TTS → 8 kHz aLaw RTP
+**Voice turn:** negotiated RTP codec → PJSUA2 16 kHz PCM → VAD → Qwen3-ASR → LLM
+tool-call loop → Qwen3-TTS → PJSUA2 PCM/RTP
 
 The live turn is **streaming**: LLM tokens → German sentence segmenter → Qwen3-TTS `/v1/audio/speech/stream` → resample → aLaw chunks play while generation continues (compute and playback overlap). Audio starts on the first synthesized chunk rather than after the whole turn. Barge-in (caller speaks over the agent) cancels the in-flight turn mid-stream; RTP underruns are filled with comfort silence so the clock never stalls. The non-streaming whole-turn path is retained for the greeting and as a fallback.
 
-**Turn detection (opt-in):** by default the caller's turn ends on a fixed 800 ms silence — a long thinking pause is misread as end-of-turn and the agent talks over them. With `TURN_DETECTION_ENABLED=true` the listen path drops the VAD floor to ~200 ms and confirms each candidate with an **in-process** [Smart Turn v3](https://huggingface.co/pipecat-ai/smart-turn-v3) ONNX model (Whisper-Tiny encoder, 8 MB, ~12 ms CPU, 23 languages incl. German): a complete turn flushes immediately, an incomplete one keeps listening (bounded by `max_speech_ms`). The model is downloaded once (revision-pinned) on first start; inference runs off the event loop. Classifier error or hard cap degrades to the legacy silence flush (fail toward responding). Barge-in is unchanged. **On by default** (set `TURN_DETECTION_ENABLED=false` for the legacy 800 ms path); German verified offline at ~95% on a synthetic test split — a real-call smoke test on the live trunk is still recommended.
+**Turn detection:** with `TURN_DETECTION_ENABLED=true` the listen path drops the VAD floor to
+~200 ms and confirms each candidate with an **in-process** [Smart Turn v3](https://huggingface.co/pipecat-ai/smart-turn-v3)
+ONNX model. A complete turn flushes immediately; an incomplete one keeps listening. The feature
+is on by default; set it to `false` for the legacy fixed 800 ms silence path.
 
 ## Hardware
 
 | Host | Role |
 |------|------|
-| ASUS NUC | Asterisk 20, Python agent |
+| ASUS NUC | Containerized PJSUA2/Python agent |
 | DGX Spark | Qwen3-ASR, Qwen3-TTS, multilingual-e5-large embedding, Nous Hermes via vLLM, pgvector |
 
 ## Prerequisites
 
-- **NUC:** Asterisk 20 (`apt install asterisk`), Python 3.12+
+- **NUC:** Docker Engine with Compose; no host Asterisk or Python installation
 - **DGX:** Docker with NVIDIA runtime, `docker compose`
 - **Azure AD app** with `Calendars.ReadWrite` for MS Graph (optional — calendar tool disabled if unconfigured)
 
@@ -61,22 +63,12 @@ curl -s http://dgx-spark:8003/health   # embedding
 
 Nous Hermes via vLLM runs separately — set `LLM_BASE_URL` accordingly.
 
-### 2. NUC — Asterisk config
+### 2. FRITZ!Box — internal IP telephone
 
-```bash
-# Fill in Fritzbox credentials
-vim asterisk/pjsip.conf    # replace <FRITZBOX_IP>, <SIP_USER>, <SIP_PASSWORD>, <YOUR_PHONE_NUMBER>
-
-sudo cp asterisk/pjsip.conf asterisk/extensions.conf asterisk/ari.conf /etc/asterisk/
-sudo asterisk -rx "core reload"
-
-# Verify Fritzbox registration
-sudo asterisk -rx "pjsip show registrations"
-# Expected: fritzbox   Registered
-
-# Verify ARI
-curl -s -u voip-agent:changeme http://localhost:8088/ari/applications
-```
+Under **Telephony → Telephony Devices**, create a **LAN/Wi-Fi (IP telephone)**. Assign the
+normal incoming number so the handsets and agent ring in parallel. Put its exact username and
+password into `.env.pjsip-poc`; this is a local registration, not an external SIP forwarding
+target.
 
 ### 3. NUC — pgvector schema
 
@@ -89,41 +81,43 @@ CREATE TABLE IF NOT EXISTS documents (
 );
 ```
 
-### 4. NUC — agent
+### 4. NUC — agent container
 
 ```bash
 git clone <repo> voip-agent && cd voip-agent
-python -m venv venv && source venv/bin/activate
-pip install -e .
-
 cp .env.example .env
-vim .env   # fill in all values
+cp .env.pjsip-poc.example .env.pjsip-poc
+# Fill AI/integration values in .env and FRITZ!Box credentials in .env.pjsip-poc.
 
-python -m agent.main
+docker compose -f compose.pjsip-poc.yml down  # stop the signalling-only PoC
+docker compose up --detach --build
+docker compose logs --follow voip-agent
 ```
 
 Expected log output:
 ```
-INFO agent.ari Connecting to ARI at ws://localhost:8088/ari/events?...
+INFO agent.pjsip SIP registration active=True status=200 OK
 ```
 
 ### 5. Test call
 
-Dial `9999` from any phone on the Fritzbox network.
+Call the public number assigned to both the handsets and the IP telephone.
 
 Expected:
-1. Log: `Call ch-xxx from <number> ready`
-2. You hear the German greeting
-3. Speak a question → German response within ~3 s
+1. Answer on a handset before the deadline: the FRITZ!Box cancels the agent leg.
+2. Leave the next call unanswered: PJSIP accepts it after `ANSWER_DELAY_SECONDS`.
+3. You hear the German greeting and can speak to the existing AI pipeline.
 
 ## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ARI_BASE_URL` | `http://localhost:8088` | Asterisk ARI HTTP base |
-| `ARI_USERNAME` | `voip-agent` | ARI user (matches `asterisk/ari.conf`) |
-| `ARI_PASSWORD` | `changeme` | ARI password |
-| `RTP_PORT` | `5000` | First UDP port for ExternalMedia RTP (increments by 2 per call) |
+| `FRITZBOX_HOST` | `fritz.box` | FRITZ!Box LAN address or hostname |
+| `FRITZBOX_SIP_USERNAME` | — | Dedicated LAN/WLAN IP-telephone username |
+| `FRITZBOX_SIP_PASSWORD` | — | Dedicated IP-telephone password |
+| `PJSIP_LOCAL_PORT` | `5062` | Local SIP port on the Docker host |
+| `ANSWER_DELAY_SECONDS` | `20` | Delay before accepting an unanswered call |
+| `MAX_CALL_SECONDS` | `900` | Maximum accepted-call duration |
 | `STT_BASE_URL` | `http://dgx-spark:8001` | Qwen3-ASR |
 | `TTS_BASE_URL` | `http://dgx-spark:8002` | Qwen3-TTS |
 | `LLM_BASE_URL` | `http://dgx-spark:8000` | Nous Hermes via vLLM |
@@ -141,7 +135,6 @@ Expected:
 | `AZURE_CLIENT_ID` | — | MS Graph auth |
 | `AZURE_CLIENT_SECRET` | — | MS Graph auth |
 | `CALENDAR_USER_EMAIL` | — | Calendar owner |
-| `CALLER_ID` | `+49123456789` | CLI shown on outbound calls |
 | `GREETING_TEXT` | `Hallo, wie kann ich Ihnen helfen?` | Spoken on answer |
 | `LLM_SYSTEM_PROMPT` | German assistant prompt | Injected as system message |
 
@@ -158,6 +151,14 @@ pytest -v
 pytest tests/test_pipeline.py -v
 ```
 
+### FRITZ!Box answering-machine signalling PoC
+
+The isolated `compose.pjsip-poc.yml` remains available for SIP-only diagnostics. The production
+`compose.yml` uses the same validated delayed-answer behavior and additionally bridges PJSIP
+audio into the voice pipeline. See [`docs/pjsip-poc.md`](docs/pjsip-poc.md).
+The production cutover is described in
+[`docs/pjsip-migration.md`](docs/pjsip-migration.md).
+
 ## Module overview
 
 | Module | Responsibility |
@@ -172,9 +173,10 @@ pytest tests/test_pipeline.py -v
 | `agent/tools/rag.py` | pgvector cosine search via asyncpg |
 | `agent/tools/calendar.py` | MS Graph calendar (get/create events) |
 | `agent/pipeline.py` | One voice turn: VAD flush → STT → LLM → TTS → aLaw |
-| `agent/rtp.py` | asyncio UDP DatagramProtocol, RTP parse/build, paced streaming |
-| `agent/ari.py` | ARI WebSocket events, ExternalMedia bridge, VAD-driven turns, optional Smart Turn v3 gating, barge-in |
-| `agent/main.py` | Entry point: wire all components, start ARI event loop |
+| `agent/conversation.py` | Transport-neutral VAD, turn detection, streaming, and barge-in lifecycle |
+| `agent/pjsip.py` | Direct FRITZ!Box SIP/RTP and PJSUA2 PCM media ports |
+| `agent/ari.py`, `agent/rtp.py` | Legacy Asterisk rollback adapter; not used by the main entry point |
+| `agent/main.py` | Entry point: wire all components and start direct PJSIP transport |
 
 ## Latency targets
 

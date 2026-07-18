@@ -1,0 +1,307 @@
+"""Transport-neutral call conversation orchestration.
+
+The media transport provides 16 kHz mono PCM from the caller and accepts the
+existing pipeline's G.711 A-law output. SIP/RTP lifecycle belongs to the
+transport adapter; VAD, turn detection, barge-in, and pipeline state live here.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, timezone
+from typing import Protocol
+
+import numpy as np
+
+from agent.audio import VadBuffer
+from agent.config import Settings
+from agent.pipeline import VoicePipeline
+from agent.session import CallSession, SessionState
+from agent.turn_detector import TurnDetector
+
+log = logging.getLogger(__name__)
+
+
+class AudioSink(Protocol):
+    """Playback boundary implemented by the active telephony transport."""
+
+    async def play_audio(self, alaw: bytes) -> None: ...
+
+    async def play_audio_chunks(self, queue: asyncio.Queue) -> None: ...
+
+    def clear(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class ConversationManager:
+    """Drive one or more calls independently from SIP/ARI transport details."""
+
+    AUDIO_QUEUE_MAXSIZE = 100
+    _MIN_CLASSIFY_SAMPLES = 1600
+    _INTERRUPTIBLE_STATES = (
+        SessionState.LISTENING,
+        SessionState.SPEAKING,
+        SessionState.PROCESSING,
+    )
+
+    def __init__(
+        self,
+        settings: Settings,
+        pipeline: VoicePipeline,
+        turn_detector: TurnDetector | None = None,
+    ) -> None:
+        self._s = settings
+        self._pipeline = pipeline
+        self._turn_detector = turn_detector
+        self._sessions: dict[str, CallSession] = {}
+        self._sinks: dict[str, AudioSink] = {}
+        self._vad_buffers: dict[str, VadBuffer] = {}
+        self._bargein_buffers: dict[str, VadBuffer] = {}
+        self._playback_tasks: dict[str, asyncio.Task] = {}
+        self._audio_queues: dict[str, asyncio.Queue[bytes]] = {}
+        self._out_queues: dict[str, asyncio.Queue] = {}
+        self._consumer_tasks: dict[str, asyncio.Task] = {}
+        self._turn_locks: dict[str, asyncio.Lock] = {}
+        self._generation: dict[str, int] = {}
+
+    @property
+    def call_count(self) -> int:
+        return len(self._sessions)
+
+    def _turn_active(self) -> bool:
+        return self._turn_detector is not None and self._s.turn_detection_enabled
+
+    def _reset_vad(self, call_id: str) -> None:
+        for buffer in (self._vad_buffers.get(call_id), self._bargein_buffers.get(call_id)):
+            if buffer:
+                buffer.reset()
+
+    async def start_call(self, call_id: str, caller_id: str, sink: AudioSink) -> None:
+        if call_id in self._sessions:
+            return
+
+        session = CallSession(
+            call_id=call_id,
+            caller_id=caller_id,
+            history=[],
+            created_at=datetime.now(timezone.utc),
+        )
+        self._sessions[call_id] = session
+        self._sinks[call_id] = sink
+        if self._turn_active():
+            self._vad_buffers[call_id] = VadBuffer(silence_threshold_ms=self._s.turn_vad_silence_ms)
+            self._bargein_buffers[call_id] = VadBuffer()
+        else:
+            self._vad_buffers[call_id] = VadBuffer()
+        self._audio_queues[call_id] = asyncio.Queue(maxsize=self.AUDIO_QUEUE_MAXSIZE)
+        self._turn_locks[call_id] = asyncio.Lock()
+        self._generation[call_id] = 0
+        self._consumer_tasks[call_id] = asyncio.create_task(self._audio_consumer(call_id))
+
+        try:
+            alaw = await self._pipeline.synthesize_alaw(self._s.greeting_text)
+        except Exception:
+            log.exception("Greeting synthesis failed for call %s", call_id)
+            await self.stop_call(call_id)
+            return
+
+        if self._sessions.get(call_id) is not session:
+            return
+        generation = self._generation[call_id]
+        task = asyncio.create_task(self._play_audio(call_id, alaw, session, generation))
+        self._playback_tasks[call_id] = task
+        log.info("Call %s conversation ready", call_id)
+
+    def enqueue_pcm(self, call_id: str, pcm_16k: bytes) -> None:
+        """Enqueue one PJSIP media frame; safe to schedule from another thread."""
+
+        if not pcm_16k or len(pcm_16k) % 2:
+            return
+        queue = self._audio_queues.get(call_id)
+        if queue is None:
+            return
+        try:
+            queue.put_nowait(pcm_16k)
+        except asyncio.QueueFull:
+            log.warning("Audio queue full for %s; dropping frame", call_id)
+
+    async def _audio_consumer(self, call_id: str) -> None:
+        queue = self._audio_queues.get(call_id)
+        if queue is None:
+            return
+        try:
+            while True:
+                frame = await queue.get()
+                try:
+                    await self._on_pcm(call_id, frame)
+                except Exception:
+                    log.exception("Audio processing failed for %s", call_id)
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            pass
+
+    async def stop_call(self, call_id: str) -> None:
+        for tasks in (self._playback_tasks, self._consumer_tasks):
+            task = tasks.pop(call_id, None)
+            if task and not task.done():
+                task.cancel()
+        self._audio_queues.pop(call_id, None)
+        self._out_queues.pop(call_id, None)
+        self._turn_locks.pop(call_id, None)
+        self._generation.pop(call_id, None)
+        self._vad_buffers.pop(call_id, None)
+        self._bargein_buffers.pop(call_id, None)
+        session = self._sessions.pop(call_id, None)
+        if session and session.state is not SessionState.ENDED:
+            session.transition(SessionState.ENDED)
+        sink = self._sinks.pop(call_id, None)
+        if sink:
+            sink.close()
+        log.info("Call %s conversation ended", call_id)
+
+    async def stop_all(self) -> None:
+        for call_id in list(self._sessions):
+            await self.stop_call(call_id)
+
+    async def _play_audio(
+        self,
+        call_id: str,
+        alaw: bytes,
+        session: CallSession,
+        generation: int,
+    ) -> None:
+        sink = self._sinks.get(call_id)
+        if sink is None or self._generation.get(call_id) != generation:
+            return
+        session.transition(SessionState.SPEAKING)
+        try:
+            await sink.play_audio(alaw)
+            if (
+                self._generation.get(call_id) == generation
+                and session.state is SessionState.SPEAKING
+            ):
+                session.transition(SessionState.LISTENING)
+                self._reset_vad(call_id)
+        except asyncio.CancelledError:
+            sink.clear()
+            raise
+
+    async def _play_stream(
+        self,
+        call_id: str,
+        session: CallSession,
+        generation: int,
+        pcm: np.ndarray,
+    ) -> None:
+        sink = self._sinks.get(call_id)
+        if sink is None or self._generation.get(call_id) != generation:
+            return
+
+        out: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self._out_queues[call_id] = out
+        first_chunk_seen = False
+
+        async def produce() -> None:
+            nonlocal first_chunk_seen
+            try:
+                async for alaw in self._pipeline.process_turn_stream(session, pcm):
+                    if self._generation.get(call_id) != generation:
+                        break
+                    if not first_chunk_seen:
+                        first_chunk_seen = True
+                        if session.state is SessionState.PROCESSING:
+                            session.transition(SessionState.SPEAKING)
+                    await out.put(alaw)
+            finally:
+                await out.put(None)
+
+        try:
+            async with asyncio.TaskGroup() as group:
+                group.create_task(produce())
+                group.create_task(sink.play_audio_chunks(out))
+        except* Exception:
+            log.exception("Streaming turn failed for %s", call_id)
+        finally:
+            self._out_queues.pop(call_id, None)
+
+        if self._generation.get(call_id) == generation and session.state in (
+            SessionState.SPEAKING,
+            SessionState.PROCESSING,
+        ):
+            session.transition(SessionState.LISTENING)
+            self._reset_vad(call_id)
+
+    async def _on_pcm(self, call_id: str, pcm_bytes: bytes) -> None:
+        session = self._sessions.get(call_id)
+        if session is None or session.state not in self._INTERRUPTIBLE_STATES:
+            return
+        pcm = np.frombuffer(pcm_bytes, dtype=np.int16).copy()
+
+        if self._turn_active() and session.state is SessionState.LISTENING:
+            vad = self._vad_buffers.get(call_id)
+            if vad is None:
+                return
+            candidate = vad.add_frame_candidate(pcm)
+            if candidate is None:
+                return
+            speech = await self._gate_turn_end(call_id, vad, candidate)
+            if speech is None:
+                return
+        else:
+            vad = (
+                self._bargein_buffers.get(call_id)
+                if self._turn_active()
+                else self._vad_buffers.get(call_id)
+            )
+            if vad is None:
+                return
+            speech = vad.add_frame(pcm)
+            if speech is None:
+                return
+
+        lock = self._turn_locks.get(call_id)
+        if lock is None:
+            return
+        async with lock:
+            if session.state not in self._INTERRUPTIBLE_STATES:
+                return
+            generation = self._generation.get(call_id, 0) + 1
+            self._generation[call_id] = generation
+
+            task = self._playback_tasks.pop(call_id, None)
+            if task and not task.done():
+                task.cancel()
+            sink = self._sinks.get(call_id)
+            if sink:
+                sink.clear()
+
+            if session.state in (SessionState.SPEAKING, SessionState.PROCESSING):
+                session.transition(SessionState.LISTENING)
+            self._reset_vad(call_id)
+
+            task = asyncio.create_task(self._play_stream(call_id, session, generation, speech))
+            self._playback_tasks[call_id] = task
+
+    async def _gate_turn_end(
+        self,
+        call_id: str,
+        vad: VadBuffer,
+        candidate: np.ndarray,
+    ) -> np.ndarray | None:
+        if vad.at_cap or len(candidate) < self._MIN_CLASSIFY_SAMPLES:
+            return candidate
+        try:
+            complete = await self._turn_detector.classify(candidate)
+        except Exception:
+            log.warning("Turn classify failed for %s; flushing (degrade)", call_id)
+            return candidate
+        session = self._sessions.get(call_id)
+        if session is None or session.state is not SessionState.LISTENING:
+            return None
+        if complete:
+            return candidate
+        vad.continue_speech()
+        return None

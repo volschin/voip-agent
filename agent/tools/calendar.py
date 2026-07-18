@@ -12,6 +12,22 @@ class CalendarBackend(Protocol):
     ) -> str: ...
 
 
+class UnavailableCalendar:
+    """Fail-safe backend used when Microsoft Graph is not configured."""
+
+    async def get_events(self, start: str, end: str) -> str:
+        return "Der Kalender ist derzeit nicht verfügbar."
+
+    async def create_event(
+        self,
+        title: str,
+        start: str,
+        end: str,
+        description: str = "",
+    ) -> str:
+        return "Der Kalender ist derzeit nicht verfügbar."
+
+
 class MSGraphCalendar:
     def __init__(self, msal_app, user_email: str) -> None:
         self._msal = msal_app

@@ -6,6 +6,9 @@ from agent.config import Settings
 @pytest.fixture
 def settings():
     return Settings(
+        fritzbox_host="192.168.178.1",
+        fritzbox_sip_username="agent-phone",
+        fritzbox_sip_password="strong-secret",
         ari_base_url="http://localhost:8088",
         ari_username="test",
         ari_password="test",

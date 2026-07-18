@@ -1,0 +1,30 @@
+services:
+  voip-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PJSIP_COMMIT: 5a457451fa2712ba18e12b01738e8ff3af2b26fd
+    env_file:
+      - .env
+      - ${PJSIP_ENV_FILE:-.env.pjsip-poc}
+    environment:
+      PJSIP_LOG_LEVEL: ${PJSIP_LOG_LEVEL:-2}
+    extra_hosts:
+      - "dgx-spark:${DGX_HOST_IP:-192.168.68.41}"
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - agent-model-cache:/home/voip-agent/.cache
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+
+volumes:
+  agent-model-cache:

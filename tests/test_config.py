@@ -5,7 +5,8 @@ from agent.config import Settings
 
 def _valid_kwargs(**over):
     kwargs = dict(
-        ari_password="strong-secret",
+        fritzbox_sip_username="agent-phone",
+        fritzbox_sip_password="strong-secret",
         azure_tenant_id="t",
         azure_client_id="c",
         azure_client_secret="s",
@@ -16,10 +17,10 @@ def _valid_kwargs(**over):
 
 
 @pytest.mark.parametrize("bad", ["changeme", "CHANGEME", "", "  "])
-def test_insecure_ari_password_rejected(monkeypatch, bad):
-    monkeypatch.delenv("ARI_PASSWORD", raising=False)
-    with pytest.raises(ValueError, match="ari_password"):
-        Settings(**_valid_kwargs(ari_password=bad))
+def test_insecure_sip_password_rejected(monkeypatch, bad):
+    monkeypatch.delenv("FRITZBOX_SIP_PASSWORD", raising=False)
+    with pytest.raises(ValueError, match="fritzbox_sip_password"):
+        Settings(**_valid_kwargs(fritzbox_sip_password=bad))
 
 
 @pytest.mark.parametrize("bad", ["0.0.0.0", "", "  "])
@@ -57,6 +58,8 @@ def test_trusted_caller_set_parses_and_trims(monkeypatch):
 def test_settings_load_defaults_and_overrides(monkeypatch):
     monkeypatch.delenv("ARI_BASE_URL", raising=False)
     s = Settings(
+        fritzbox_sip_username="agent-phone",
+        fritzbox_sip_password="strong-secret",
         ari_base_url="http://test:8088",
         ari_username="u",
         ari_password="p",

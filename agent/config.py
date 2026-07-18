@@ -11,23 +11,46 @@ class Settings(BaseSettings):
 
     model_config = ConfigDict(env_file=".env", case_sensitive=False)
 
-    # Asterisk ARI
+    # Direct FRITZ!Box PJSIP transport
+    fritzbox_host: str = "fritz.box"
+    fritzbox_sip_username: str = ""
+    fritzbox_sip_password: str = ""
+    pjsip_transport: str = "udp"
+    pjsip_local_port: int = 5062
+    pjsip_log_level: int = 2
+    pjsip_event_poll_ms: int = 10
+    answer_delay_seconds: float = 20.0
+    max_call_seconds: float = 900.0
+    max_concurrent_calls: int = 1
+
+    @field_validator("fritzbox_sip_username")
+    @classmethod
+    def _require_sip_username(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("fritzbox_sip_username must not be empty")
+        return value.strip()
+
+    @field_validator("fritzbox_sip_password")
+    @classmethod
+    def _reject_insecure_sip_password(cls, value: str) -> str:
+        if value.strip().lower() in _INSECURE_PASSWORDS:
+            raise ValueError("fritzbox_sip_password must be a non-placeholder secret")
+        return value
+
+    @field_validator("pjsip_transport")
+    @classmethod
+    def _validate_pjsip_transport(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in {"udp", "tcp"}:
+            raise ValueError("pjsip_transport must be 'udp' or 'tcp'")
+        return value
+
+    # Legacy Asterisk settings retained only for the rollback adapter/tests.
+    # The production entry point no longer reads or validates them.
     ari_base_url: str = "http://localhost:8088"
     ari_username: str = "voip-agent"
     ari_password: str = "changeme"
     ari_app_name: str = "voip-agent"
-
-    @field_validator("ari_password")
-    @classmethod
-    def _reject_insecure_ari_password(cls, v: str) -> str:
-        # Fail closed: the ARI socket grants full call control. Refuse to start
-        # with the placeholder password so a default install is never exposed.
-        if v.strip().lower() in _INSECURE_PASSWORDS:
-            raise ValueError(
-                "ari_password is unset or 'changeme'. Set ARI_PASSWORD to a strong "
-                "secret matching asterisk/ari.conf."
-            )
-        return v
 
     # RTP
     rtp_bind_host: str = "0.0.0.0"
@@ -83,9 +106,9 @@ class Settings(BaseSettings):
         return frozenset(c.strip() for c in self.trusted_callers.split(",") if c.strip())
 
     # Turn detection (Smart Turn v3, in-process ONNX). ON by default: the model
-    # is downloaded once (revision-pinned) at startup and run on CPU; if it
-    # can't be loaded the agent fails fast rather than silently degrading. Set
-    # False to fall back to the legacy single-buffer 800ms silence path.
+    # is downloaded once (revision-pinned) at startup and run on CPU. If it
+    # cannot be loaded, startup logs the reason and falls back to the legacy
+    # single-buffer 800ms silence path.
     # German verified offline at ~95% (synthetic test split); a real-call
     # smoke test on the live trunk is still recommended.
     turn_detection_enabled: bool = True

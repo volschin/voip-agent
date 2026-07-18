@@ -16,6 +16,9 @@ env/
 
 # Env files
 .env
+.env.*
+!.env.example
+!.env.pjsip-poc.example
 
 # IDE
 .idea/
