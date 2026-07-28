@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from dgx.tts.runtime import require_gb10_cuda
+from dgx.tts.runtime import normalize_language, require_gb10_cuda
 
 ROOT = Path(__file__).resolve().parents[1]
 ASR_REVISION = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
@@ -82,6 +82,19 @@ def test_tts_runtime_accepts_only_nvidia_gb10_cuda() -> None:
         require_gb10_cuda(FakeTorch(FakeCuda(available=False)))
     with pytest.raises(RuntimeError, match="NVIDIA GB10"):
         require_gb10_cuda(FakeTorch(FakeCuda(available=True, name="NVIDIA RTX 4090")))
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (None, None),
+        ("de", "german"),
+        ("en", "english"),
+        ("german", "german"),
+    ],
+)
+def test_tts_runtime_maps_openai_language_codes(language: str | None, expected: str | None) -> None:
+    assert normalize_language(language) == expected
 
 
 def test_tts_image_installs_runtime_gate_and_health_requires_loaded_model() -> None:

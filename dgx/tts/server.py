@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 import torch
 import soundfile as sf
 
-from runtime import require_gb10_cuda
+from runtime import normalize_language, require_gb10_cuda
 
 MODEL_ID = os.environ.get("QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign")
 TOKENIZER_ID = os.environ.get("QWEN_TTS_TOKENIZER", "Qwen/Qwen3-TTS-Tokenizer-12Hz")
@@ -104,7 +104,7 @@ def synthesize(req: SpeechRequest):
         audios, sample_rate = _model.generate_voice_design(
             text=req.input,
             instruct=instruct,
-            language=req.language,
+            language=normalize_language(req.language),
             non_streaming_mode=True,
         )
     except Exception as e:
@@ -144,7 +144,7 @@ def synthesize_stream(req: SpeechRequest):
         for audio_chunk, sample_rate, _timing in _model.generate_voice_design_streaming(
             text=req.input,
             instruct=instruct,
-            language=req.language,
+            language=normalize_language(req.language),
             chunk_size=8,  # ~667ms audio per chunk; tune later
         ):
             arr = np.asarray(audio_chunk)
