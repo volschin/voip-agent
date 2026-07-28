@@ -6,6 +6,7 @@ import asyncpg
 import httpx
 import msal
 
+from agent.ai_http import build_ai_client
 from agent.config import Settings
 from agent.conversation import ConversationManager
 from agent.llm import LlmClient
@@ -62,11 +63,12 @@ async def main() -> None:
         log.info("Microsoft Graph is not configured; calendar tools disabled")
         calendar = UnavailableCalendar()
 
-    # One HTTP client shared by every DGX service call, closed on shutdown
-    # alongside the pg pool and the direct PJSIP client.
-    http_client = httpx.AsyncClient()
-    stt = SttClient(base_url=s.stt_base_url, client=http_client)
-    tts = TtsClient(base_url=s.tts_base_url, client=http_client)
+    # Authentication belongs only on the exact Traefik AI routes. Embeddings
+    # remain on their independent local endpoint and must never receive it.
+    ai_client = build_ai_client(s)
+    local_client = httpx.AsyncClient()
+    stt = SttClient(base_url=s.stt_base_url, client=ai_client)
+    tts = TtsClient(base_url=s.tts_base_url, client=ai_client)
     # Build the detector (downloads the model) only when the feature is on;
     # otherwise pass None and ConversationManager runs the legacy silence path.
     turn_detector = None
@@ -82,7 +84,7 @@ async def main() -> None:
         except Exception as exc:
             log.warning("Smart Turn unavailable; using fixed-silence VAD: %s", exc)
     rag_lookup = (
-        RagTool(pool=pg_pool, embedding_base_url=s.embedding_base_url, client=http_client).lookup
+        RagTool(pool=pg_pool, embedding_base_url=s.embedding_base_url, client=local_client).lookup
         if pg_pool is not None
         else _rag_unavailable
     )
@@ -95,7 +97,7 @@ async def main() -> None:
         calendar_write_enabled=s.calendar_write_enabled,
         max_tool_rounds=s.max_tool_rounds,
         trusted_callers=s.trusted_caller_set,
-        client=http_client,
+        client=ai_client,
     )
     pipeline = VoicePipeline(
         stt=stt.transcribe,
@@ -120,7 +122,8 @@ async def main() -> None:
         pjsip.request_stop()
         for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(shutdown_signal)
-        await http_client.aclose()
+        await ai_client.aclose()
+        await local_client.aclose()
         if pg_pool is not None:
             await pg_pool.close()
 

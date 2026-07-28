@@ -97,3 +97,59 @@ def test_turn_detection_defaults(settings):
     # Removed HTTP-only fields must be gone.
     assert not hasattr(settings, "turn_detector_url")
     assert not hasattr(settings, "turn_classify_timeout_ms")
+
+
+def test_shared_ai_credentials_require_exact_traefik_origins(tmp_path):
+    password = tmp_path / "password"
+    ca = tmp_path / "ca.crt"
+    token = tmp_path / "priority-token"
+    password.write_text("secret", encoding="utf-8")
+    ca.write_text("ca", encoding="utf-8")
+    token.write_text("token", encoding="utf-8")
+    shared = {
+        "ai_proxy_username": "voip-agent",
+        "ai_proxy_password_file": str(password),
+        "ai_proxy_ca_file": str(ca),
+        "voice_priority_token_file": str(token),
+    }
+
+    settings = Settings(
+        **_valid_kwargs(
+            stt_base_url="https://mate.olcon.de",
+            tts_base_url="https://mate.olcon.de",
+            llm_base_url="https://mate.olcon.de",
+            **shared,
+        )
+    )
+
+    assert settings.voice_priority_base_url == "https://mate.olcon.de"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["stt_base_url", "tts_base_url", "llm_base_url", "voice_priority_base_url"],
+)
+def test_shared_ai_credentials_reject_direct_or_different_origins(
+    tmp_path,
+    field,
+):
+    password = tmp_path / "password"
+    ca = tmp_path / "ca.crt"
+    token = tmp_path / "priority-token"
+    password.write_text("secret", encoding="utf-8")
+    ca.write_text("ca", encoding="utf-8")
+    token.write_text("token", encoding="utf-8")
+    values = {
+        "stt_base_url": "https://mate.olcon.de",
+        "tts_base_url": "https://mate.olcon.de",
+        "llm_base_url": "https://mate.olcon.de",
+        "voice_priority_base_url": "https://mate.olcon.de",
+        "ai_proxy_username": "voip-agent",
+        "ai_proxy_password_file": str(password),
+        "ai_proxy_ca_file": str(ca),
+        "voice_priority_token_file": str(token),
+    }
+    values[field] = "http://dgx-spark:8001"
+
+    with pytest.raises(ValueError, match="mate.olcon.de"):
+        Settings(**_valid_kwargs(**values))

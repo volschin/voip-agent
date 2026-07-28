@@ -1,6 +1,6 @@
 """Configuration management for VoIP agent."""
 
-from pydantic import ConfigDict, field_validator
+from pydantic import ConfigDict, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 _INSECURE_PASSWORDS = {"", "changeme"}
@@ -83,6 +83,36 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://dgx-spark:8000"
     llm_model: str = "nous-hermes"
     embedding_base_url: str = "http://dgx-spark:8003"
+    ai_proxy_username: str = ""
+    ai_proxy_password_file: str = ""
+    ai_proxy_ca_file: str = ""
+    voice_priority_token_file: str = ""
+    voice_priority_base_url: str = "https://mate.olcon.de"
+
+    @model_validator(mode="after")
+    def _validate_shared_ai_boundary(self) -> "Settings":
+        credentials = (
+            self.ai_proxy_username,
+            self.ai_proxy_password_file,
+            self.ai_proxy_ca_file,
+            self.voice_priority_token_file,
+        )
+        if not any(value.strip() for value in credentials):
+            return self
+        if not all(value.strip() for value in credentials):
+            raise ValueError(
+                "AI proxy username, password file, CA file, and priority token "
+                "file must be configured together"
+            )
+        for name, url in (
+            ("stt_base_url", self.stt_base_url),
+            ("tts_base_url", self.tts_base_url),
+            ("llm_base_url", self.llm_base_url),
+            ("voice_priority_base_url", self.voice_priority_base_url),
+        ):
+            if url.rstrip("/") != "https://mate.olcon.de":
+                raise ValueError(f"{name} must use https://mate.olcon.de")
+        return self
 
     # pgvector RAG
     db_dsn: str = "postgresql://user:pass@dgx-spark:5432/voip"
