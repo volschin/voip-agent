@@ -12,6 +12,7 @@ from agent.conversation import ConversationManager
 from agent.llm import LlmClient
 from agent.pipeline import VoicePipeline
 from agent.pjsip import PjsipClient
+from agent.priority import PriorityLeaseClient
 from agent.stt import SttClient
 from agent.tools.calendar import MSGraphCalendar, UnavailableCalendar
 from agent.tools.rag import RagTool
@@ -69,6 +70,11 @@ async def main() -> None:
     local_client = httpx.AsyncClient()
     stt = SttClient(base_url=s.stt_base_url, client=ai_client)
     tts = TtsClient(base_url=s.tts_base_url, client=ai_client)
+    priority = PriorityLeaseClient(
+        base_url=s.voice_priority_base_url,
+        client=ai_client,
+        token_file=s.voice_priority_token_file,
+    )
     # Build the detector (downloads the model) only when the feature is on;
     # otherwise pass None and ConversationManager runs the legacy silence path.
     turn_detector = None
@@ -109,6 +115,7 @@ async def main() -> None:
     conversations = ConversationManager(
         settings=s,
         pipeline=pipeline,
+        priority_client=priority,
         turn_detector=turn_detector,
     )
     pjsip = PjsipClient(settings=s, conversations=conversations)

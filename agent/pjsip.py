@@ -163,6 +163,21 @@ class PjsipClient:
     def request_stop(self) -> None:
         self._stop_requested = True
 
+    async def _start_conversation(self, call: object) -> None:
+        """Terminate an answered media call if priority cannot be acquired."""
+        try:
+            started = await self._conversations.start_call(
+                call.call_id,
+                call.caller_id,
+                call.sink,
+            )
+        except Exception:
+            log.exception("Could not start conversation for call %s", call.call_id)
+            started = False
+        if not started:
+            call.sink.clear()
+            call.terminate()
+
     @property
     def registrar_uri(self) -> str:
         uri = f"sip:{self._s.fritzbox_host}"
@@ -297,10 +312,8 @@ class PjsipClient:
                 self.audio_port = audio_port
                 self.media_started = True
                 schedule(
-                    client._conversations.start_call,
-                    self.call_id,
-                    self.caller_id,
-                    self.sink,
+                    client._start_conversation,
+                    self,
                 )
                 log.info("Call %s PJSIP audio bridge active", self.call_id)
 

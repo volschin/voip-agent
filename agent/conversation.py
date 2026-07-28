@@ -17,6 +17,7 @@ import numpy as np
 from agent.audio import VadBuffer
 from agent.config import Settings
 from agent.pipeline import VoicePipeline
+from agent.priority import LeaseHandle, PriorityLeaseClient, PriorityUnavailable
 from agent.session import CallSession, SessionState
 from agent.turn_detector import TurnDetector
 
@@ -39,6 +40,7 @@ class ConversationManager:
     """Drive one or more calls independently from SIP/ARI transport details."""
 
     AUDIO_QUEUE_MAXSIZE = 100
+    PRIORITY_HEARTBEAT_SECONDS = 10
     _MIN_CLASSIFY_SAMPLES = 1600
     _INTERRUPTIBLE_STATES = (
         SessionState.LISTENING,
@@ -50,10 +52,13 @@ class ConversationManager:
         self,
         settings: Settings,
         pipeline: VoicePipeline,
+        *,
+        priority_client: PriorityLeaseClient,
         turn_detector: TurnDetector | None = None,
     ) -> None:
         self._s = settings
         self._pipeline = pipeline
+        self._priority_client = priority_client
         self._turn_detector = turn_detector
         self._sessions: dict[str, CallSession] = {}
         self._sinks: dict[str, AudioSink] = {}
@@ -65,6 +70,8 @@ class ConversationManager:
         self._consumer_tasks: dict[str, asyncio.Task] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
         self._generation: dict[str, int] = {}
+        self._priority_leases: dict[str, LeaseHandle] = {}
+        self._priority_tasks: dict[str, asyncio.Task] = {}
 
     @property
     def call_count(self) -> int:
@@ -78,9 +85,20 @@ class ConversationManager:
             if buffer:
                 buffer.reset()
 
-    async def start_call(self, call_id: str, caller_id: str, sink: AudioSink) -> None:
+    async def start_call(
+        self,
+        call_id: str,
+        caller_id: str,
+        sink: AudioSink,
+    ) -> bool:
         if call_id in self._sessions:
-            return
+            return True
+        try:
+            lease = await self._priority_client.acquire()
+        except PriorityUnavailable:
+            log.warning("Voice priority unavailable; call %s not started", call_id)
+            return False
+        self._priority_leases[call_id] = lease
 
         session = CallSession(
             call_id=call_id,
@@ -99,20 +117,39 @@ class ConversationManager:
         self._turn_locks[call_id] = asyncio.Lock()
         self._generation[call_id] = 0
         self._consumer_tasks[call_id] = asyncio.create_task(self._audio_consumer(call_id))
+        self._priority_tasks[call_id] = asyncio.create_task(
+            self._priority_heartbeat(call_id, lease)
+        )
 
         try:
             alaw = await self._pipeline.synthesize_alaw(self._s.greeting_text)
         except Exception:
             log.exception("Greeting synthesis failed for call %s", call_id)
             await self.stop_call(call_id)
-            return
+            return False
 
         if self._sessions.get(call_id) is not session:
-            return
+            return False
         generation = self._generation[call_id]
         task = asyncio.create_task(self._play_audio(call_id, alaw, session, generation))
         self._playback_tasks[call_id] = task
         log.info("Call %s conversation ready", call_id)
+        return True
+
+    async def _priority_heartbeat(
+        self,
+        call_id: str,
+        lease: LeaseHandle,
+    ) -> None:
+        try:
+            while self._priority_leases.get(call_id) is lease:
+                await asyncio.sleep(self.PRIORITY_HEARTBEAT_SECONDS)
+                await lease.renew()
+        except asyncio.CancelledError:
+            raise
+        except PriorityUnavailable:
+            log.warning("Voice priority renewal failed; ending call %s", call_id)
+            await self.stop_call(call_id)
 
     def enqueue_pcm(self, call_id: str, pcm_16k: bytes) -> None:
         """Enqueue one PJSIP media frame; safe to schedule from another thread."""
@@ -144,6 +181,11 @@ class ConversationManager:
             pass
 
     async def stop_call(self, call_id: str) -> None:
+        heartbeat = self._priority_tasks.pop(call_id, None)
+        current = asyncio.current_task()
+        if heartbeat and heartbeat is not current and not heartbeat.done():
+            heartbeat.cancel()
+        lease = self._priority_leases.pop(call_id, None)
         for tasks in (self._playback_tasks, self._consumer_tasks):
             task = tasks.pop(call_id, None)
             if task and not task.done():
@@ -159,7 +201,13 @@ class ConversationManager:
             session.transition(SessionState.ENDED)
         sink = self._sinks.pop(call_id, None)
         if sink:
+            sink.clear()
             sink.close()
+        if lease is not None:
+            try:
+                await lease.release()
+            except PriorityUnavailable:
+                log.warning("Voice priority release failed for call %s", call_id)
         log.info("Call %s conversation ended", call_id)
 
     async def stop_all(self) -> None:

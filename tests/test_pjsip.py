@@ -1,6 +1,12 @@
 import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
-from agent.pjsip import PcmPlaybackBuffer, PjsipAudioSink, caller_id_from_uri
+from agent.pjsip import (
+    PcmPlaybackBuffer,
+    PjsipAudioSink,
+    PjsipClient,
+    caller_id_from_uri,
+)
 
 
 def test_caller_id_is_extracted_without_display_name():
@@ -39,3 +45,18 @@ async def test_audio_sink_waits_until_pjsip_consumes_audio():
     assert not playback.done()
     assert len(buffer.read(640)) == 640
     await asyncio.wait_for(playback, timeout=0.1)
+
+
+async def test_failed_priority_acquisition_terminates_unusable_call(settings):
+    conversations = MagicMock()
+    conversations.start_call = AsyncMock(return_value=False)
+    call = MagicMock()
+    call.call_id = "7"
+    call.caller_id = "+49123"
+    call.sink = MagicMock()
+    client = PjsipClient(settings=settings, conversations=conversations)
+
+    await client._start_conversation(call)
+
+    call.sink.clear.assert_called_once()
+    call.terminate.assert_called_once()
