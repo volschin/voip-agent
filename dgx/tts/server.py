@@ -15,14 +15,16 @@ from pydantic import BaseModel, Field
 import torch
 import soundfile as sf
 
+from runtime import require_gb10_cuda
+
 MODEL_ID = os.environ.get("QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign")
 TOKENIZER_ID = os.environ.get("QWEN_TTS_TOKENIZER", "Qwen/Qwen3-TTS-Tokenizer-12Hz")
 DEFAULT_INSTRUCT = os.environ.get(
     "QWEN_TTS_DEFAULT_VOICE",
     "A neutral, friendly adult voice with clear pronunciation, moderate pace, and natural intonation.",
 )
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float32
+DEVICE = "cuda"
+DTYPE = torch.bfloat16
 # Honor explicit override; otherwise auto-detect flash-attn availability.
 try:
     import flash_attn  # noqa: F401
@@ -31,7 +33,7 @@ except Exception:
     _FA_AVAILABLE = False
 ATTN_IMPL = os.environ.get(
     "QWEN_TTS_ATTN_IMPL",
-    "flash_attention_2" if (DEVICE == "cuda" and _FA_AVAILABLE) else ("sdpa" if DEVICE == "cuda" else "eager"),
+    "flash_attention_2" if _FA_AVAILABLE else "sdpa",
 )
 
 _model = None
@@ -42,6 +44,7 @@ def _load() -> None:
     global _model, _tokenizer
     if _model is not None:
         return
+    require_gb10_cuda(torch)
     from faster_qwen3_tts import FasterQwen3TTS
     print(f"[load] faster-qwen3-tts model {MODEL_ID} device={DEVICE}", flush=True)
     _model = FasterQwen3TTS.from_pretrained(MODEL_ID, device=DEVICE, dtype=DTYPE)

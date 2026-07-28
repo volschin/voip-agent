@@ -40,6 +40,7 @@ RUN pip install --no-cache-dir --break-system-packages --no-deps "av>=12"
 
 WORKDIR /app
 COPY server.py /app/server.py
+COPY runtime.py /app/runtime.py
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8002

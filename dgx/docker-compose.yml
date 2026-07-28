@@ -9,30 +9,41 @@ services:
       - ENABLE_NVFP4_SM100=0
       - VLLM_TEST_FORCE_FP8_MARLIN=1
       - VLLM_USE_FLASHINFER_SAMPLER=1
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       # - HF_TOKEN=...
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
-    ports:
-      # Defaults to all interfaces (backward compatible). Set DGX_BIND_IP to the
-      # DGX LAN IP and firewall to the agent host so inference ports are not
-      # world-reachable. Use 127.0.0.1 only if the agent runs on the DGX itself.
-      - "${DGX_BIND_IP:-0.0.0.0}:8001:8001"
+    networks:
+      - default
+      - shared_ai_voice
     shm_size: "4gb"
     restart: unless-stopped
     labels:
       - "autoheal=true"
-    # Override to use 1.7B or tune memory:
-    # command:
-    #   - vllm
-    #   - serve
-    #   - Qwen/Qwen3-ASR-1.7B
-    #   - --served-model-name=qwen3-asr
-    #   - --host=0.0.0.0
-    #   - --port=8001
-    #   - --gpu-memory-utilization=0.16
-    #   - --max-model-len=8192
-    #   - --max-num-seqs=4
-    #   - --trust-remote-code
+    command:
+      - vllm
+      - serve
+      - /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-0.6B/snapshots/5eb144179a02acc5e5ba31e748d22b0cf3e303b0
+      - --served-model-name
+      - qwen3-asr
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --gpu-memory-utilization
+      - "0.08"
+      - --max-model-len
+      - "8192"
+      - --max-num-seqs
+      - "4"
+      - --trust-remote-code
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8001/v1/models',timeout=3)); assert any(model.get('id') == 'qwen3-asr' for model in data.get('data',[]))"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
 
   qwen3-tts:
     # Built locally from ./tts — faster-qwen3-tts runtime with the custom
@@ -49,12 +60,13 @@ services:
       # - QWEN_TTS_DEFAULT_VOICE=A neutral, friendly adult voice ...
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
-    ports:
-      - "${DGX_BIND_IP:-0.0.0.0}:8002:8002"
+    networks:
+      - default
+      - shared_ai_voice
     shm_size: "4gb"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/health',timeout=2).status==200 else 1)"]
+      test: ["CMD", "python3", "-c", "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8002/health',timeout=3)); assert data.get('model_loaded') is True"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -86,3 +98,8 @@ services:
       - AUTOHEAL_DEFAULT_STOP_TIMEOUT=20
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+
+networks:
+  shared_ai_voice:
+    external: true
+    name: shared_ai_voice
