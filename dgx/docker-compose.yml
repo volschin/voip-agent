@@ -2,7 +2,13 @@ services:
   qwen3-asr:
     image: ghcr.io/aeon-7/qwen3-asr-server:latest
     container_name: qwen3-asr
-    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
       # Scope to specific GPUs in production to limit blast radius, e.g. "0".
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
@@ -51,7 +57,13 @@ services:
     # The aeon-7 upstream image cannot carry this endpoint.
     build: ./tts
     container_name: qwen3-tts
-    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       # - QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign
@@ -77,7 +89,13 @@ services:
   embedding:
     image: ghcr.io/volschin/voip-agent-embedding:latest
     container_name: voip-embedding
-    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}

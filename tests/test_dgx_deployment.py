@@ -28,6 +28,21 @@ def test_voice_services_keep_private_network_and_add_external_proxy_network() ->
         assert "ports" not in service
 
 
+def test_voice_services_request_gpu_without_legacy_runtime_name() -> None:
+    compose = _compose()
+
+    for name in ("qwen3-asr", "qwen3-tts"):
+        service = compose["services"][name]
+        assert "runtime" not in service
+        assert service["deploy"]["resources"]["reservations"]["devices"] == [
+            {
+                "driver": "nvidia",
+                "count": 1,
+                "capabilities": ["gpu"],
+            }
+        ]
+
+
 def test_asr_is_offline_pinned_and_health_checks_loaded_model() -> None:
     service = _compose()["services"]["qwen3-asr"]
     environment = set(service["environment"])
