@@ -1,9 +1,13 @@
+import json
+
 import httpx
 import numpy as np
 import pytest
 import respx
 
-from agent.tts import VOICE_INSTRUCT, TtsClient
+from agent.tts import TtsClient
+
+VOICE_PROFILE = "shared-female-de-v1"
 
 
 @pytest.fixture
@@ -31,13 +35,9 @@ async def test_synthesize_sends_text_and_voice(tts):
         return_value=httpx.Response(200, content=_fake_pcm())
     )
     await tts.synthesize("Test")
-    body = route.calls[0].request.read()
-    import json
-
-    payload = json.loads(body)
+    payload = json.loads(route.calls[0].request.read())
     assert payload["input"] == "Test"
-    # server reads `voice`, not `instruct`
-    assert payload["voice"] == VOICE_INSTRUCT
+    assert payload["voice"] == VOICE_PROFILE
     # full language name required — ISO "de" / omitting it both 500 server-side
     assert payload["language"] == "german"
 
@@ -65,14 +65,31 @@ async def test_aclose_leaves_injected_client_open():
     await shared.aclose()
 
 
+@respx.mock
+async def test_synthesize_uses_configured_voice_profile():
+    route = respx.post("http://tts:8002/v1/audio/speech").mock(
+        return_value=httpx.Response(200, content=_fake_pcm())
+    )
+    client = TtsClient(
+        base_url="http://tts:8002",
+        voice_profile="private-profile-v2",
+    )
+
+    await client.synthesize("Test")
+
+    assert json.loads(route.calls[0].request.read())["voice"] == "private-profile-v2"
+    await client.aclose()
+
+
 async def test_synthesize_stream_yields_pcm_chunks():
-    # ASSUMPTION: server streams raw little-endian int16 PCM at 24kHz.
-    # Replace this fixture with a captured /v1/audio/speech/stream response
-    # once verified on the DGX box (see Task 1 Step 4).
+    # Verified server wire contract: raw little-endian int16 PCM at 24 kHz.
     chunk_a = (np.arange(240, dtype="<i2")).tobytes()
     chunk_b = (np.arange(240, 480, dtype="<i2")).tobytes()
 
+    requests: list[httpx.Request] = []
+
     async def handler(request):
+        requests.append(request)
         return httpx.Response(200, stream=httpx.ByteStream(chunk_a + chunk_b))
 
     transport = httpx.MockTransport(handler)
@@ -84,4 +101,23 @@ async def test_synthesize_stream_yields_pcm_chunks():
 
     assert joined.dtype == np.int16
     assert joined.size == 480
+    assert json.loads(requests[0].content) == {
+        "input": "Hallo",
+        "voice": VOICE_PROFILE,
+        "language": "german",
+    }
+    await client.aclose()
+
+
+async def test_synthesize_stream_rejects_trailing_odd_pcm_byte():
+    async def handler(_request):
+        return httpx.Response(200, stream=httpx.ByteStream(b"\x01\x00\x02"))
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    tts = TtsClient(base_url="http://tts:8002", client=client)
+
+    with pytest.raises(ValueError, match="incomplete PCM16 sample"):
+        _ = [chunk async for chunk in tts.synthesize_stream("Hallo")]
+
     await client.aclose()

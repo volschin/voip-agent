@@ -4,19 +4,19 @@ Tracked from an adversarial codex review (2026-05-30). The contract bugs
 (#1/#2/#10) and security findings (#11 read+write, #13 network/creds) are fixed
 on branch `fix/contract-and-fsm-bugs`. The real-time-correctness and
 concurrency/lifecycle items (#4/#5/#8/#9/#12) are fixed on branch
-`feat/realtime-hardening`. What remains below is the streaming rewrite (#3 +
-faster-qwen3-tts) — blocked on the TTS server, which is non-streaming
-(`dgx/tts/server.py` runs `non_streaming_mode=True`) — and the residual
-security config. Numbering matches the original review.
+`feat/realtime-hardening`. The LLM-streaming rewrite and faster-qwen3-tts
+service are also complete; production response playback now uses stable
+whole-WAV sentence synthesis, while the raw codec stream remains available
+only for diagnostics. Numbering matches the original review.
 
 ## Real-time correctness (highest value for call quality)
 
 - [x] **#3 Streaming pipeline.** LLM streams tokens → German-aware
-  `SentenceSegmenter` batches clauses → `tts.synthesize_stream` yields 24 kHz
-  PCM chunks → resample/aLaw → `rtp.stream_audio_chunks` (prebuffer +
-  underrun comfort silence). `PROCESSING`/`SPEAKING` overlap; SPEAKING enters on
-  the first chunk; barge-in (now interruptible during PROCESSING) cancels the
-  per-turn `TaskGroup`. STT stays whole-turn (Qwen3-ASR is fine offline).
+  `SentenceSegmenter` batches sentences → stable `tts.synthesize` returns one
+  whole 24 kHz WAV per sentence → 16 kHz PCM → bounded PJSIP playback.
+  `PROCESSING`/`SPEAKING` overlap; SPEAKING enters on the first sentence;
+  barge-in (also interruptible during PROCESSING) cancels the per-turn
+  `TaskGroup`. STT stays whole-turn (Qwen3-ASR is fine offline).
   Spec: `docs/superpowers/specs/2026-05-31-streaming-pipeline-design.md`,
   plan: `docs/superpowers/plans/2026-05-31-streaming-pipeline.md`.
   `agent/{segmenter,tts,llm,rtp,pipeline,ari,main}.py`.
@@ -53,11 +53,13 @@ security config. Numbering matches the original review.
 
 ## Models
 
-- [x] **faster-qwen3-tts (with streaming).** TTFA on DGX Spark 567→280 ms (0.6B),
-  661→400 ms (1.7B) via CUDA graphs; supports streaming chunks. Adopted with #3:
+- [x] **faster-qwen3-tts (with diagnostic streaming).** TTFA on DGX Spark
+  567→280 ms (0.6B), 661→400 ms (1.7B) via CUDA graphs. The server retains
+  raw streaming chunks for diagnostics, but production VoIP uses the stable
+  whole-WAV endpoint:
   `dgx/tts/server.py` adds `/v1/audio/speech/stream` via
   `generate_voice_design_streaming` (same `Qwen3-TTS-12Hz-1.7B-VoiceDesign`
-  weights), keeping the legacy `/v1/audio/speech` for greeting/fallback.
+  weights), alongside `/v1/audio/speech` for greeting and response sentences.
   **On-box wire verification still pending** (DGX unreachable from dev box):
   confirm streamed chunk sample-rate/dtype and the vLLM SSE `delta.tool_calls`
   fragment shape, then replace the ASSUMPTION fixtures in `tests/test_tts.py`

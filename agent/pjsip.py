@@ -10,7 +10,7 @@ import threading
 from collections import deque
 from contextlib import suppress
 
-from agent.audio import alaw_decode, resample_8k_to_16k
+from agent.audio import PCM16_PLAYBACK_BLOCK_BYTES
 from agent.config import Settings
 from agent.conversation import ConversationManager
 from agent.pjsip_poc import DelayedAnswerService
@@ -25,10 +25,6 @@ def caller_id_from_uri(remote_uri: str) -> str:
 
     match = _CALLER_URI.search(remote_uri)
     return match.group(1) if match else ""
-
-
-def _alaw_to_pcm16(alaw: bytes) -> bytes:
-    return resample_8k_to_16k(alaw_decode(alaw)).tobytes()
 
 
 class PcmPlaybackBuffer:
@@ -95,11 +91,14 @@ class PcmPlaybackBuffer:
 
 
 class PjsipAudioSink:
-    """Convert pipeline A-law output into PCM pulled by a PJSIP audio port."""
+    """Buffer pipeline PCM for the 16 kHz PJSIP audio port."""
 
     SAMPLE_RATE = 16_000
     BYTES_PER_SAMPLE = 2
+    PREBUFFER_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * 300 // 1000
     MAX_AHEAD_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * 2
+    PCM_BLOCK_BYTES = PCM16_PLAYBACK_BLOCK_BYTES
+    STREAM_BUFFER_MAX_BYTES = MAX_AHEAD_BYTES - 3 * PCM_BLOCK_BYTES
 
     def __init__(self, buffer: PcmPlaybackBuffer) -> None:
         self._buffer = buffer
@@ -112,35 +111,82 @@ class PjsipAudioSink:
         self._closed = True
         self._buffer.close()
 
-    async def _write_with_backpressure(self, pcm: bytes) -> None:
-        while not self._closed and self._buffer.buffered_bytes > self.MAX_AHEAD_BYTES:
-            await asyncio.sleep(0.02)
-        if self._closed:
-            return
-        if not self._buffer.write(pcm):
-            raise RuntimeError("PJSIP playback buffer capacity exceeded")
+    async def _write_with_backpressure(
+        self,
+        pcm: bytes,
+        *,
+        max_buffer_bytes: int | None = None,
+    ) -> None:
+        if len(pcm) % self.BYTES_PER_SAMPLE:
+            raise ValueError("PCM16 requires an even byte count")
+        buffer_limit = max_buffer_bytes or self.MAX_AHEAD_BYTES
+        offset = 0
+        while offset < len(pcm):
+            while not self._closed:
+                available = buffer_limit - self._buffer.buffered_bytes
+                available -= available % self.BYTES_PER_SAMPLE
+                if available >= self.BYTES_PER_SAMPLE:
+                    break
+                await asyncio.sleep(0.02)
+            if self._closed:
+                return
+            chunk = pcm[offset : offset + available]
+            if not self._buffer.write(chunk):
+                raise RuntimeError("PJSIP playback buffer capacity exceeded")
+            offset += len(chunk)
 
     async def _wait_drained(self) -> None:
         while not self._closed and self._buffer.buffered_bytes:
             await asyncio.sleep(0.02)
 
-    async def play_audio(self, alaw: bytes) -> None:
+    async def play_pcm16(self, pcm: bytes) -> None:
         try:
-            await self._write_with_backpressure(_alaw_to_pcm16(alaw))
+            await self._write_with_backpressure(pcm)
             await self._wait_drained()
         except asyncio.CancelledError:
             self.clear()
             raise
 
-    async def play_audio_chunks(self, queue: asyncio.Queue) -> None:
+    async def play_pcm16_chunks(self, queue: asyncio.Queue) -> None:
+        pending = bytearray()
+        playback_started = False
         try:
             while not self._closed:
-                alaw = await queue.get()
-                if alaw is None:
+                pcm = await queue.get()
+                if pcm is None:
+                    if pending:
+                        await self._write_with_backpressure(
+                            bytes(pending),
+                            max_buffer_bytes=self.STREAM_BUFFER_MAX_BYTES,
+                        )
                     break
-                await self._write_with_backpressure(_alaw_to_pcm16(alaw))
+                if len(pcm) % self.BYTES_PER_SAMPLE:
+                    raise ValueError("PCM16 requires an even byte count")
+                if len(pcm) > self.PCM_BLOCK_BYTES:
+                    raise ValueError("PCM playback block exceeds transport quantum")
+                if not playback_started:
+                    needed = self.PREBUFFER_BYTES - len(pending)
+                    pending.extend(pcm[:needed])
+                    pcm = pcm[needed:]
+                    if len(pending) < self.PREBUFFER_BYTES:
+                        continue
+                    await self._write_with_backpressure(
+                        bytes(pending),
+                        max_buffer_bytes=self.STREAM_BUFFER_MAX_BYTES,
+                    )
+                    pending.clear()
+                    playback_started = True
+                    if not pcm:
+                        continue
+                await self._write_with_backpressure(
+                    pcm,
+                    max_buffer_bytes=self.STREAM_BUFFER_MAX_BYTES,
+                )
             await self._wait_drained()
         except asyncio.CancelledError:
+            self.clear()
+            raise
+        except Exception:
             self.clear()
             raise
 
@@ -162,6 +208,23 @@ class PjsipClient:
 
     def request_stop(self) -> None:
         self._stop_requested = True
+
+    async def _start_conversation(self, call: object) -> None:
+        """Terminate an answered media call if priority cannot be acquired."""
+        try:
+            started = await self._conversations.start_call(
+                call.call_id,
+                call.caller_id,
+                call.sink,
+                terminate_transport=call.terminate,
+            )
+        except Exception:
+            log.exception("Could not start conversation for call %s", call.call_id)
+            call.sink.clear()
+            call.terminate()
+            return
+        if not started:
+            log.info("Conversation start aborted for call %s", call.call_id)
 
     @property
     def registrar_uri(self) -> str:
@@ -297,10 +360,8 @@ class PjsipClient:
                 self.audio_port = audio_port
                 self.media_started = True
                 schedule(
-                    client._conversations.start_call,
-                    self.call_id,
-                    self.caller_id,
-                    self.sink,
+                    client._start_conversation,
+                    self,
                 )
                 log.info("Call %s PJSIP audio bridge active", self.call_id)
 

@@ -1,11 +1,14 @@
 import numpy as np
+import pytest
 
 from agent.audio import (
+    StreamingPcm16Resampler,
     VadBuffer,
     alaw_decode,
     alaw_encode,
     resample_8k_to_16k,
     resample_24k_to_8k,
+    resample_pcm16,
 )
 
 
@@ -37,6 +40,28 @@ def test_resample_24k_to_8k_shape():
     samples = np.zeros(n, dtype=np.int16)
     out = resample_24k_to_8k(samples)
     assert len(out) == 800
+
+
+def test_streaming_pcm_resampler_matches_one_shot_across_arbitrary_splits():
+    samples = np.arange(-5000, 5000, dtype=np.int16)
+    one_shot = resample_pcm16(samples, 24_000, 16_000)
+    stream = StreamingPcm16Resampler(24_000, 16_000)
+    chunks = [samples[:1], samples[1:101], samples[101:4097], samples[4097:]]
+
+    chunked = b"".join(stream.process(chunk) for chunk in chunks)
+    stream.close()
+
+    assert chunked == one_shot
+    assert len(chunked) == 13_334
+
+
+def test_streaming_pcm_resampler_rejects_invalid_or_closed_input():
+    stream = StreamingPcm16Resampler(24_000, 16_000)
+    with pytest.raises(ValueError, match="one-dimensional int16"):
+        stream.process(np.zeros((2, 2), dtype=np.int16))
+    stream.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        stream.process(np.zeros(3, dtype=np.int16))
 
 
 def test_vad_buffer_returns_none_during_silence():

@@ -14,6 +14,11 @@ RUN apt-get update \
 
 RUN python -m pip install --no-cache-dir setuptools wheel
 
+RUN python -m pip wheel \
+    --no-cache-dir \
+    --wheel-dir /tmp/python-wheels \
+    "webrtcvad-wheels>=2.0.14"
+
 WORKDIR /src/pjproject
 RUN git init \
     && git remote add origin https://github.com/pjsip/pjproject.git \
@@ -47,6 +52,7 @@ RUN apt-get update \
     && install -d -o voip-agent -g voip-agent /home/voip-agent/.cache/huggingface
 
 COPY --from=pjsip-builder /src/pjproject/pjsip-apps/src/swig/python/dist/*.whl /tmp/
+COPY --from=pjsip-builder /tmp/python-wheels/*.whl /tmp/
 
 WORKDIR /app
 COPY pyproject.toml README.md /app/

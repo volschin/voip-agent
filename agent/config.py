@@ -1,6 +1,6 @@
 """Configuration management for VoIP agent."""
 
-from pydantic import ConfigDict, field_validator
+from pydantic import ConfigDict, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 _INSECURE_PASSWORDS = {"", "changeme"}
@@ -78,11 +78,49 @@ class Settings(BaseSettings):
         return v
 
     # DGX Spark AI services
-    stt_base_url: str = "http://dgx-spark:8001"
-    tts_base_url: str = "http://dgx-spark:8002"
-    llm_base_url: str = "http://dgx-spark:8000"
-    llm_model: str = "nous-hermes"
+    stt_base_url: str = "https://mate.olcon.de"
+    tts_base_url: str = "https://mate.olcon.de"
+    tts_voice_profile: str = "shared-female-de-v1"
+    llm_base_url: str = "https://mate.olcon.de"
+    llm_model: str = "companion-gemma"
     embedding_base_url: str = "http://dgx-spark:8003"
+    ai_proxy_username: str = "voip-agent"
+    ai_proxy_password_file: str = "/run/secrets/shared_ai_password"
+    ai_proxy_ca_file: str = "/run/secrets/mate_ca.crt"
+    voice_priority_token_file: str = "/run/secrets/voice_priority_token"
+    voice_priority_base_url: str = "https://mate.olcon.de"
+
+    @field_validator("tts_voice_profile")
+    @classmethod
+    def _require_tts_voice_profile(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("tts_voice_profile must not be blank")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _validate_shared_ai_boundary(self) -> "Settings":
+        credentials = (
+            self.ai_proxy_username,
+            self.ai_proxy_password_file,
+            self.ai_proxy_ca_file,
+            self.voice_priority_token_file,
+        )
+        if not any(value.strip() for value in credentials):
+            return self
+        if not all(value.strip() for value in credentials):
+            raise ValueError(
+                "AI proxy username, password file, CA file, and priority token "
+                "file must be configured together"
+            )
+        for name, url in (
+            ("stt_base_url", self.stt_base_url),
+            ("tts_base_url", self.tts_base_url),
+            ("llm_base_url", self.llm_base_url),
+            ("voice_priority_base_url", self.voice_priority_base_url),
+        ):
+            if url.rstrip("/") != "https://mate.olcon.de":
+                raise ValueError(f"{name} must use https://mate.olcon.de")
+        return self
 
     # pgvector RAG
     db_dsn: str = "postgresql://user:pass@dgx-spark:5432/voip"

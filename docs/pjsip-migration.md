@@ -12,7 +12,18 @@ Asterisk, ARI, and ExternalMedia are no longer in the runtime path. The former `
    `ANSWER_DELAY_SECONDS`.
 4. PJSUA2 terminates the negotiated RTP codec into 16 kHz mono PCM through a custom audio port.
 5. `ConversationManager` runs VAD, turn detection, barge-in, STT, LLM, and TTS.
-6. Pipeline A-law output is converted to PCM and pulled by PJSUA2 for RTP transmission.
+6. Each completed LLM sentence is synthesized through `/v1/audio/speech`,
+   WAV-decoded, converted once from 24 to 16 kHz PCM, and written to the
+   existing bounded playback queue. `/v1/audio/speech/stream` is not used by
+   production VoIP playback.
+7. PJSIP starts playback after a 300 ms (9600-byte) prebuffer and pulls the
+   pipeline PCM directly; there is no A-law round trip in production.
+
+Completed LLM sentences use a bounded two-entry prefetch queue. TTS generation
+remains sequential, with the existing two-second maximum-ahead playback bound,
+and barge-in cancels the producers and clears prebuffered PCM. The legacy
+ARI/RTP rollback path alone converts pipeline PCM to 8 kHz G.711 A-law at its
+transport boundary.
 
 ## Deployment
 
@@ -25,8 +36,13 @@ docker compose up --detach --build
 docker compose logs --follow voip-agent
 ```
 
-The service uses host networking for SIP/RTP, runs as UID 10001 with all capabilities dropped,
-and mounts only a model-cache volume into its read-only filesystem.
+The service uses host networking for SIP/RTP, runs as UID 10001 with all
+capabilities dropped, and keeps its root filesystem read-only. It mounts the
+agent model-cache volume plus three read-only files:
+`shared_ai_password`, `mate_ca.crt`, and `voice_priority_token`. Password and
+token files must be regular, non-symlink files owned for UID/GID 10001 with
+mode `0400` (no group/other permissions); the CA must be a regular non-symlink
+file and must not be group/world writable.
 
 ## Acceptance Checks
 

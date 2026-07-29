@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 import httpx
 import numpy as np
 
-VOICE_INSTRUCT = "Eine warme, natürliche deutsche Stimme mit angemessenem Sprechtempo."
+DEFAULT_VOICE_PROFILE = "shared-female-de-v1"
 # faster-qwen3-tts wants full language names, not ISO codes. Omitting it sends
 # language=None, which the server rejects (500). This is a German-only agent, so
 # pin "german" rather than relying on per-utterance auto-detect (which can
@@ -12,10 +12,17 @@ LANGUAGE = "german"
 
 
 class TtsClient:
-    def __init__(self, base_url: str, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        client: httpx.AsyncClient | None = None,
+        *,
+        voice_profile: str = DEFAULT_VOICE_PROFILE,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._client = client or httpx.AsyncClient()
         self._owns_client = client is None
+        self._voice_profile = voice_profile
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -24,7 +31,7 @@ class TtsClient:
     async def synthesize(self, text: str) -> bytes:
         resp = await self._client.post(
             f"{self._base_url}/v1/audio/speech",
-            json={"input": text, "voice": VOICE_INSTRUCT, "language": LANGUAGE},
+            json={"input": text, "voice": self._voice_profile, "language": LANGUAGE},
             timeout=30.0,
         )
         resp.raise_for_status()
@@ -41,7 +48,7 @@ class TtsClient:
         custom POST /v1/audio/speech/stream subpath returning raw s16le mono
         24kHz (application/octet-stream, chunked, no RIFF header, no
         x-audio-sample-rate header) — so we read raw int16 and the 24kHz rate is
-        hardcoded downstream (resample_24k_to_8k). The server's SpeechRequest has
+        hardcoded downstream (stateful 24-to-16 kHz conversion). The server's SpeechRequest has
         no `stream`/`stream_format`/`response_format=pcm` fields; sending the
         OpenAI-canonical body (stream_format on the base endpoint, pcm format)
         would 422/break here. Migrate to stream_format once the server adopts it:
@@ -50,7 +57,7 @@ class TtsClient:
         async with self._client.stream(
             "POST",
             f"{self._base_url}/v1/audio/speech/stream",
-            json={"input": text, "voice": VOICE_INSTRUCT, "language": LANGUAGE},
+            json={"input": text, "voice": self._voice_profile, "language": LANGUAGE},
             timeout=30.0,
         ) as resp:
             resp.raise_for_status()
@@ -62,5 +69,4 @@ class TtsClient:
                     yield np.frombuffer(buf[:n], dtype="<i2")
                 carry = buf[n:]
             if carry:
-                # Trailing odd byte should not happen; drop with no crash.
-                pass
+                raise ValueError("TTS stream ended with incomplete PCM16 sample")

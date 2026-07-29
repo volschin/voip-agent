@@ -6,9 +6,17 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
+import numpy as np
 import websockets
 
-from agent.audio import VadBuffer, alaw_decode, resample_8k_to_16k
+from agent.audio import (
+    StreamingPcm16Resampler,
+    VadBuffer,
+    alaw_decode,
+    alaw_encode,
+    resample_8k_to_16k,
+    resample_pcm16,
+)
 from agent.config import Settings
 from agent.pipeline import VoicePipeline
 from agent.rtp import RtpServer
@@ -16,6 +24,13 @@ from agent.session import CallSession, SessionState
 from agent.turn_detector import TurnDetector
 
 log = logging.getLogger(__name__)
+
+
+def _pcm16_to_alaw(pcm: bytes) -> bytes:
+    if len(pcm) % 2:
+        raise ValueError("PCM16 requires an even byte count")
+    pcm_8k = resample_pcm16(np.frombuffer(pcm, dtype="<i2"), 16_000, 8_000)
+    return alaw_encode(np.frombuffer(pcm_8k, dtype="<i2"))
 
 
 class AriClient:
@@ -188,9 +203,9 @@ class AriClient:
             ext_channel_id = await self._create_external_media(channel_id, rtp_port)
             await self._bridge_channels(channel_id, ext_channel_id)
 
-            alaw = await self._pipeline.synthesize_alaw(self._s.greeting_text)
+            pcm = await self._pipeline.synthesize_pcm16(self._s.greeting_text)
             gen = self._generation[channel_id]
-            task = asyncio.create_task(self._play_audio(channel_id, alaw, session, gen))
+            task = asyncio.create_task(self._play_audio(channel_id, pcm, session, gen))
             self._playback_tasks[channel_id] = task
             log.info("Call %s from %s ready", channel_id, caller_id)
         except Exception:
@@ -250,10 +265,15 @@ class AriClient:
             pass
 
     async def _teardown_call(self, channel_id: str) -> None:
+        current = asyncio.current_task()
+        cancelled_tasks = []
         for tasks in (self._playback_tasks, self._consumer_tasks):
             task = tasks.pop(channel_id, None)
-            if task and not task.done():
+            if task and task is not current and not task.done():
                 task.cancel()
+                cancelled_tasks.append(task)
+        if cancelled_tasks:
+            await asyncio.gather(*cancelled_tasks, return_exceptions=True)
         self._audio_queues.pop(channel_id, None)
         self._out_queues.pop(channel_id, None)
         self._turn_locks.pop(channel_id, None)
@@ -269,7 +289,7 @@ class AriClient:
         log.info("Call %s ended", channel_id)
 
     async def _play_audio(
-        self, channel_id: str, alaw: bytes, session: CallSession, gen: int
+        self, channel_id: str, pcm: bytes, session: CallSession, gen: int
     ) -> None:
         rtp = self._rtp_servers.get(channel_id)
         if not rtp:
@@ -279,7 +299,7 @@ class AriClient:
             return
         session.transition(SessionState.SPEAKING)
         try:
-            await rtp.stream_audio(alaw)
+            await rtp.stream_audio(_pcm16_to_alaw(pcm))
             # Only return to LISTENING if we are still the current generation;
             # otherwise a newer turn owns the state and we must not touch it.
             if self._generation.get(channel_id) == gen and session.state == SessionState.SPEAKING:
@@ -287,12 +307,14 @@ class AriClient:
                 self._reset_vad(channel_id)
         except asyncio.CancelledError:
             pass
+        except Exception:
+            log.exception("Complete playback failed for %s", channel_id)
+            if self._generation.get(channel_id) == gen and session.state == SessionState.SPEAKING:
+                session.transition(SessionState.LISTENING)
+                self._reset_vad(channel_id)
 
     async def _play_stream(self, channel_id, session, gen, pcm) -> None:
-        """Drive a streaming turn: feed pipeline aLaw chunks into the RTP
-        chunk drain, entering SPEAKING on the first chunk. A supervising
-        TaskGroup owns producer (pipeline) + consumer (RTP drain); a single
-        cancel on barge-in tears both down."""
+        """Adapt pipeline PCM chunks to A-law at the legacy RTP boundary."""
         rtp = self._rtp_servers.get(channel_id)
         if not rtp:
             return
@@ -304,17 +326,25 @@ class AriClient:
         first = {"seen": False}
 
         async def produce():
+            resampler = StreamingPcm16Resampler(16_000, 8_000)
             try:
-                async for alaw in self._pipeline.process_turn_stream(session, pcm):
+                async for pcm_chunk in self._pipeline.process_turn_stream(session, pcm):
                     if self._generation.get(channel_id) != gen:
                         break
+                    if len(pcm_chunk) % 2:
+                        raise ValueError("PCM16 requires an even byte count")
+                    pcm_8k = resampler.process(np.frombuffer(pcm_chunk, dtype="<i2"))
+                    if not pcm_8k:
+                        continue
+                    alaw = alaw_encode(np.frombuffer(pcm_8k, dtype="<i2"))
                     if not first["seen"]:
                         first["seen"] = True
                         if session.state == SessionState.PROCESSING:
                             session.transition(SessionState.SPEAKING)
                     await out.put(alaw)
             finally:
-                await out.put(None)  # sentinel
+                resampler.close()
+            await out.put(None)
 
         try:
             async with asyncio.TaskGroup() as tg:

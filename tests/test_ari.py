@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from agent.ari import AriClient
+from agent.audio import alaw_encode, resample_pcm16
 from agent.session import CallSession, SessionState
 
 
@@ -195,13 +196,35 @@ async def test_play_audio_skips_stale_generation(ari):
     ari._generation["ch-1"] = 5  # current turn is gen 5
 
     # A playback scheduled for an older generation must not play or move state.
-    await ari._play_audio("ch-1", b"\xd5" * 160, session, gen=1)
+    await ari._play_audio("ch-1", b"\x00\x00" * 160, session, gen=1)
 
     rtp.stream_audio.assert_not_awaited()
     assert session.state == SessionState.PROCESSING
 
 
-async def test_play_audio_current_generation_plays(ari):
+async def test_ari_complete_pcm_is_adapted_to_alaw(ari):
+    session = CallSession(
+        call_id="ch-1", caller_id="+49", history=[], created_at=datetime.now(timezone.utc)
+    )
+    session.state = SessionState.PROCESSING
+    ari._vad_buffers["ch-1"] = MagicMock()
+    rtp = MagicMock()
+    rtp.stream_audio = AsyncMock()
+    ari._rtp_servers["ch-1"] = rtp
+    ari._generation["ch-1"] = 3
+    source = np.arange(1_600, dtype=np.int16)
+    pcm = source.astype("<i2", copy=False).tobytes()
+
+    await ari._play_audio("ch-1", pcm, session, gen=3)
+
+    rtp.stream_audio.assert_awaited_once()
+    expected_pcm = resample_pcm16(source, 16_000, 8_000)
+    expected = alaw_encode(np.frombuffer(expected_pcm, dtype="<i2"))
+    assert rtp.stream_audio.await_args.args[0] == expected
+    assert session.state == SessionState.LISTENING
+
+
+async def test_ari_complete_pcm_error_restores_listening_state(ari):
     session = CallSession(
         call_id="ch-1", caller_id="+49", history=[], created_at=datetime.now(timezone.utc)
     )
@@ -212,10 +235,10 @@ async def test_play_audio_current_generation_plays(ari):
     ari._rtp_servers["ch-1"] = rtp
     ari._generation["ch-1"] = 3
 
-    await ari._play_audio("ch-1", b"\xd5" * 160, session, gen=3)
+    await ari._play_audio("ch-1", b"\x00", session, gen=3)
 
-    rtp.stream_audio.assert_awaited_once()
-    assert session.state == SessionState.LISTENING
+    rtp.stream_audio.assert_not_awaited()
+    assert session.state is SessionState.LISTENING
 
 
 # --- #12 RTP bind collision handling ------------------------------------
@@ -292,6 +315,85 @@ async def test_streaming_play_enters_speaking_on_first_chunk(ari):
     assert SessionState.PROCESSING in states
     assert SessionState.SPEAKING in states
     assert session.state == SessionState.LISTENING  # back to listening at end
+
+
+async def test_ari_stream_adapter_retains_resampler_state(ari):
+    session = CallSession(
+        call_id="ch-1",
+        caller_id="+49123",
+        history=[],
+        created_at=datetime.now(timezone.utc),
+    )
+    session.transition(SessionState.LISTENING)
+    ari._generation["ch-1"] = 1
+    source = np.arange(-2_000, 2_000, dtype=np.int16)
+
+    async def fake_stream(_session, _pcm):
+        session.transition(SessionState.PROCESSING)
+        yield source[:101].astype("<i2", copy=False).tobytes()
+        yield source[101:].astype("<i2", copy=False).tobytes()
+
+    captured = []
+
+    async def capture_chunks(queue):
+        while (chunk := await queue.get()) is not None:
+            captured.append(chunk)
+
+    rtp = MagicMock()
+    rtp.stream_audio_chunks = capture_chunks
+    ari._rtp_servers["ch-1"] = rtp
+    ari._pipeline.process_turn_stream = fake_stream
+
+    await ari._play_stream("ch-1", session, gen=1, pcm=None)
+
+    expected_pcm = resample_pcm16(source, 16_000, 8_000)
+    expected = alaw_encode(np.frombuffer(expected_pcm, dtype="<i2"))
+    assert b"".join(captured) == expected
+
+
+async def test_ari_full_output_queue_does_not_deadlock_stream_cancellation(ari):
+    session = CallSession(
+        call_id="ch-1",
+        caller_id="+49123",
+        history=[],
+        created_at=datetime.now(timezone.utc),
+    )
+    session.transition(SessionState.LISTENING)
+    ari._generation["ch-1"] = 1
+    closed = asyncio.Event()
+
+    async def fake_stream(_session, _pcm):
+        session.transition(SessionState.PROCESSING)
+        try:
+            for _ in range(100):
+                yield b"\x00\x00" * 160
+        finally:
+            closed.set()
+
+    async def block_chunks(_queue):
+        await asyncio.Event().wait()
+
+    rtp = MagicMock()
+    rtp.stream_audio_chunks = block_chunks
+    ari._rtp_servers["ch-1"] = rtp
+    ari._pipeline.process_turn_stream = fake_stream
+    task = asyncio.create_task(ari._play_stream("ch-1", session, gen=1, pcm=None))
+
+    for _ in range(100):
+        if ari._out_queues.get("ch-1") and ari._out_queues["ch-1"].full():
+            break
+        await asyncio.sleep(0)
+    assert ari._out_queues["ch-1"].full()
+
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=0.05)
+    completed_without_unblock = task in done
+    if not completed_without_unblock:
+        ari._out_queues["ch-1"].get_nowait()
+        await asyncio.wait({task}, timeout=0.1)
+
+    assert completed_without_unblock
+    assert closed.is_set()
 
 
 async def test_bargein_during_processing_cancels_and_starts_stream(ari):

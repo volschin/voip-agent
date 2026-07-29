@@ -4,6 +4,13 @@ import numpy as np
 import webrtcvad
 from scipy.signal import resample_poly
 
+PCM16_SAMPLE_RATE = 16_000
+PCM16_BYTES_PER_SAMPLE = 2
+PCM16_PLAYBACK_BLOCK_MS = 20
+PCM16_PLAYBACK_BLOCK_BYTES = (
+    PCM16_SAMPLE_RATE * PCM16_BYTES_PER_SAMPLE * PCM16_PLAYBACK_BLOCK_MS // 1000
+)
+
 
 def alaw_decode(data: bytes) -> np.ndarray:
     return np.frombuffer(audioop.alaw2lin(data, 2), dtype=np.int16)
@@ -19,6 +26,47 @@ def resample_8k_to_16k(samples: np.ndarray) -> np.ndarray:
 
 def resample_24k_to_8k(samples: np.ndarray) -> np.ndarray:
     return resample_poly(samples, up=1, down=3).astype(np.int16)
+
+
+class StreamingPcm16Resampler:
+    """Resample one PCM utterance while retaining state across input chunks."""
+
+    def __init__(self, input_rate: int, output_rate: int) -> None:
+        if input_rate <= 0 or output_rate <= 0:
+            raise ValueError("sample rates must be positive")
+        self._input_rate = input_rate
+        self._output_rate = output_rate
+        self._state = None
+        self._closed = False
+
+    def process(self, samples: np.ndarray) -> bytes:
+        if self._closed:
+            raise RuntimeError("resampler is closed")
+        if samples.ndim != 1 or samples.dtype != np.int16:
+            raise ValueError("PCM must be one-dimensional int16")
+        output, self._state = audioop.ratecv(
+            samples.astype("<i2", copy=False).tobytes(),
+            2,
+            1,
+            self._input_rate,
+            self._output_rate,
+            self._state,
+        )
+        return output
+
+    def close(self) -> None:
+        self._closed = True
+        self._state = None
+
+
+def resample_pcm16(samples: np.ndarray, input_rate: int, output_rate: int) -> bytes:
+    """Resample a complete mono int16 buffer to little-endian PCM bytes."""
+
+    stream = StreamingPcm16Resampler(input_rate, output_rate)
+    try:
+        return stream.process(samples)
+    finally:
+        stream.close()
 
 
 class VadBuffer:

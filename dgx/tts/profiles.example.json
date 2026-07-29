@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "usage_scope": "private-user-assistant-only",
+  "profiles": [
+    {
+      "id": "shared-female-de-v1",
+      "audio": "shared-female-de-v1.wav",
+      "reference_text": "Example only. Do not deploy this manifest.",
+      "language": "german",
+      "source_type": "licensed-human-reference-private",
+      "source_model": null,
+      "source_revision": "private-source-v1",
+      "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "selected_at": "2026-07-29T00:00:00Z",
+      "evaluation_score": 0,
+      "selected_candidate_id": "candidate-example",
+      "design_instruction": null
+    }
+  ]
+}

@@ -71,6 +71,10 @@ def test_settings_load_defaults_and_overrides(monkeypatch):
         llm_base_url="http://llm",
         llm_model="hermes",
         embedding_base_url="http://emb",
+        ai_proxy_username="",
+        ai_proxy_password_file="",
+        ai_proxy_ca_file="",
+        voice_priority_token_file="",
         db_dsn="postgresql://x",
         azure_tenant_id="t",
         azure_client_id="c",
@@ -97,3 +101,82 @@ def test_turn_detection_defaults(settings):
     # Removed HTTP-only fields must be gone.
     assert not hasattr(settings, "turn_detector_url")
     assert not hasattr(settings, "turn_classify_timeout_ms")
+
+
+def test_shared_ai_credentials_require_exact_traefik_origins(tmp_path):
+    password = tmp_path / "password"
+    ca = tmp_path / "ca.crt"
+    token = tmp_path / "priority-token"
+    password.write_text("secret", encoding="utf-8")
+    ca.write_text("ca", encoding="utf-8")
+    token.write_text("token", encoding="utf-8")
+    shared = {
+        "ai_proxy_username": "voip-agent",
+        "ai_proxy_password_file": str(password),
+        "ai_proxy_ca_file": str(ca),
+        "voice_priority_token_file": str(token),
+    }
+
+    settings = Settings(
+        **_valid_kwargs(
+            stt_base_url="https://mate.olcon.de",
+            tts_base_url="https://mate.olcon.de",
+            llm_base_url="https://mate.olcon.de",
+            **shared,
+        )
+    )
+
+    assert settings.voice_priority_base_url == "https://mate.olcon.de"
+
+
+def test_shared_ai_defaults_are_fail_closed_to_traefik() -> None:
+    settings = Settings(**_valid_kwargs())
+
+    assert settings.stt_base_url == "https://mate.olcon.de"
+    assert settings.tts_base_url == "https://mate.olcon.de"
+    assert settings.llm_base_url == "https://mate.olcon.de"
+    assert settings.llm_model == "companion-gemma"
+    assert settings.ai_proxy_username == "voip-agent"
+    assert settings.ai_proxy_password_file == "/run/secrets/shared_ai_password"
+    assert settings.ai_proxy_ca_file == "/run/secrets/mate_ca.crt"
+    assert settings.voice_priority_token_file == "/run/secrets/voice_priority_token"
+    assert settings.voice_priority_base_url == "https://mate.olcon.de"
+    assert settings.tts_voice_profile == "shared-female-de-v1"
+
+
+@pytest.mark.parametrize("value", ["", " "])
+def test_tts_voice_profile_rejects_blank_values(monkeypatch, value: str) -> None:
+    monkeypatch.delenv("TTS_VOICE_PROFILE", raising=False)
+
+    with pytest.raises(ValueError, match="tts_voice_profile"):
+        Settings(**_valid_kwargs(tts_voice_profile=value))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["stt_base_url", "tts_base_url", "llm_base_url", "voice_priority_base_url"],
+)
+def test_shared_ai_credentials_reject_direct_or_different_origins(
+    tmp_path,
+    field,
+):
+    password = tmp_path / "password"
+    ca = tmp_path / "ca.crt"
+    token = tmp_path / "priority-token"
+    password.write_text("secret", encoding="utf-8")
+    ca.write_text("ca", encoding="utf-8")
+    token.write_text("token", encoding="utf-8")
+    values = {
+        "stt_base_url": "https://mate.olcon.de",
+        "tts_base_url": "https://mate.olcon.de",
+        "llm_base_url": "https://mate.olcon.de",
+        "voice_priority_base_url": "https://mate.olcon.de",
+        "ai_proxy_username": "voip-agent",
+        "ai_proxy_password_file": str(password),
+        "ai_proxy_ca_file": str(ca),
+        "voice_priority_token_file": str(token),
+    }
+    values[field] = "http://dgx-spark:8001"
+
+    with pytest.raises(ValueError, match="mate.olcon.de"):
+        Settings(**_valid_kwargs(**values))

@@ -12,6 +12,7 @@ services:
       PJSIP_LOG_LEVEL: ${PJSIP_LOG_LEVEL:-2}
     extra_hosts:
       - "dgx-spark:${DGX_HOST_IP:-192.168.68.41}"
+      - "mate.olcon.de:${DGX_HOST_IP:-192.168.68.41}"
     network_mode: host
     restart: unless-stopped
     init: true
@@ -20,6 +21,9 @@ services:
       - /tmp:size=64m,mode=1777
     volumes:
       - agent-model-cache:/home/voip-agent/.cache
+      - /home/volsch/voip-agent/secrets/shared_ai_password:/run/secrets/shared_ai_password:ro
+      - /home/volsch/voip-agent/secrets/mate_ca.crt:/run/secrets/mate_ca.crt:ro
+      - /home/volsch/voip-agent/secrets/voice_priority_token:/run/secrets/voice_priority_token:ro
     cap_drop:
       - ALL
     security_opt:
