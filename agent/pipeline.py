@@ -165,8 +165,12 @@ class VoicePipeline:
                     raise RuntimeError("llm stream failed")
                 if kind == "done":
                     break
+                emitted = False
                 async for c in self._tts_pcm16_chunks(payload):
+                    emitted = True
                     yield c
+                if not emitted:
+                    raise RuntimeError("TTS returned no audio")
         except Exception:
             log.exception("LLM/TTS failed mid-stream")
             # Leave the user turn in history (the model saw it); do not append

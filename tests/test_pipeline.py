@@ -342,3 +342,36 @@ async def test_process_turn_stream_recovers_on_midstream_error():
     chunks = [c async for c in pipe.process_turn_stream(s, _pcm_zero())]
     assert chunks
     assert tts_calls[-1] == FALLBACK_RECOVERY
+
+
+@pytest.mark.parametrize("failed_audio", [b"", b"not a wav"])
+async def test_process_turn_stream_recovers_when_sentence_synthesis_is_empty(failed_audio):
+    async def stt(_pcm):
+        return "hallo"
+
+    async def llm_stream(_msgs, _caller, on_tool_round=None):
+        yield "Antwort."
+
+    tts_calls = []
+
+    async def tts(text):
+        tts_calls.append(text)
+        if text == FALLBACK_RECOVERY:
+            return _wav(2400)
+        return failed_audio
+
+    pipe = VoicePipeline(
+        stt=stt,
+        llm=None,
+        tts=tts,
+        llm_stream=llm_stream,
+        tts_stream=AsyncMock(),
+    )
+    session = _strm_session()
+    session.transition(SessionState.LISTENING)
+
+    chunks = [chunk async for chunk in pipe.process_turn_stream(session, _pcm_zero())]
+
+    assert chunks
+    assert tts_calls == ["Antwort.", FALLBACK_RECOVERY]
+    assert session.history == [{"role": "user", "content": "hallo"}]
