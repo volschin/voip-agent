@@ -117,6 +117,7 @@ Expected:
 | `MAX_CALL_SECONDS` | `900` | Maximum accepted-call duration |
 | `STT_BASE_URL` | `https://mate.olcon.de` | Exact authenticated Qwen3-ASR route |
 | `TTS_BASE_URL` | `https://mate.olcon.de` | Exact authenticated Qwen3-TTS routes |
+| `TTS_VOICE_PROFILE` | `shared-female-de-v1` | Server-owned private voice profile ID |
 | `LLM_BASE_URL` | `https://mate.olcon.de` | Exact authenticated Gemma chat route |
 | `LLM_MODEL` | `companion-gemma` | Model name passed to `/v1/chat/completions` |
 | `AI_PROXY_USERNAME` | `voip-agent` | Dedicated Traefik BasicAuth account |

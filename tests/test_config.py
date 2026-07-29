@@ -141,6 +141,15 @@ def test_shared_ai_defaults_are_fail_closed_to_traefik() -> None:
     assert settings.ai_proxy_ca_file == "/run/secrets/mate_ca.crt"
     assert settings.voice_priority_token_file == "/run/secrets/voice_priority_token"
     assert settings.voice_priority_base_url == "https://mate.olcon.de"
+    assert settings.tts_voice_profile == "shared-female-de-v1"
+
+
+@pytest.mark.parametrize("value", ["", " "])
+def test_tts_voice_profile_rejects_blank_values(monkeypatch, value: str) -> None:
+    monkeypatch.delenv("TTS_VOICE_PROFILE", raising=False)
+
+    with pytest.raises(ValueError, match="tts_voice_profile"):
+        Settings(**_valid_kwargs(tts_voice_profile=value))
 
 
 @pytest.mark.parametrize(

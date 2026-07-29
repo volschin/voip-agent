@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     # DGX Spark AI services
     stt_base_url: str = "https://mate.olcon.de"
     tts_base_url: str = "https://mate.olcon.de"
+    tts_voice_profile: str = "shared-female-de-v1"
     llm_base_url: str = "https://mate.olcon.de"
     llm_model: str = "companion-gemma"
     embedding_base_url: str = "http://dgx-spark:8003"
@@ -88,6 +89,13 @@ class Settings(BaseSettings):
     ai_proxy_ca_file: str = "/run/secrets/mate_ca.crt"
     voice_priority_token_file: str = "/run/secrets/voice_priority_token"
     voice_priority_base_url: str = "https://mate.olcon.de"
+
+    @field_validator("tts_voice_profile")
+    @classmethod
+    def _require_tts_voice_profile(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("tts_voice_profile must not be blank")
+        return value.strip()
 
     @model_validator(mode="after")
     def _validate_shared_ai_boundary(self) -> "Settings":

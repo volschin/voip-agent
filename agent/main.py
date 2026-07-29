@@ -69,7 +69,11 @@ async def main() -> None:
     ai_client = build_ai_client(s)
     local_client = httpx.AsyncClient()
     stt = SttClient(base_url=s.stt_base_url, client=ai_client)
-    tts = TtsClient(base_url=s.tts_base_url, client=ai_client)
+    tts = TtsClient(
+        base_url=s.tts_base_url,
+        client=ai_client,
+        voice_profile=s.tts_voice_profile,
+    )
     priority = PriorityLeaseClient(
         base_url=s.voice_priority_base_url,
         client=ai_client,
