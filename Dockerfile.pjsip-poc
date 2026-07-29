@@ -14,6 +14,11 @@ RUN apt-get update \
 
 RUN python -m pip install --no-cache-dir setuptools wheel
 
+RUN python -m pip wheel \
+    --no-cache-dir \
+    --wheel-dir /tmp/python-wheels \
+    "webrtcvad-wheels>=2.0.14"
+
 WORKDIR /src/pjproject
 RUN git init \
     && git remote add origin https://github.com/pjsip/pjproject.git \
@@ -44,6 +49,7 @@ RUN apt-get update \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin voip-agent
 
 COPY --from=pjsip-builder /src/pjproject/pjsip-apps/src/swig/python/dist/*.whl /tmp/
+COPY --from=pjsip-builder /tmp/python-wheels/*.whl /tmp/
 RUN python -m pip install --no-cache-dir /tmp/*.whl \
     && rm -f /tmp/*.whl \
     && python -c "import pjsua2; print('pjsua2 import OK')"
