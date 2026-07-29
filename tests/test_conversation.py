@@ -95,12 +95,91 @@ async def test_priority_failure_starts_no_session_or_ai_operation(settings):
     priority = MagicMock()
     priority.acquire = AsyncMock(side_effect=PriorityUnavailable())
     manager = ConversationManager(settings, pipeline, priority_client=priority)
+    sink = FakeSink()
+    terminate_transport = MagicMock()
 
-    started = await manager.start_call("1", "+49123", FakeSink())
+    started = await manager.start_call(
+        "1",
+        "+49123",
+        sink,
+        terminate_transport=terminate_transport,
+    )
 
     assert started is False
     assert manager.call_count == 0
     pipeline.synthesize_pcm16.assert_not_awaited()
+    assert sink.closed == 1
+    terminate_transport.assert_called_once_with()
+
+
+async def test_disconnect_while_priority_is_pending_releases_late_lease_and_allows_reuse(
+    settings,
+):
+    first_acquire_started = asyncio.Event()
+    finish_first_acquire = asyncio.Event()
+    first_lease = MagicMock()
+    first_lease.renew = AsyncMock()
+    first_lease.release = AsyncMock()
+    second_lease = MagicMock()
+    second_lease.renew = AsyncMock()
+    second_lease.release = AsyncMock()
+    acquire_count = 0
+
+    async def acquire():
+        nonlocal acquire_count
+        acquire_count += 1
+        if acquire_count == 1:
+            first_acquire_started.set()
+            await finish_first_acquire.wait()
+            return first_lease
+        return second_lease
+
+    pipeline = MagicMock()
+    pipeline.synthesize_pcm16 = AsyncMock(return_value=b"greeting")
+    priority = MagicMock()
+    priority.acquire = AsyncMock(side_effect=acquire)
+    manager = ConversationManager(settings, pipeline, priority_client=priority)
+    first_sink = FakeSink()
+    first_terminate = MagicMock()
+    first_start = asyncio.create_task(
+        manager.start_call(
+            "1",
+            "+49123",
+            first_sink,
+            terminate_transport=first_terminate,
+        )
+    )
+    await first_acquire_started.wait()
+
+    await manager.stop_call("1")
+
+    second_sink = FakeSink()
+    second_terminate = MagicMock()
+    assert (
+        await manager.start_call(
+            "1",
+            "+49456",
+            second_sink,
+            terminate_transport=second_terminate,
+        )
+        is True
+    )
+    finish_first_acquire.set()
+    assert await first_start is False
+    await asyncio.sleep(0)
+
+    assert manager.call_count == 1
+    assert manager._sinks["1"] is second_sink
+    assert first_sink.played == []
+    assert first_sink.closed == 1
+    first_terminate.assert_not_called()
+    first_lease.release.assert_awaited_once()
+    first_lease.renew.assert_not_awaited()
+    assert second_sink.played == [b"greeting"]
+
+    await manager.stop_call("1")
+    second_lease.release.assert_awaited_once()
+    second_terminate.assert_not_called()
 
 
 async def test_priority_renewal_failure_stops_call_and_clears_media(settings):
@@ -125,6 +204,26 @@ async def test_priority_renewal_failure_stops_call_and_clears_media(settings):
     assert sink.cleared >= 1
     assert sink.closed == 1
     lease.release.assert_awaited_once()
+
+
+async def test_remote_disconnect_cleanup_does_not_terminate_transport(settings):
+    manager, _pipeline = _manager(settings)
+    terminate_transport = MagicMock()
+
+    assert (
+        await manager.start_call(
+            "1",
+            "+49123",
+            FakeSink(),
+            terminate_transport=terminate_transport,
+        )
+        is True
+    )
+
+    await manager.stop_call("1")
+    await manager.stop_call("1")
+
+    terminate_transport.assert_not_called()
 
 
 async def test_pcm_barge_in_cancels_playback_and_starts_turn(settings):

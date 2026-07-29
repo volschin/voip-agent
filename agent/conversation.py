@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -34,6 +36,24 @@ class AudioSink(Protocol):
     def clear(self) -> None: ...
 
     def close(self) -> None: ...
+
+
+@dataclass
+class _TransportTermination:
+    callback: Callable[[], None] | None
+    invoked: bool = False
+
+    def invoke(self) -> None:
+        if self.callback is None or self.invoked:
+            return
+        self.invoked = True
+        self.callback()
+
+
+@dataclass
+class _PendingStart:
+    sink: AudioSink
+    termination: _TransportTermination
 
 
 class ConversationManager:
@@ -72,6 +92,8 @@ class ConversationManager:
         self._generation: dict[str, int] = {}
         self._priority_leases: dict[str, LeaseHandle] = {}
         self._priority_tasks: dict[str, asyncio.Task] = {}
+        self._pending_starts: dict[str, _PendingStart] = {}
+        self._transport_terminations: dict[str, _TransportTermination] = {}
 
     @property
     def call_count(self) -> int:
@@ -90,15 +112,41 @@ class ConversationManager:
         call_id: str,
         caller_id: str,
         sink: AudioSink,
+        *,
+        terminate_transport: Callable[[], None] | None = None,
     ) -> bool:
         if call_id in self._sessions:
             return True
+        if call_id in self._pending_starts:
+            return False
+        pending = _PendingStart(sink, _TransportTermination(terminate_transport))
+        self._pending_starts[call_id] = pending
         try:
             lease = await self._priority_client.acquire()
         except PriorityUnavailable:
             log.warning("Voice priority unavailable; call %s not started", call_id)
+            if self._pending_starts.get(call_id) is pending:
+                self._pending_starts.pop(call_id, None)
+                sink.clear()
+                sink.close()
+                pending.termination.invoke()
             return False
+        except asyncio.CancelledError:
+            if self._pending_starts.get(call_id) is pending:
+                self._pending_starts.pop(call_id, None)
+                sink.clear()
+                sink.close()
+            raise
+
+        if self._pending_starts.get(call_id) is not pending:
+            try:
+                await lease.release()
+            except PriorityUnavailable:
+                log.warning("Voice priority release failed for stale call %s", call_id)
+            return False
+        self._pending_starts.pop(call_id, None)
         self._priority_leases[call_id] = lease
+        self._transport_terminations[call_id] = pending.termination
 
         session = CallSession(
             call_id=call_id,
@@ -125,7 +173,7 @@ class ConversationManager:
             pcm = await self._pipeline.synthesize_pcm16(self._s.greeting_text)
         except Exception:
             log.exception("Greeting synthesis failed for call %s", call_id)
-            await self.stop_call(call_id)
+            await self.stop_call(call_id, terminate_transport=True)
             return False
 
         if self._sessions.get(call_id) is not session:
@@ -149,7 +197,7 @@ class ConversationManager:
             raise
         except PriorityUnavailable:
             log.warning("Voice priority renewal failed; ending call %s", call_id)
-            await self.stop_call(call_id)
+            await self.stop_call(call_id, terminate_transport=True)
 
     def enqueue_pcm(self, call_id: str, pcm_16k: bytes) -> None:
         """Enqueue one PJSIP media frame; safe to schedule from another thread."""
@@ -180,7 +228,11 @@ class ConversationManager:
         except asyncio.CancelledError:
             pass
 
-    async def stop_call(self, call_id: str) -> None:
+    async def stop_call(self, call_id: str, *, terminate_transport: bool = False) -> None:
+        pending = self._pending_starts.pop(call_id, None)
+        if pending is not None:
+            pending.sink.clear()
+            pending.sink.close()
         heartbeat = self._priority_tasks.pop(call_id, None)
         current = asyncio.current_task()
         if heartbeat and heartbeat is not current and not heartbeat.done():
@@ -212,10 +264,16 @@ class ConversationManager:
                 await lease.release()
             except PriorityUnavailable:
                 log.warning("Voice priority release failed for call %s", call_id)
+        termination = self._transport_terminations.pop(call_id, None)
+        if terminate_transport and termination is not None:
+            try:
+                termination.invoke()
+            except Exception:
+                log.exception("Transport termination failed for call %s", call_id)
         log.info("Call %s conversation ended", call_id)
 
     async def stop_all(self) -> None:
-        for call_id in list(self._sessions):
+        for call_id in set(self._sessions) | set(self._pending_starts):
             await self.stop_call(call_id)
 
     async def _play_pcm16(

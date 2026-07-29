@@ -193,13 +193,15 @@ class PjsipClient:
                 call.call_id,
                 call.caller_id,
                 call.sink,
+                terminate_transport=call.terminate,
             )
         except Exception:
             log.exception("Could not start conversation for call %s", call.call_id)
-            started = False
-        if not started:
             call.sink.clear()
             call.terminate()
+            return
+        if not started:
+            log.info("Conversation start aborted for call %s", call.call_id)
 
     @property
     def registrar_uri(self) -> str:

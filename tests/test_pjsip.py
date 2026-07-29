@@ -5,12 +5,14 @@ from unittest.mock import AsyncMock, MagicMock
 import numpy as np
 import pytest
 
+from agent.conversation import ConversationManager
 from agent.pjsip import (
     PcmPlaybackBuffer,
     PjsipAudioSink,
     PjsipClient,
     caller_id_from_uri,
 )
+from agent.priority import PriorityUnavailable
 
 
 class RecordingPlaybackBuffer(PcmPlaybackBuffer):
@@ -161,5 +163,39 @@ async def test_failed_priority_acquisition_terminates_unusable_call(settings):
 
     await client._start_conversation(call)
 
-    call.sink.clear.assert_called_once()
-    call.terminate.assert_called_once()
+    conversations.start_call.assert_awaited_once_with(
+        "7",
+        "+49123",
+        call.sink,
+        terminate_transport=call.terminate,
+    )
+
+
+async def test_priority_renewal_failure_terminates_native_call_once(settings):
+    pipeline = MagicMock()
+    pipeline.synthesize_pcm16 = AsyncMock(return_value=b"greeting")
+    lease = MagicMock()
+    lease.renew = AsyncMock(side_effect=PriorityUnavailable())
+    lease.release = AsyncMock()
+    priority = MagicMock()
+    priority.acquire = AsyncMock(return_value=lease)
+    conversations = ConversationManager(settings, pipeline, priority_client=priority)
+    conversations.PRIORITY_HEARTBEAT_SECONDS = 0.01
+    client = PjsipClient(settings=settings, conversations=conversations)
+    call = MagicMock()
+    call.call_id = "7"
+    call.caller_id = "+49123"
+    playback = PcmPlaybackBuffer()
+    call.sink = PjsipAudioSink(playback)
+
+    await client._start_conversation(call)
+    for _ in range(20):
+        if conversations.call_count == 0:
+            break
+        await asyncio.sleep(0.01)
+    await conversations.stop_call("7")
+
+    assert conversations.call_count == 0
+    assert playback.buffered_bytes == 0
+    call.terminate.assert_called_once_with()
+    lease.release.assert_awaited_once()
