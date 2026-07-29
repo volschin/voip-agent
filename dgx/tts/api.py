@@ -166,7 +166,7 @@ async def _run_stable_synthesis(
 async def _cancel_stable_operation(operation: asyncio.Task, cancelled: Event) -> None:
     cancelled.set()
     operation.cancel()
-    with suppress(asyncio.CancelledError):
+    with suppress(asyncio.CancelledError, Exception):
         await operation
 
 

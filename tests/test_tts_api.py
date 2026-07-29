@@ -369,6 +369,32 @@ async def test_cancel_stable_operation_settles_wrapper_without_waiting_for_worke
         await _wait_for_thread_event(worker_finished)
 
 
+async def test_cancel_stable_operation_consumes_completed_runtime_error() -> None:
+    loop = asyncio.get_running_loop()
+    previous_exception_handler = loop.get_exception_handler()
+    loop_errors: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+
+    async def fail_immediately() -> None:
+        raise RuntimeError("late synthesis failure")
+
+    operation = asyncio.create_task(fail_immediately())
+    try:
+        await asyncio.sleep(0)
+        assert operation.done()
+        cancelled = threading.Event()
+
+        await _cancel_stable_operation(operation, cancelled)
+
+        assert cancelled.is_set()
+        del operation
+        gc.collect()
+        await asyncio.sleep(0)
+        assert loop_errors == []
+    finally:
+        loop.set_exception_handler(previous_exception_handler)
+
+
 async def test_stable_timeout_includes_saturated_executor_queue_time() -> None:
     runtime = _StableRuntime()
     request = _DisconnectRequest()
