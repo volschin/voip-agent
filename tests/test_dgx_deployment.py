@@ -130,3 +130,22 @@ def test_tts_image_copies_clone_code_but_no_private_profile_assets() -> None:
     assert not any(".wav" in line or "profiles/" in line for line in copy_lines)
     assert "generate_voice_design" not in server
     assert 'CMD ["python3", "-m", "dgx.tts.server"]' in dockerfile
+
+
+def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
+    dockerfile = (ROOT / "dgx/tts/Dockerfile").read_text(encoding="utf-8")
+
+    assert (
+        "FROM ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3@"
+        "sha256:6506ebcb79b1bd0d48f8afca127984791f32345333be1be0fef334eaa5a9e23a" in dockerfile
+    )
+    for dependency in (
+        "faster-qwen3-tts==0.2.6",
+        "qwen-tts==0.1.1",
+        "fastapi==0.135.3",
+        "uvicorn[standard]==0.44.0",
+        "pydantic==2.12.5",
+        "flash-attn==2.8.3",
+        "av==17.0.1",
+    ):
+        assert dependency in dockerfile

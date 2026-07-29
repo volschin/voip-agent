@@ -1,17 +1,17 @@
 # Thin TTS sidecar — reuses the v3 vLLM image's Python/torch/audio stack
 # (aarch64-native, has librosa/soundfile already). Adds qwen-tts + FastAPI.
-FROM ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3
+FROM ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3@sha256:6506ebcb79b1bd0d48f8afca127984791f32345333be1be0fef334eaa5a9e23a
 
 # qwen-tts depends on `sox` system binary for some audio I/O paths
 RUN apt-get update && apt-get install -y --no-install-recommends sox libsox-fmt-all \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir --break-system-packages \
-      "faster-qwen3-tts" \
-      "qwen-tts" \
-      "fastapi>=0.110" \
-      "uvicorn[standard]>=0.27" \
-      "pydantic>=2.5"
+      "faster-qwen3-tts==0.2.6" \
+      "qwen-tts==0.1.1" \
+      "fastapi==0.135.3" \
+      "uvicorn[standard]==0.44.0" \
+      "pydantic==2.12.5"
 
 # flash-attn for max throughput. The qwen-asr README explicitly recommends this
 # install style ("--no-build-isolation"). We don't need to compile from source if
@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir --break-system-packages \
 ENV MAX_JOBS=4 \
     FLASH_ATTN_CUDA_ARCHS=120
 RUN pip install --no-cache-dir --break-system-packages --no-build-isolation \
-      "flash-attn>=2.7" \
+      "flash-attn==2.8.3" \
  || (echo "flash-attn install failed; will fall back to sdpa at runtime" && true)
 
 # vLLM's audio decode path needs `av` (PyAV) as the container-format fallback
@@ -36,7 +36,7 @@ RUN pip install --no-cache-dir --break-system-packages --no-build-isolation \
 # re-resolves vLLM's core deps and downgrades flashinfer + apache-tvm-ffi,
 # which silently regresses TTS inference latency by ~5x. PyAV is the only
 # missing piece — soundfile is already there.
-RUN pip install --no-cache-dir --break-system-packages --no-deps "av>=12"
+RUN pip install --no-cache-dir --break-system-packages --no-deps "av==17.0.1"
 
 WORKDIR /app
 COPY tts/server.py /app/dgx/tts/server.py

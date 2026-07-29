@@ -15,6 +15,15 @@ from typing import Any
 
 PROFILE_ID = "shared-female-de-v1"
 USAGE_SCOPE = "private-user-assistant-only"
+SYNTHETIC_SOURCE_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+SYNTHETIC_SOURCE_REVISION = "5ecdb67327fd37bb2e042aab12ff7391903235d3"
+SYNTHETIC_DESIGN_INSTRUCTION = (
+    "Eine erwachsene Frau zwischen etwa dreißig und vierzig Jahren mit warmer, "
+    "natürlicher und vertrauenswürdiger Stimme. Klares neutrales Hochdeutsch ohne "
+    "erkennbaren Regionalakzent, ruhiges mittleres Sprechtempo, deutliche, aber "
+    "nicht überbetonte Artikulation und sanfte lebendige Intonation. Professionell "
+    "und freundlich, weder kindlich noch werblich, nicht hauchig und nicht flirtend."
+)
 SOURCE_TYPES = {
     "licensed-human-reference-private",
     "synthetic-qwen-voice-design",
@@ -35,6 +44,7 @@ _PROFILE_FIELDS = {
     "reference_text",
     "language",
     "source_type",
+    "source_model",
     "source_revision",
     "source_sha256",
     "sha256",
@@ -56,6 +66,7 @@ class VoiceProfile:
     reference_text: str
     language: str
     source_type: str
+    source_model: str | None
     source_revision: str
     source_sha256: str
     sha256: str
@@ -145,6 +156,7 @@ def _load_profile(entry: Any, profile_dir: Path) -> VoiceProfile:
     source_type = entry["source_type"]
     if source_type not in SOURCE_TYPES:
         raise ProfileError("profile source_type is invalid")
+    source_model = entry["source_model"]
     source_revision = _nonblank_string(entry["source_revision"], "source_revision")
     source_sha256 = _hash(entry["source_sha256"], "source_sha256")
     audio_sha256 = _hash(entry["sha256"], "sha256")
@@ -161,10 +173,16 @@ def _load_profile(entry: Any, profile_dir: Path) -> VoiceProfile:
 
     instruction = entry["design_instruction"]
     if source_type == "licensed-human-reference-private":
+        if source_model is not None:
+            raise ProfileError("profile licensed provenance is invalid")
         if instruction is not None:
             raise ProfileError("profile design_instruction must be null for licensed source")
-    elif not isinstance(instruction, str) or not instruction.strip():
-        raise ProfileError("profile design_instruction is required for synthetic source")
+    elif (
+        source_model != SYNTHETIC_SOURCE_MODEL
+        or source_revision != SYNTHETIC_SOURCE_REVISION
+        or instruction != SYNTHETIC_DESIGN_INSTRUCTION
+    ):
+        raise ProfileError("profile synthetic provenance is invalid")
 
     _validate_wav(audio_path)
     return VoiceProfile(
@@ -173,6 +191,7 @@ def _load_profile(entry: Any, profile_dir: Path) -> VoiceProfile:
         reference_text=reference_text,
         language="german",
         source_type=source_type,
+        source_model=source_model,
         source_revision=source_revision,
         source_sha256=source_sha256,
         sha256=audio_sha256,
@@ -234,6 +253,9 @@ def _validate_wav(path: Path) -> None:
                 raise ProfileError("profile audio must be uncompressed PCM")
             if audio.getnframes() <= 0:
                 raise ProfileError("profile audio must not be empty")
+            expected_bytes = audio.getnframes() * audio.getnchannels() * audio.getsampwidth()
+            if len(audio.readframes(audio.getnframes())) != expected_bytes:
+                raise ProfileError("profile audio must be a valid WAV")
     except ProfileError:
         raise
     except (EOFError, OSError, wave.Error) as error:

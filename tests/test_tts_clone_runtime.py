@@ -1,3 +1,6 @@
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +17,7 @@ def _profile(tmp_path: Path) -> VoiceProfile:
         reference_text="Guten Tag.",
         language="german",
         source_type="licensed-human-reference-private",
+        source_model=None,
         source_revision="private-v1",
         source_sha256="1" * 64,
         sha256="2" * 64,
@@ -109,3 +113,70 @@ def test_clone_runtime_rejects_unknown_profile_before_model_call(tmp_path: Path)
         runtime.synthesize("Hallo", "other-profile", "german")
 
     assert model.calls == []
+
+
+def test_clone_runtime_serializes_model_inference(tmp_path: Path) -> None:
+    profile = _profile(tmp_path)
+
+    class ConcurrentModel(ExactCloneModel):
+        def __init__(self, selected_profile: VoiceProfile) -> None:
+            super().__init__(selected_profile)
+            self.active = 0
+            self.maximum_active = 0
+            self.counter_lock = threading.Lock()
+
+        def generate_voice_clone(self, **kwargs):
+            with self.counter_lock:
+                self.active += 1
+                self.maximum_active = max(self.maximum_active, self.active)
+            time.sleep(0.05)
+            try:
+                return self.warm_audio, self.sample_rate
+            finally:
+                with self.counter_lock:
+                    self.active -= 1
+
+    model = ConcurrentModel(profile)
+    runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(runtime.synthesize, f"Text {index}", profile.profile_id, "de")
+            for index in range(4)
+        ]
+        for future in futures:
+            future.result(timeout=2)
+
+    assert model.maximum_active == 1
+
+
+def test_clone_runtime_holds_lock_for_complete_stream_lifetime(tmp_path: Path) -> None:
+    profile = _profile(tmp_path)
+    first_chunk = threading.Event()
+    release_stream = threading.Event()
+
+    class BlockingStreamModel(ExactCloneModel):
+        def generate_voice_clone_streaming(self, **kwargs):
+            first_chunk.set()
+            yield np.array([1, 2], dtype=np.int16), self.sample_rate, {}
+            release_stream.wait(timeout=2)
+
+    model = BlockingStreamModel(profile)
+    runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+    stream = runtime.stream("stream", profile.profile_id, "de")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        next_future = executor.submit(next, stream)
+        next_future.result(timeout=2)
+        assert first_chunk.is_set()
+        synthesize_future = executor.submit(
+            runtime.synthesize,
+            "parallel",
+            profile.profile_id,
+            "de",
+        )
+        time.sleep(0.05)
+        assert synthesize_future.done() is False
+        stream.close()
+        release_stream.set()
+        synthesize_future.result(timeout=2)

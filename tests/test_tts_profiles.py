@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from dgx.tts.profiles import ProfileError, load_profiles, resolve_profile
+from dgx.tts.profiles import (
+    SYNTHETIC_DESIGN_INSTRUCTION,
+    SYNTHETIC_SOURCE_MODEL,
+    SYNTHETIC_SOURCE_REVISION,
+    ProfileError,
+    load_profiles,
+    resolve_profile,
+)
 
 PROFILE_ID = "shared-female-de-v1"
 REFERENCE_TEXT = "Guten Tag, hier ist Ihre digitale Assistentin."
@@ -27,6 +34,7 @@ def _profile(audio_hash: str) -> dict:
         "reference_text": REFERENCE_TEXT,
         "language": "german",
         "source_type": "licensed-human-reference-private",
+        "source_model": None,
         "source_revision": "private-source-v1",
         "source_sha256": "1" * 64,
         "sha256": audio_hash,
@@ -161,6 +169,66 @@ def test_load_profiles_rejects_hash_mismatch(tmp_path: Path) -> None:
     audio.write_bytes(audio.read_bytes() + b"\x00")
 
     with pytest.raises(ProfileError, match="hash mismatch"):
+        load_profiles(profile_dir, mountinfo_path=mountinfo)
+
+
+def test_load_profiles_rejects_truncated_wav_payload(tmp_path: Path) -> None:
+    profile_dir, mountinfo, payload = _bundle(tmp_path)
+    audio = profile_dir / f"{PROFILE_ID}.wav"
+    audio.write_bytes(audio.read_bytes()[:-100])
+    payload["profiles"][0]["sha256"] = hashlib.sha256(audio.read_bytes()).hexdigest()
+    (profile_dir / "profiles.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ProfileError, match="valid WAV"):
+        load_profiles(profile_dir, mountinfo_path=mountinfo)
+
+
+def test_load_profiles_accepts_exact_synthetic_provenance(tmp_path: Path) -> None:
+    profile_dir, mountinfo, payload = _bundle(tmp_path)
+    profile = payload["profiles"][0]
+    profile.update(
+        {
+            "source_type": "synthetic-qwen-voice-design",
+            "source_model": SYNTHETIC_SOURCE_MODEL,
+            "source_revision": SYNTHETIC_SOURCE_REVISION,
+            "design_instruction": SYNTHETIC_DESIGN_INSTRUCTION,
+        }
+    )
+    (profile_dir / "profiles.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_profiles(profile_dir, mountinfo_path=mountinfo)[PROFILE_ID]
+
+    assert loaded.source_model == SYNTHETIC_SOURCE_MODEL
+    assert loaded.source_revision == SYNTHETIC_SOURCE_REVISION
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_model", "Qwen/latest"),
+        ("source_revision", "main"),
+        ("design_instruction", "A different voice."),
+    ],
+)
+def test_load_profiles_rejects_noncanonical_synthetic_provenance(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    profile_dir, mountinfo, payload = _bundle(tmp_path)
+    profile = payload["profiles"][0]
+    profile.update(
+        {
+            "source_type": "synthetic-qwen-voice-design",
+            "source_model": SYNTHETIC_SOURCE_MODEL,
+            "source_revision": SYNTHETIC_SOURCE_REVISION,
+            "design_instruction": SYNTHETIC_DESIGN_INSTRUCTION,
+        }
+    )
+    profile[field] = value
+    (profile_dir / "profiles.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ProfileError, match="synthetic provenance"):
         load_profiles(profile_dir, mountinfo_path=mountinfo)
 
 

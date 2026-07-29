@@ -1,4 +1,8 @@
+import asyncio
 import io
+import json
+import threading
+import time
 import wave
 from dataclasses import dataclass
 
@@ -135,7 +139,7 @@ async def test_model_failure_returns_bounded_500() -> None:
     assert "secret model path" not in response.text
 
 
-def test_closing_pcm_stream_closes_model_iterator() -> None:
+async def test_closing_pcm_stream_closes_model_iterator() -> None:
     closed = False
 
     def chunks():
@@ -147,8 +151,64 @@ def test_closing_pcm_stream_closes_model_iterator() -> None:
             closed = True
 
     encoded = encode_pcm_stream(chunks())
-    assert next(encoded) == b"\x01\x00\x02\x00"
+    assert await anext(encoded) == b"\x01\x00\x02\x00"
 
-    encoded.close()
+    await encoded.aclose()
 
     assert closed is True
+
+
+async def test_asgi_disconnect_closes_model_iterator() -> None:
+    closed = threading.Event()
+
+    class DisconnectRuntime(FakeRuntime):
+        def stream(self, text: str, voice: str | None, language: str | None):
+            del text, voice, language
+            try:
+                while True:
+                    time.sleep(0.05)
+                    yield np.array([1, 2], dtype=np.int16), 24_000, {}
+            finally:
+                closed.set()
+
+    app = create_app(DisconnectRuntime(), _health())
+    disconnected = asyncio.Event()
+    request_sent = False
+    body = json.dumps(
+        {
+            "input": "Hallo",
+            "voice": "shared-female-de-v1",
+            "language": "german",
+        }
+    ).encode()
+
+    async def receive():
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            disconnected.set()
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/audio/speech/stream",
+        "raw_path": b"/v1/audio/speech/stream",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 12345),
+        "server": ("test", 80),
+    }
+
+    await asyncio.wait_for(app(scope, receive, send), timeout=2)
+
+    assert closed.wait(timeout=1)

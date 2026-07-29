@@ -8,6 +8,7 @@
       "reference_text": "Example only. Do not deploy this manifest.",
       "language": "german",
       "source_type": "licensed-human-reference-private",
+      "source_model": null,
       "source_revision": "private-source-v1",
       "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",

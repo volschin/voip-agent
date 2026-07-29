@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -98,11 +99,25 @@ def create_app(runtime: Any, health: HealthMetadata) -> FastAPI:
     return app
 
 
-def encode_pcm_stream(chunks: Iterator[tuple[Any, int, dict]]) -> Iterator[bytes]:
-    """Encode model chunks as raw 24-kHz little-endian int16 and close upstream."""
+async def encode_pcm_stream(
+    chunks: Iterator[tuple[Any, int, dict]],
+) -> AsyncIterator[bytes]:
+    """Bridge blocking model chunks to async PCM and always close upstream."""
     iterator = iter(chunks)
     try:
-        for audio_chunk, sample_rate, _timing in iterator:
+        while True:
+            next_task = asyncio.create_task(asyncio.to_thread(_next_chunk, iterator))
+            try:
+                item = await next_task
+            except asyncio.CancelledError:
+                try:
+                    await asyncio.shield(next_task)
+                except BaseException:
+                    pass
+                raise
+            if item is None:
+                break
+            audio_chunk, sample_rate, _timing = item
             if sample_rate != 24_000:
                 raise RuntimeError("stream must return 24 kHz audio")
             array = np.asarray(audio_chunk)
@@ -112,9 +127,22 @@ def encode_pcm_stream(chunks: Iterator[tuple[Any, int, dict]]) -> Iterator[bytes
                 array = np.clip(array, -1.0, 1.0) * 32767.0
             yield array.astype("<i2").tobytes()
     finally:
-        close = getattr(iterator, "close", None)
-        if close is not None:
-            close()
+        await asyncio.shield(asyncio.to_thread(_close_iterator, iterator))
+
+
+def _next_chunk(
+    iterator: Iterator[tuple[Any, int, dict]],
+) -> tuple[Any, int, dict] | None:
+    try:
+        return next(iterator)
+    except StopIteration:
+        return None
+
+
+def _close_iterator(iterator: Iterator[tuple[Any, int, dict]]) -> None:
+    close = getattr(iterator, "close", None)
+    if close is not None:
+        close()
 
 
 def _audio_response(audio: np.ndarray, sample_rate: int, response_format: str) -> Response:
