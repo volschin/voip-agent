@@ -6,13 +6,14 @@ from contextlib import suppress
 
 import numpy as np
 
-from agent.audio import alaw_encode, resample_24k_to_8k
+from agent.audio import StreamingPcm16Resampler, resample_pcm16
 from agent.session import CallSession, SessionState
 
 log = logging.getLogger(__name__)
 
-_SILENCE_FRAME = b"\xd5" * 160
+_SILENCE_FRAME = b"\x00" * 640
 _TTS_SAMPLE_RATE = 24000
+_OUTPUT_SAMPLE_RATE = 16000
 
 
 def _decode_wav(data: bytes) -> np.ndarray:
@@ -52,11 +53,11 @@ class VoicePipeline:
         self._llm_stream = llm_stream
         self._tts_stream = tts_stream
 
-    async def synthesize_alaw(self, text: str) -> bytes:
+    async def synthesize_pcm16(self, text: str) -> bytes:
         try:
             wav_bytes = await self._tts(text)
             pcm_24k = _decode_wav(wav_bytes)
-            return alaw_encode(resample_24k_to_8k(pcm_24k))
+            return resample_pcm16(pcm_24k, _TTS_SAMPLE_RATE, _OUTPUT_SAMPLE_RATE)
         except Exception:
             log.exception("TTS failed for text: %r", text[:50])
             return _SILENCE_FRAME
@@ -72,10 +73,10 @@ class VoicePipeline:
             transcript = await self._stt(pcm_16k.tobytes())
         except Exception:
             log.exception("STT failed")
-            return await self.synthesize_alaw(FALLBACK_ASR)
+            return await self.synthesize_pcm16(FALLBACK_ASR)
 
         if not transcript.strip():
-            return await self.synthesize_alaw(FALLBACK_ASR)
+            return await self.synthesize_pcm16(FALLBACK_ASR)
 
         session.history.append({"role": "user", "content": transcript})
 
@@ -84,20 +85,26 @@ class VoicePipeline:
         except Exception:
             log.exception("LLM failed")
             session.history.pop()
-            return await self.synthesize_alaw(FALLBACK_LLM)
+            return await self.synthesize_pcm16(FALLBACK_LLM)
 
         session.history.append({"role": "assistant", "content": response_text})
-        return await self.synthesize_alaw(response_text)
+        return await self.synthesize_pcm16(response_text)
 
-    async def _tts_alaw_chunks(self, text):
-        """Synthesize text and yield aLaw byte blobs (resampled 24k->8k)."""
-        async for pcm_24k in self._tts_stream(text):
-            yield alaw_encode(resample_24k_to_8k(pcm_24k))
+    async def _tts_pcm16_chunks(self, text):
+        """Synthesize text and yield continuous 16 kHz mono PCM16 chunks."""
+        resampler = StreamingPcm16Resampler(_TTS_SAMPLE_RATE, _OUTPUT_SAMPLE_RATE)
+        try:
+            async for pcm_24k in self._tts_stream(text):
+                pcm_16k = resampler.process(pcm_24k)
+                if pcm_16k:
+                    yield pcm_16k
+        finally:
+            resampler.close()
 
     async def process_turn_stream(self, session: CallSession, pcm_16k: np.ndarray):
-        """Stream a turn: STT (full) -> LLM tokens -> segments -> TTS -> aLaw.
+        """Stream a turn: STT (full) -> LLM tokens -> segments -> 16 kHz PCM.
 
-        Yields aLaw byte blobs. Owns the PROCESSING entry; the caller drives
+        Yields PCM16 byte blobs. Owns the PROCESSING entry; the caller drives
         SPEAKING (on first chunk) and LISTENING. On any mid-stream failure,
         yields the recovery prompt audio instead of raising.
         """
@@ -108,12 +115,12 @@ class VoicePipeline:
             transcript = await self._stt(pcm_16k.tobytes())
         except Exception:
             log.exception("STT failed")
-            async for c in self._tts_alaw_chunks(FALLBACK_ASR):
+            async for c in self._tts_pcm16_chunks(FALLBACK_ASR):
                 yield c
             return
 
         if not transcript.strip():
-            async for c in self._tts_alaw_chunks(FALLBACK_ASR):
+            async for c in self._tts_pcm16_chunks(FALLBACK_ASR):
                 yield c
             return
 
@@ -151,7 +158,7 @@ class VoicePipeline:
                 if kind == "tool_round":
                     if not filler_played:
                         filler_played = True
-                        async for c in self._tts_alaw_chunks(FILLER_TEXT):
+                        async for c in self._tts_pcm16_chunks(FILLER_TEXT):
                             yield c
                     continue
                 if kind == "error":
@@ -159,19 +166,19 @@ class VoicePipeline:
                 if kind == "done":
                     tail = seg.flush()
                     if tail:
-                        async for c in self._tts_alaw_chunks(tail):
+                        async for c in self._tts_pcm16_chunks(tail):
                             yield c
                     break
                 # kind == "token"
                 parts.append(payload)
                 for sentence in seg.feed(payload):
-                    async for c in self._tts_alaw_chunks(sentence):
+                    async for c in self._tts_pcm16_chunks(sentence):
                         yield c
         except Exception:
             log.exception("LLM/TTS failed mid-stream")
             # Leave the user turn in history (the model saw it); do not append
             # a partial assistant turn. Emit the recovery prompt and stop.
-            async for c in self._tts_alaw_chunks(FALLBACK_RECOVERY):
+            async for c in self._tts_pcm16_chunks(FALLBACK_RECOVERY):
                 yield c
             return
         finally:

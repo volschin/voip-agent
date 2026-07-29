@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
+from agent.audio import resample_pcm16
 from agent.pipeline import _SILENCE_FRAME, VoicePipeline, _decode_wav
 from agent.session import CallSession, SessionState
 
@@ -18,6 +19,16 @@ def _wav(n_samples: int = 24000, rate: int = 24000) -> bytes:
         wf.setsampwidth(2)
         wf.setframerate(rate)
         wf.writeframes(np.zeros(n_samples, dtype=np.int16).tobytes())
+    return buf.getvalue()
+
+
+def _wav_samples(samples: np.ndarray, rate: int = 24_000) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(samples.astype("<i2", copy=False).tobytes())
     return buf.getvalue()
 
 
@@ -52,13 +63,26 @@ def test_decode_wav_strips_header():
     assert len(pcm) == 24000
 
 
-async def test_synthesize_alaw_falls_back_on_non_wav():
+async def test_synthesize_pcm16_falls_back_on_non_wav():
     tts = AsyncMock(return_value=b"not a wav at all")
     p = VoicePipeline(stt=AsyncMock(), llm=AsyncMock(), tts=tts)
-    assert await p.synthesize_alaw("x") == _SILENCE_FRAME
+    assert await p.synthesize_pcm16("x") == _SILENCE_FRAME
 
 
-async def test_process_full_turn_returns_alaw(pipeline):
+async def test_synthesize_pcm16_returns_direct_16k_pcm():
+    source = np.arange(24_000, dtype=np.int16)
+    p = VoicePipeline(
+        stt=AsyncMock(),
+        llm=AsyncMock(),
+        tts=AsyncMock(return_value=_wav_samples(source)),
+    )
+
+    result = await p.synthesize_pcm16("Hallo")
+
+    assert result == resample_pcm16(source, 24_000, 16_000)
+
+
+async def test_process_full_turn_returns_pcm16(pipeline):
     session = _make_session()
     pcm_chunk = _pcm_16k(500)
     result = await pipeline.process_turn(session, pcm_chunk)
@@ -111,7 +135,27 @@ def _pcm_zero() -> np.ndarray:
     return np.zeros(320, dtype=np.int16)
 
 
-async def test_process_turn_stream_yields_alaw_incrementally():
+async def test_tts_pcm16_chunks_preserve_resampler_state():
+    source = np.arange(-3000, 3000, dtype=np.int16)
+
+    async def tts_stream(_text):
+        yield source[:101]
+        yield source[101:4097]
+        yield source[4097:]
+
+    pipe = VoicePipeline(
+        stt=AsyncMock(),
+        llm=AsyncMock(),
+        tts=AsyncMock(),
+        tts_stream=tts_stream,
+    )
+
+    result = b"".join([chunk async for chunk in pipe._tts_pcm16_chunks("Hallo")])
+
+    assert result == resample_pcm16(source, 24_000, 16_000)
+
+
+async def test_process_turn_stream_yields_pcm16_incrementally():
     async def stt(_b):
         return "hallo"
 
@@ -120,7 +164,7 @@ async def test_process_turn_stream_yields_alaw_incrementally():
             yield tok
 
     async def tts_stream(_text):
-        yield np.zeros(2400, dtype=np.int16)  # 100ms @ 24k -> ~33ms @ 8k
+        yield np.zeros(2400, dtype=np.int16)  # 100ms @ 24k -> 100ms @ 16k
 
     pipe = VoicePipeline(
         stt=stt,
