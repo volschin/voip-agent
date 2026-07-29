@@ -12,8 +12,10 @@ Asterisk, ARI, and ExternalMedia are no longer in the runtime path. The former `
    `ANSWER_DELAY_SECONDS`.
 4. PJSUA2 terminates the negotiated RTP codec into 16 kHz mono PCM through a custom audio port.
 5. `ConversationManager` runs VAD, turn detection, barge-in, STT, LLM, and TTS.
-6. Each Qwen TTS utterance is converted continuously from 24 to 16 kHz PCM with
-   resampler state retained across HTTP chunks.
+6. Each completed LLM sentence is synthesized through `/v1/audio/speech`,
+   WAV-decoded, converted once from 24 to 16 kHz PCM, and written to the
+   existing bounded playback queue. `/v1/audio/speech/stream` is not used by
+   production VoIP playback.
 7. PJSIP starts playback after a 300 ms (9600-byte) prebuffer and pulls the
    pipeline PCM directly; there is no A-law round trip in production.
 

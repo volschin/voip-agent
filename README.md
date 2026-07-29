@@ -25,12 +25,17 @@ Fritzbox ──SIP/RTP──► PJSUA2 + Python asyncio agent (Docker/NUC)
 **Voice turn:** negotiated RTP codec → PJSUA2 16 kHz PCM → VAD → Qwen3-ASR → LLM
 tool-call loop → Qwen3-TTS → PJSUA2 PCM/RTP
 
-The live turn is **streaming**: LLM tokens → German sentence segmenter → Qwen3-TTS
-`/v1/audio/speech/stream` → one stateful 24-to-16 kHz conversion per utterance →
-300 ms PCM prebuffer → PJSUA2. Up to two completed sentence segments may wait
-ahead, but TTS requests remain sequential. Generation and playback overlap
-without resetting the resampler at HTTP chunk boundaries. Barge-in (caller
-speaks over the agent) cancels the in-flight producers and clears buffered PCM.
+The live turn streams LLM tokens into the German sentence segmenter. Each
+completed sentence is synthesized sequentially through the stable
+`/v1/audio/speech` whole-WAV endpoint, converted once from 24 to 16 kHz PCM,
+then fed through the 300 ms PCM prebuffer to PJSUA2. Up to two completed
+sentence segments may wait ahead; generation and playback overlap across
+sentences. The experimental `/v1/audio/speech/stream` codec path is retained
+for diagnostics but is not used for VoIP responses.
+
+Barge-in (caller speaks over the agent) cancels the in-flight producers and
+clears buffered PCM. A server-side full-sentence model call may finish after
+client cancellation; its late result is discarded and never reaches playback.
 The non-streaming whole-turn path is retained for the greeting and as a
 fallback.
 
@@ -204,13 +209,13 @@ Per-stage targets for the **non-streaming** whole-turn path (greeting / fallback
 | TTS (Qwen3-TTS) | ~1500 ms |
 | Total turn | ~2200 ms |
 
-On the streaming live path these stages overlap, so the metric that matters is
-**time-to-first-audio** (STT + first LLM tokens + first TTS chunk), not the
-full-turn sum — the caller hears the start of the reply while the rest is still
-generating.
+On the live response path, time-to-first-audio includes stable synthesis of the
+first completed sentence. Subsequent LLM segmentation, sentence synthesis, and
+playback overlap while preserving sentence order. Intelligibility and
+once-only ordering take precedence over raw codec-stream time-to-first-chunk.
 
 The 2026-07-29 authenticated on-box cutover measured 282 ms ASR, 861 ms
-non-streaming TTS, and 609 ms to the first streaming TTS chunk for short German
-probes. Longer real inference correlated with 94% ASR and 96% TTS GPU
+non-streaming TTS, and 609 ms to the first diagnostic codec-stream chunk for
+short German probes. Longer real inference correlated with 94% ASR and 96% TTS GPU
 utilization on the NVIDIA GB10. These are acceptance probes, not long-running
 percentile benchmarks; there is no cloud, direct-port, or CPU fallback.
