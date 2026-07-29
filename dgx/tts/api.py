@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 from collections.abc import AsyncIterator, Iterator
+from contextlib import suppress
 from dataclasses import dataclass
 from threading import Event, Lock
 from typing import Any
@@ -146,7 +147,7 @@ async def _run_stable_synthesis(
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
-                _cancel_stable_operation(operation, cancelled)
+                await _cancel_stable_operation(operation, cancelled)
                 raise SynthesisAdmissionTimeout()
             done, _pending = await asyncio.wait(
                 {operation},
@@ -155,21 +156,18 @@ async def _run_stable_synthesis(
             if operation in done:
                 return operation.result()
             if await request.is_disconnected():
-                _cancel_stable_operation(operation, cancelled)
+                await _cancel_stable_operation(operation, cancelled)
                 raise _ClientDisconnected()
     except asyncio.CancelledError:
-        _cancel_stable_operation(operation, cancelled)
+        await _cancel_stable_operation(operation, cancelled)
         raise
 
 
-def _cancel_stable_operation(operation: asyncio.Task, cancelled: Event) -> None:
+async def _cancel_stable_operation(operation: asyncio.Task, cancelled: Event) -> None:
     cancelled.set()
     operation.cancel()
-    if operation.done():
-        try:
-            operation.result()
-        except BaseException:
-            pass
+    with suppress(asyncio.CancelledError):
+        await operation
 
 
 async def encode_pcm_stream(

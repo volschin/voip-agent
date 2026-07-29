@@ -1,4 +1,6 @@
 import asyncio
+import gc
+import inspect
 import io
 import json
 import threading
@@ -19,6 +21,7 @@ from dgx.tts.api import (
     MAX_SPEECH_INPUT_CHARACTERS,
     HealthMetadata,
     SpeechRequest,
+    _cancel_stable_operation,
     _ClientDisconnected,
     _run_stable_synthesis,
     create_app,
@@ -27,7 +30,6 @@ from dgx.tts.api import (
 from dgx.tts.clone_runtime import (
     CloneRuntime,
     SynthesisAdmissionTimeout,
-    SynthesisCancelled,
 )
 from dgx.tts.profiles import ProfileError, VoiceProfile
 
@@ -229,9 +231,8 @@ def _runtime_profile() -> VoiceProfile:
 
 
 class _StableRuntime:
-    def __init__(self, failure: Exception | None = None) -> None:
+    def __init__(self) -> None:
         self.calls: list[str] = []
-        self.failure = failure
 
     def synthesize(
         self,
@@ -241,9 +242,34 @@ class _StableRuntime:
         **_admission: Any,
     ) -> tuple[list[np.ndarray], int]:
         self.calls.append(text)
-        if self.failure is not None:
-            raise self.failure
         return [np.array([0.0, 0.25], dtype=np.float32)], 24_000
+
+
+class _NonCooperativeRuntime(_StableRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+        self.cancel_event: threading.Event | None = None
+
+    def synthesize(
+        self,
+        text: str,
+        _voice: str | None,
+        _language: str | None,
+        *,
+        cancel_event: threading.Event,
+        **_admission: Any,
+    ) -> tuple[list[np.ndarray], int]:
+        self.calls.append(text)
+        self.cancel_event = cancel_event
+        self.started.set()
+        try:
+            self.release.wait(timeout=2)
+            raise RuntimeError("late non-cooperative generation failure")
+        finally:
+            self.finished.set()
 
 
 class _DisconnectRequest:
@@ -262,10 +288,12 @@ def _block_executor_worker(started: threading.Event, release: threading.Event) -
 @asynccontextmanager
 async def _saturated_default_executor() -> AsyncIterator[None]:
     loop = asyncio.get_running_loop()
-    executor = ThreadPoolExecutor(max_workers=2)
+    await asyncio.to_thread(lambda: None)
+    previous_executor = loop._default_executor
+    executor = ThreadPoolExecutor(max_workers=1)
     loop.set_default_executor(executor)
     release = threading.Event()
-    started = [threading.Event() for _ in range(2)]
+    started = [threading.Event()]
     blockers = [
         loop.run_in_executor(None, _block_executor_worker, worker_started, release)
         for worker_started in started
@@ -279,10 +307,15 @@ async def _saturated_default_executor() -> AsyncIterator[None]:
                 await asyncio.sleep(0.001)
         yield
     finally:
-        await asyncio.sleep(0)
         release.set()
-        await asyncio.gather(*blockers)
-        safety_release.cancel()
+        sentinel = loop.run_in_executor(None, lambda: None)
+        try:
+            await asyncio.gather(*blockers)
+            await sentinel
+        finally:
+            loop.set_default_executor(previous_executor)
+            executor.shutdown(wait=True)
+            safety_release.cancel()
 
 
 def _background_tasks() -> set[asyncio.Task]:
@@ -296,9 +329,44 @@ def _stable_helper_tasks() -> set[asyncio.Task]:
         for task in _background_tasks()
         if any(
             helper in getattr(task.get_coro(), "__qualname__", "")
-            for helper in ("_run_stable_synthesis", "_wait_for_disconnect")
+            for helper in ("_run_stable_synthesis", "_wait_for_disconnect", "to_thread")
         )
     }
+
+
+async def _wait_for_thread_event(event: threading.Event) -> None:
+    async with asyncio.timeout(0.2):
+        while not event.is_set():
+            await asyncio.sleep(0.001)
+
+
+async def test_cancel_stable_operation_settles_wrapper_without_waiting_for_worker() -> None:
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+
+    def blocking_worker() -> None:
+        worker_started.set()
+        try:
+            release_worker.wait(timeout=2)
+        finally:
+            worker_finished.set()
+
+    operation = asyncio.create_task(asyncio.to_thread(blocking_worker))
+    try:
+        await _wait_for_thread_event(worker_started)
+        cancelled = threading.Event()
+
+        settlement = _cancel_stable_operation(operation, cancelled)
+
+        assert inspect.isawaitable(settlement)
+        await asyncio.wait_for(settlement, timeout=0.05)
+        assert cancelled.is_set()
+        assert operation.cancelled()
+        assert worker_finished.is_set() is False
+    finally:
+        release_worker.set()
+        await _wait_for_thread_event(worker_finished)
 
 
 async def test_stable_timeout_includes_saturated_executor_queue_time() -> None:
@@ -343,61 +411,92 @@ async def test_stable_disconnect_cancels_saturated_executor_work() -> None:
 
 async def test_stable_monitor_finalization_covers_every_exit() -> None:
     speech = SpeechRequest(input="Hallo")
+    loop = asyncio.get_running_loop()
+    previous_exception_handler = loop.get_exception_handler()
+    loop_errors: list[dict[str, Any]] = []
+    running: list[_NonCooperativeRuntime] = []
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    try:
+        tasks_before = _stable_helper_tasks()
+        await _run_stable_synthesis(_StableRuntime(), speech, _DisconnectRequest(), 1.0)
+        assert _stable_helper_tasks() == tasks_before
 
-    tasks_before = _stable_helper_tasks()
-    await _run_stable_synthesis(_StableRuntime(), speech, _DisconnectRequest(), 1.0)
-    assert _stable_helper_tasks() == tasks_before
-
-    tasks_before = _stable_helper_tasks()
-    with pytest.raises(SynthesisAdmissionTimeout):
-        await _run_stable_synthesis(
-            _StableRuntime(SynthesisAdmissionTimeout()),
-            speech,
-            _DisconnectRequest(),
-            1.0,
+        timeout_runtime = _NonCooperativeRuntime()
+        running.append(timeout_runtime)
+        tasks_before = _stable_helper_tasks()
+        timeout_operation = asyncio.create_task(
+            _run_stable_synthesis(
+                timeout_runtime,
+                speech,
+                _DisconnectRequest(),
+                0.05,
+            )
         )
-    assert _stable_helper_tasks() == tasks_before
+        await _wait_for_thread_event(timeout_runtime.started)
+        with pytest.raises(SynthesisAdmissionTimeout):
+            await asyncio.wait_for(timeout_operation, timeout=0.20)
+        assert timeout_runtime.finished.is_set() is False
+        assert timeout_runtime.cancel_event is not None
+        assert timeout_runtime.cancel_event.is_set()
+        assert _stable_helper_tasks() == tasks_before
+        timeout_runtime.release.set()
+        await _wait_for_thread_event(timeout_runtime.finished)
 
-    class CancelAwareRuntime(_StableRuntime):
-        def __init__(self) -> None:
-            super().__init__()
-            self.started = threading.Event()
-
-        def synthesize(self, text, voice, language, *, cancel_event, **admission):
-            del voice, language, admission
-            self.calls.append(text)
-            self.started.set()
-            cancel_event.wait(timeout=1)
-            raise SynthesisCancelled()
-
-    disconnected_runtime = CancelAwareRuntime()
-    tasks_before = _stable_helper_tasks()
-    with pytest.raises(_ClientDisconnected):
-        await _run_stable_synthesis(
-            disconnected_runtime,
-            speech,
-            _DisconnectRequest(disconnected=True),
-            1.0,
+        disconnected_runtime = _NonCooperativeRuntime()
+        running.append(disconnected_runtime)
+        disconnected_request = _DisconnectRequest()
+        tasks_before = _stable_helper_tasks()
+        disconnect_operation = asyncio.create_task(
+            _run_stable_synthesis(
+                disconnected_runtime,
+                speech,
+                disconnected_request,
+                1.0,
+            )
         )
-    assert _stable_helper_tasks() == tasks_before
+        await _wait_for_thread_event(disconnected_runtime.started)
+        disconnected_request.disconnected = True
+        with pytest.raises(_ClientDisconnected):
+            await asyncio.wait_for(disconnect_operation, timeout=0.20)
+        assert disconnected_runtime.finished.is_set() is False
+        assert disconnected_runtime.cancel_event is not None
+        assert disconnected_runtime.cancel_event.is_set()
+        assert _stable_helper_tasks() == tasks_before
+        disconnected_runtime.release.set()
+        await _wait_for_thread_event(disconnected_runtime.finished)
 
-    cancelled_runtime = CancelAwareRuntime()
-    tasks_before = _stable_helper_tasks()
-    operation = asyncio.create_task(
-        _run_stable_synthesis(
-            cancelled_runtime,
-            speech,
-            _DisconnectRequest(),
-            1.0,
+        cancelled_runtime = _NonCooperativeRuntime()
+        running.append(cancelled_runtime)
+        tasks_before = _stable_helper_tasks()
+        cancel_operation = asyncio.create_task(
+            _run_stable_synthesis(
+                cancelled_runtime,
+                speech,
+                _DisconnectRequest(),
+                1.0,
+            )
         )
-    )
-    async with asyncio.timeout(0.2):
-        while not cancelled_runtime.started.is_set():
-            await asyncio.sleep(0.001)
-    operation.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await operation
-    assert _stable_helper_tasks() == tasks_before
+        await _wait_for_thread_event(cancelled_runtime.started)
+        cancel_operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cancel_operation, timeout=0.20)
+        assert cancelled_runtime.finished.is_set() is False
+        assert cancelled_runtime.cancel_event is not None
+        assert cancelled_runtime.cancel_event.is_set()
+        assert _stable_helper_tasks() == tasks_before
+        cancelled_runtime.release.set()
+        await _wait_for_thread_event(cancelled_runtime.finished)
+
+        gc.collect()
+        await asyncio.sleep(0)
+        assert loop_errors == []
+    finally:
+        for runtime in running:
+            runtime.release.set()
+        for runtime in running:
+            if runtime.started.is_set() and not runtime.finished.is_set():
+                await _wait_for_thread_event(runtime.finished)
+        loop.set_exception_handler(previous_exception_handler)
 
 
 async def test_cancelled_queued_stable_route_never_starts_model_generation() -> None:
