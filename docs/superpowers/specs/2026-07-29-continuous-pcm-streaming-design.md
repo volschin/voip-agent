@@ -126,7 +126,7 @@ pipeline.
 
 ## Prebuffer and sentence prefetch
 
-`PjsipAudioSink.play_audio_chunks` accumulates up to 300 ms (9600 bytes) before
+`PjsipAudioSink.play_pcm16_chunks` accumulates up to 300 ms (9600 bytes) before
 the first write. If the entire response is shorter, end-of-stream releases it
 immediately. After playback starts, the existing two-second maximum-ahead
 backpressure remains in force.

@@ -25,7 +25,14 @@ Fritzbox ──SIP/RTP──► PJSUA2 + Python asyncio agent (Docker/NUC)
 **Voice turn:** negotiated RTP codec → PJSUA2 16 kHz PCM → VAD → Qwen3-ASR → LLM
 tool-call loop → Qwen3-TTS → PJSUA2 PCM/RTP
 
-The live turn is **streaming**: LLM tokens → German sentence segmenter → Qwen3-TTS `/v1/audio/speech/stream` → resample → aLaw chunks play while generation continues (compute and playback overlap). Audio starts on the first synthesized chunk rather than after the whole turn. Barge-in (caller speaks over the agent) cancels the in-flight turn mid-stream; RTP underruns are filled with comfort silence so the clock never stalls. The non-streaming whole-turn path is retained for the greeting and as a fallback.
+The live turn is **streaming**: LLM tokens → German sentence segmenter → Qwen3-TTS
+`/v1/audio/speech/stream` → one stateful 24-to-16 kHz conversion per utterance →
+300 ms PCM prebuffer → PJSUA2. Up to two completed sentence segments may wait
+ahead, but TTS requests remain sequential. Generation and playback overlap
+without resetting the resampler at HTTP chunk boundaries. Barge-in (caller
+speaks over the agent) cancels the in-flight producers and clears buffered PCM.
+The non-streaming whole-turn path is retained for the greeting and as a
+fallback.
 
 **Turn detection:** with `TURN_DETECTION_ENABLED=true` the listen path drops the VAD floor to
 ~200 ms and confirms each candidate with an **in-process** [Smart Turn v3](https://huggingface.co/pipecat-ai/smart-turn-v3)
@@ -173,17 +180,17 @@ The production cutover is described in
 |--------|---------------|
 | `agent/config.py` | Typed settings from env via pydantic-settings |
 | `agent/session.py` | Per-call state machine (ANSWER→LISTENING→PROCESSING→SPEAKING→ENDED) |
-| `agent/audio.py` | G.711 aLaw codec, 8↔16/24 kHz resampling, WebRTC VAD buffer |
+| `agent/audio.py` | Stateful PCM resampling, legacy G.711 aLaw codec, WebRTC VAD buffer |
 | `agent/stt.py` | Qwen3-ASR HTTP client (16 kHz WAV → transcript) |
 | `agent/tts.py` | Qwen3-TTS HTTP client (text → 24 kHz PCM) |
 | `agent/turn_detector.py` | In-process Smart Turn v3 ONNX detector (PCM → complete/incomplete) |
 | `agent/llm.py` | OpenAI-compat chat + tool-call dispatch loop |
 | `agent/tools/rag.py` | pgvector cosine search via asyncpg |
 | `agent/tools/calendar.py` | MS Graph calendar (get/create events) |
-| `agent/pipeline.py` | One voice turn: VAD flush → STT → LLM → TTS → aLaw |
+| `agent/pipeline.py` | One voice turn: VAD flush → STT → LLM → TTS → 16 kHz PCM |
 | `agent/conversation.py` | Transport-neutral VAD, turn detection, streaming, and barge-in lifecycle |
 | `agent/pjsip.py` | Direct FRITZ!Box SIP/RTP and PJSUA2 PCM media ports |
-| `agent/ari.py`, `agent/rtp.py` | Legacy Asterisk rollback adapter; not used by the main entry point |
+| `agent/ari.py`, `agent/rtp.py` | Legacy Asterisk rollback adapter; converts pipeline PCM to 8 kHz aLaw |
 | `agent/main.py` | Entry point: wire all components and start direct PJSIP transport |
 
 ## Latency targets
