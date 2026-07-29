@@ -91,6 +91,21 @@ async def test_audio_sink_rejects_odd_pcm_byte_count():
         await sink.play_pcm16(b"\x00")
 
 
+async def test_cancelled_stream_discards_prebuffered_pcm():
+    buffer = PcmPlaybackBuffer()
+    sink = PjsipAudioSink(buffer)
+    queue = asyncio.Queue()
+    playback = asyncio.create_task(sink.play_pcm16_chunks(queue))
+    await queue.put(b"\x01\x00" * 1_000)
+    await asyncio.sleep(0)
+
+    playback.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await playback
+
+    assert buffer.buffered_bytes == 0
+
+
 async def test_failed_priority_acquisition_terminates_unusable_call(settings):
     conversations = MagicMock()
     conversations.start_call = AsyncMock(return_value=False)

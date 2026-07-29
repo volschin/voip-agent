@@ -143,6 +143,7 @@ async def test_pcm_barge_in_cancels_playback_and_starts_turn(settings):
 
     assert b"reply" in sink.played
     assert manager._generation["1"] == 1
+    assert sink.cleared >= 1
     await manager.stop_call("1")
 
 

@@ -1,3 +1,4 @@
+import asyncio
 import io
 import wave
 from datetime import datetime, timezone
@@ -180,6 +181,94 @@ async def test_process_turn_stream_yields_pcm16_incrementally():
     assert chunks and all(isinstance(c, bytes) for c in chunks)
     assert s.history[-1]["role"] == "assistant"
     assert s.history[-1]["content"] == "Hallo Welt."
+
+
+async def test_sentence_prefetch_is_bounded_and_preserves_order():
+    first_tts_started = asyncio.Event()
+    release_first = asyncio.Event()
+    consumed = []
+    tts_calls = []
+    tokens = ["Eins. ", "Zwei. ", "Drei. ", "Vier. ", "Fünf. ", "Sechs."]
+
+    async def stt(_pcm):
+        return "frage"
+
+    async def llm_stream(*_args, **_kwargs):
+        for token in tokens:
+            consumed.append(token)
+            yield token
+
+    async def tts_stream(text):
+        tts_calls.append(text)
+        if text == "Eins.":
+            first_tts_started.set()
+            await release_first.wait()
+        yield np.full(240, len(tts_calls), dtype=np.int16)
+
+    pipe = VoicePipeline(
+        stt=stt,
+        llm=None,
+        tts=None,
+        llm_stream=llm_stream,
+        tts_stream=tts_stream,
+    )
+    session = _strm_session()
+    session.transition(SessionState.LISTENING)
+    stream = pipe.process_turn_stream(session, _pcm_zero())
+    first = asyncio.create_task(anext(stream))
+
+    await first_tts_started.wait()
+    await asyncio.sleep(0)
+
+    assert tts_calls == ["Eins."]
+    assert len(consumed) <= 4
+    assert len(consumed) < len(tokens)
+
+    release_first.set()
+    output = [await first] + [chunk async for chunk in stream]
+
+    assert tts_calls == ["Eins.", "Zwei.", "Drei.", "Vier.", "Fünf.", "Sechs."]
+    assert b"".join(output)
+
+
+async def test_cancelled_turn_closes_prefetch_and_tts_tasks():
+    tts_started = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def stt(_pcm):
+        return "frage"
+
+    async def llm_stream(*_args, **_kwargs):
+        yield "Eins."
+
+    async def tts_stream(_text):
+        try:
+            tts_started.set()
+            while True:
+                await asyncio.sleep(1)
+                yield np.ones(240, dtype=np.int16)
+        finally:
+            closed.set()
+
+    pipe = VoicePipeline(
+        stt=stt,
+        llm=None,
+        tts=None,
+        llm_stream=llm_stream,
+        tts_stream=tts_stream,
+    )
+    session = _strm_session()
+    session.transition(SessionState.LISTENING)
+    stream = pipe.process_turn_stream(session, _pcm_zero())
+    pending = asyncio.create_task(anext(stream))
+
+    await tts_started.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await stream.aclose()
+
+    assert closed.is_set()
 
 
 async def test_process_turn_stream_plays_filler_on_tool_round():

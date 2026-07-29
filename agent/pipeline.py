@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 _SILENCE_FRAME = b"\x00" * 640
 _TTS_SAMPLE_RATE = 24000
 _OUTPUT_SAMPLE_RATE = 16000
+_SENTENCE_PREFETCH_DEPTH = 2
 
 
 def _decode_wav(data: bytes) -> np.ndarray:
@@ -126,54 +127,52 @@ class VoicePipeline:
 
         session.history.append({"role": "user", "content": transcript})
 
-        seg = SentenceSegmenter()
         parts: list[str] = []
 
-        # Drive the LLM stream from a producer task feeding a queue. A tool
-        # round signals via on_tool_round *before* the producer awaits dispatch
-        # + the second LLM request, so the consumer below can emit the filler
-        # immediately during that latency window — a generator cannot yield
-        # from the synchronous callback, hence the queue hand-off.
-        queue: asyncio.Queue = asyncio.Queue()
+        # Segment in the LLM producer so at most two complete sentences can
+        # wait while the sole consumer streams the current TTS request.
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_SENTENCE_PREFETCH_DEPTH)
+        filler_task: asyncio.Task | None = None
+        filler_scheduled = False
 
         def _on_tool_round() -> None:
-            queue.put_nowait(("tool_round", None))
+            nonlocal filler_scheduled, filler_task
+            if filler_scheduled:
+                return
+            filler_scheduled = True
+            filler_task = asyncio.create_task(queue.put(("text", FILLER_TEXT)))
 
         async def _produce() -> None:
+            seg = SentenceSegmenter()
             try:
                 async for token in self._llm_stream(
                     session.history, session.caller_id, on_tool_round=_on_tool_round
                 ):
-                    await queue.put(("token", token))
+                    if filler_task is not None and not filler_task.done():
+                        await asyncio.sleep(0)
+                    parts.append(token)
+                    for sentence in seg.feed(token):
+                        await queue.put(("text", sentence))
+                if filler_task is not None and not filler_task.done():
+                    await asyncio.sleep(0)
+                tail = seg.flush()
+                if tail:
+                    await queue.put(("text", tail))
                 await queue.put(("done", None))
             except Exception:
                 log.exception("LLM stream failed")
                 await queue.put(("error", None))
 
         producer = asyncio.create_task(_produce())
-        filler_played = False
         try:
             while True:
                 kind, payload = await queue.get()
-                if kind == "tool_round":
-                    if not filler_played:
-                        filler_played = True
-                        async for c in self._tts_pcm16_chunks(FILLER_TEXT):
-                            yield c
-                    continue
                 if kind == "error":
                     raise RuntimeError("llm stream failed")
                 if kind == "done":
-                    tail = seg.flush()
-                    if tail:
-                        async for c in self._tts_pcm16_chunks(tail):
-                            yield c
                     break
-                # kind == "token"
-                parts.append(payload)
-                for sentence in seg.feed(payload):
-                    async for c in self._tts_pcm16_chunks(sentence):
-                        yield c
+                async for c in self._tts_pcm16_chunks(payload):
+                    yield c
         except Exception:
             log.exception("LLM/TTS failed mid-stream")
             # Leave the user turn in history (the model saw it); do not append
@@ -184,7 +183,12 @@ class VoicePipeline:
         finally:
             if not producer.done():
                 producer.cancel()
+            if filler_task is not None and not filler_task.done():
+                filler_task.cancel()
             with suppress(asyncio.CancelledError):
                 await producer
+            if filler_task is not None:
+                with suppress(asyncio.CancelledError):
+                    await filler_task
 
         session.history.append({"role": "assistant", "content": "".join(parts)})
