@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from agent.audio import resample_pcm16
-from agent.pipeline import FILLER_TEXT, VoicePipeline, _decode_wav
+from agent.pipeline import FALLBACK_RECOVERY, FILLER_TEXT, VoicePipeline, _decode_wav
 from agent.session import CallSession, SessionState
 
 
@@ -136,24 +136,35 @@ def _pcm_zero() -> np.ndarray:
     return np.zeros(320, dtype=np.int16)
 
 
-async def test_tts_pcm16_chunks_preserve_resampler_state():
+async def test_tts_pcm16_chunks_use_stable_whole_wav_synthesis():
     source = np.arange(-3000, 3000, dtype=np.int16)
-
-    async def tts_stream(_text):
-        yield source[:101]
-        yield source[101:4097]
-        yield source[4097:]
-
+    tts = AsyncMock(return_value=_wav_samples(source))
+    tts_stream = AsyncMock()
     pipe = VoicePipeline(
         stt=AsyncMock(),
         llm=AsyncMock(),
-        tts=AsyncMock(),
+        tts=tts,
         tts_stream=tts_stream,
     )
 
-    result = b"".join([chunk async for chunk in pipe._tts_pcm16_chunks("Hallo")])
+    chunks = [chunk async for chunk in pipe._tts_pcm16_chunks("Hallo")]
 
-    assert result == resample_pcm16(source, 24_000, 16_000)
+    assert chunks == [resample_pcm16(source, 24_000, 16_000)]
+    tts.assert_awaited_once_with("Hallo")
+    tts_stream.assert_not_called()
+
+
+async def test_tts_pcm16_chunks_emit_nothing_when_stable_synthesis_fails():
+    pipe = VoicePipeline(
+        stt=AsyncMock(),
+        llm=AsyncMock(),
+        tts=AsyncMock(return_value=b"not a wav"),
+        tts_stream=AsyncMock(),
+    )
+
+    chunks = [chunk async for chunk in pipe._tts_pcm16_chunks("Kaputt")]
+
+    assert chunks == []
 
 
 async def test_process_turn_stream_yields_pcm16_incrementally():
@@ -164,15 +175,15 @@ async def test_process_turn_stream_yields_pcm16_incrementally():
         for tok in ["Hallo", " Welt", "."]:
             yield tok
 
-    async def tts_stream(_text):
-        yield np.zeros(2400, dtype=np.int16)  # 100ms @ 24k -> 100ms @ 16k
+    async def tts(_text):
+        return _wav(2400)
 
     pipe = VoicePipeline(
         stt=stt,
         llm=None,
-        tts=None,
+        tts=tts,
         llm_stream=llm_stream,
-        tts_stream=tts_stream,
+        tts_stream=AsyncMock(),
     )
     s = _strm_session()
     s.transition(SessionState.LISTENING)
@@ -198,19 +209,22 @@ async def test_sentence_prefetch_is_bounded_and_preserves_order():
             consumed.append(token)
             yield token
 
-    async def tts_stream(text):
+    async def tts(text):
         tts_calls.append(text)
         if text == "Eins.":
             first_tts_started.set()
             await release_first.wait()
-        yield np.full(240, len(tts_calls), dtype=np.int16)
+        samples = np.full(240, len(tts_calls), dtype=np.int16)
+        return _wav_samples(samples)
+
+    forbidden_stream = AsyncMock()
 
     pipe = VoicePipeline(
         stt=stt,
         llm=None,
-        tts=None,
+        tts=tts,
         llm_stream=llm_stream,
-        tts_stream=tts_stream,
+        tts_stream=forbidden_stream,
     )
     session = _strm_session()
     session.transition(SessionState.LISTENING)
@@ -228,7 +242,10 @@ async def test_sentence_prefetch_is_bounded_and_preserves_order():
     output = [await first] + [chunk async for chunk in stream]
 
     assert tts_calls == ["Eins.", "Zwei.", "Drei.", "Vier.", "Fünf.", "Sechs."]
+    assert len(tts_calls) == len(set(tts_calls))
     assert b"".join(output)
+    assert len(output) == 6
+    assert forbidden_stream.call_count == 0
 
 
 async def test_cancelled_turn_closes_prefetch_and_tts_tasks():
@@ -241,21 +258,19 @@ async def test_cancelled_turn_closes_prefetch_and_tts_tasks():
     async def llm_stream(*_args, **_kwargs):
         yield "Eins."
 
-    async def tts_stream(_text):
+    async def tts(_text):
         try:
             tts_started.set()
-            while True:
-                await asyncio.sleep(1)
-                yield np.ones(240, dtype=np.int16)
+            await asyncio.Event().wait()
         finally:
             closed.set()
 
     pipe = VoicePipeline(
         stt=stt,
         llm=None,
-        tts=None,
+        tts=tts,
         llm_stream=llm_stream,
-        tts_stream=tts_stream,
+        tts_stream=AsyncMock(),
     )
     session = _strm_session()
     session.transition(SessionState.LISTENING)
@@ -283,16 +298,16 @@ async def test_process_turn_stream_plays_filler_on_tool_round():
 
     tts_calls = []
 
-    async def tts_stream(text):
+    async def tts(text):
         tts_calls.append(text)
-        yield np.zeros(2400, dtype=np.int16)
+        return _wav(2400)
 
     pipe = VoicePipeline(
         stt=stt,
         llm=None,
-        tts=None,
+        tts=tts,
         llm_stream=llm_stream,
-        tts_stream=tts_stream,
+        tts_stream=AsyncMock(),
     )
     s = _strm_session()
     s.transition(SessionState.LISTENING)
@@ -308,18 +323,22 @@ async def test_process_turn_stream_recovers_on_midstream_error():
         yield "Teil"
         raise RuntimeError("llm died mid-stream")
 
-    async def tts_stream(_text):
-        yield np.zeros(2400, dtype=np.int16)
+    tts_calls = []
+
+    async def tts(text):
+        tts_calls.append(text)
+        return _wav(2400)
 
     pipe = VoicePipeline(
         stt=stt,
         llm=None,
-        tts=None,
+        tts=tts,
         llm_stream=llm_stream,
-        tts_stream=tts_stream,
+        tts_stream=AsyncMock(),
     )
     s = _strm_session()
     s.transition(SessionState.LISTENING)
     # Must not raise; should still produce audio (the recovery prompt).
     chunks = [c async for c in pipe.process_turn_stream(s, _pcm_zero())]
     assert chunks
+    assert tts_calls[-1] == FALLBACK_RECOVERY

@@ -6,7 +6,7 @@ from contextlib import suppress
 
 import numpy as np
 
-from agent.audio import StreamingPcm16Resampler, resample_pcm16
+from agent.audio import resample_pcm16
 from agent.session import CallSession, SessionState
 
 log = logging.getLogger(__name__)
@@ -91,15 +91,10 @@ class VoicePipeline:
         return await self.synthesize_pcm16(response_text)
 
     async def _tts_pcm16_chunks(self, text):
-        """Synthesize text and yield continuous 16 kHz mono PCM16 chunks."""
-        resampler = StreamingPcm16Resampler(_TTS_SAMPLE_RATE, _OUTPUT_SAMPLE_RATE)
-        try:
-            async for pcm_24k in self._tts_stream(text):
-                pcm_16k = resampler.process(pcm_24k)
-                if pcm_16k:
-                    yield pcm_16k
-        finally:
-            resampler.close()
+        """Synthesize one stable sentence and yield 16 kHz mono PCM16."""
+        pcm_16k = await self.synthesize_pcm16(text)
+        if pcm_16k:
+            yield pcm_16k
 
     async def process_turn_stream(self, session: CallSession, pcm_16k: np.ndarray):
         """Stream a turn: STT (full) -> LLM tokens -> segments -> 16 kHz PCM.
