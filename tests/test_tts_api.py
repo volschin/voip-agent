@@ -418,7 +418,24 @@ async def test_stable_absolute_deadline_prevents_late_executor_model_start() -> 
     loop = asyncio.get_running_loop()
     await asyncio.to_thread(lambda: None)
     previous_executor = loop._default_executor
-    executor = ThreadPoolExecutor(max_workers=1)
+
+    class TrackingExecutor(ThreadPoolExecutor):
+        def __init__(self) -> None:
+            super().__init__(max_workers=1)
+            self._submission_count = 0
+            self._submission_lock = threading.Lock()
+            self.runtime_queued = threading.Event()
+
+        def submit(self, fn, /, *args, **kwargs):
+            with self._submission_lock:
+                self._submission_count += 1
+                submission = self._submission_count
+            future = super().submit(fn, *args, **kwargs)
+            if submission == 2:
+                self.runtime_queued.set()
+            return future
+
+    executor = TrackingExecutor()
     loop.set_default_executor(executor)
     blocker_started = threading.Event()
     release_worker = threading.Event()
@@ -429,6 +446,7 @@ async def test_stable_absolute_deadline_prevents_late_executor_model_start() -> 
 
     blocker_future = loop.run_in_executor(None, blocker)
     timer: threading.Timer | None = None
+    operation: asyncio.Task | None = None
     try:
         await _wait_for_thread_event(blocker_started)
         profile = _runtime_profile()
@@ -442,20 +460,39 @@ async def test_stable_absolute_deadline_prevents_late_executor_model_start() -> 
                 return [np.array([0.0], dtype=np.float32)], 24_000
 
         model = CountingModel()
-        runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+
+        class DeadlineTrackingRuntime(CloneRuntime):
+            def __init__(self) -> None:
+                super().__init__(model, {profile.profile_id: profile}, profile.profile_id)
+                self.entered = threading.Event()
+                self.finished = threading.Event()
+                self.entered_after_deadline: bool | None = None
+
+            def synthesize(self, *args, **kwargs):
+                deadline = kwargs["admission_deadline"]
+                self.entered_after_deadline = time.monotonic() >= deadline
+                self.entered.set()
+                try:
+                    return super().synthesize(*args, **kwargs)
+                finally:
+                    self.finished.set()
+
+        runtime = DeadlineTrackingRuntime()
         operation = asyncio.create_task(
             _run_stable_synthesis(
                 runtime,
                 SpeechRequest(input="late", voice=profile.profile_id),
                 _DisconnectRequest(),
-                0.05,
+                0.10,
             )
         )
-        await asyncio.sleep(0.01)
-        timer = threading.Timer(0.06, release_worker.set)
+        await _wait_for_thread_event(executor.runtime_queued)
+        timer = threading.Timer(0.12, release_worker.set)
         timer.start()
 
-        time.sleep(0.12)
+        assert runtime.entered.wait(timeout=1)
+        assert runtime.finished.wait(timeout=1)
+        assert runtime.entered_after_deadline is True
 
         with pytest.raises(SynthesisAdmissionTimeout):
             await operation
@@ -465,6 +502,11 @@ async def test_stable_absolute_deadline_prevents_late_executor_model_start() -> 
         await blocker_future
         if timer is not None:
             timer.cancel()
+        if operation is not None:
+            if not operation.done():
+                operation.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await operation
         loop.set_default_executor(previous_executor)
         executor.shutdown(wait=True)
 
@@ -477,6 +519,8 @@ async def test_stable_absolute_deadline_rejects_late_success() -> None:
             self.release = threading.Event()
             self.finished = threading.Event()
             self.cancel_event: threading.Event | None = None
+            self.started_before_deadline: bool | None = None
+            self.completed_after_deadline: bool | None = None
 
         def synthesize(
             self,
@@ -487,11 +531,14 @@ async def test_stable_absolute_deadline_rejects_late_success() -> None:
             cancel_event: threading.Event,
             **_admission: Any,
         ) -> tuple[list[np.ndarray], int]:
+            deadline = _admission["admission_deadline"]
             self.calls.append(text)
             self.cancel_event = cancel_event
+            self.started_before_deadline = time.monotonic() < deadline
             self.started.set()
             try:
                 self.release.wait(timeout=2)
+                self.completed_after_deadline = time.monotonic() >= deadline
                 return [np.array([0.0], dtype=np.float32)], 24_000
             finally:
                 self.finished.set()
@@ -502,16 +549,18 @@ async def test_stable_absolute_deadline_rejects_late_success() -> None:
             runtime,
             SpeechRequest(input="started-in-time"),
             _DisconnectRequest(),
-            0.05,
+            0.10,
         )
     )
     timer: threading.Timer | None = None
     try:
         await _wait_for_thread_event(runtime.started)
-        timer = threading.Timer(0.06, runtime.release.set)
+        assert runtime.started_before_deadline is True
+        timer = threading.Timer(0.12, runtime.release.set)
         timer.start()
 
-        time.sleep(0.12)
+        assert runtime.finished.wait(timeout=1)
+        assert runtime.completed_after_deadline is True
 
         with pytest.raises(SynthesisAdmissionTimeout):
             await operation
