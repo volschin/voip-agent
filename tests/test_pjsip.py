@@ -1,6 +1,9 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
+import pytest
+
 from agent.pjsip import (
     PcmPlaybackBuffer,
     PjsipAudioSink,
@@ -34,17 +37,58 @@ def test_playback_buffer_rejects_overflow_and_closed_writes():
     assert buffer.write(b"1") is False
 
 
-async def test_audio_sink_waits_until_pjsip_consumes_audio():
+async def test_pjsip_sink_writes_pcm_without_alaw_roundtrip():
     buffer = PcmPlaybackBuffer()
     sink = PjsipAudioSink(buffer)
+    pcm = np.arange(320, dtype="<i2").tobytes()
 
-    playback = asyncio.create_task(sink.play_audio(b"\xd5" * 160))
+    playback = asyncio.create_task(sink.play_pcm16(pcm))
     await asyncio.sleep(0)
 
-    assert buffer.buffered_bytes == 640
+    assert buffer.read(len(pcm)) == pcm
     assert not playback.done()
-    assert len(buffer.read(640)) == 640
     await asyncio.wait_for(playback, timeout=0.1)
+
+
+async def test_stream_playback_waits_for_300ms_prebuffer():
+    buffer = PcmPlaybackBuffer()
+    sink = PjsipAudioSink(buffer)
+    queue = asyncio.Queue()
+    playback = asyncio.create_task(sink.play_pcm16_chunks(queue))
+
+    await queue.put(b"\x01\x00" * 4_799)
+    await asyncio.sleep(0)
+    assert buffer.buffered_bytes == 0
+
+    await queue.put(b"\x02\x00")
+    await asyncio.sleep(0)
+    assert buffer.buffered_bytes == 9_600
+
+    buffer.read(9_600)
+    await queue.put(None)
+    await asyncio.wait_for(playback, timeout=0.1)
+
+
+async def test_stream_playback_releases_short_response_at_end_of_stream():
+    buffer = PcmPlaybackBuffer()
+    sink = PjsipAudioSink(buffer)
+    queue = asyncio.Queue()
+    await queue.put(b"\x01\x00" * 1_000)
+    await queue.put(None)
+
+    playback = asyncio.create_task(sink.play_pcm16_chunks(queue))
+    await asyncio.sleep(0)
+
+    assert buffer.buffered_bytes == 2_000
+    buffer.read(2_000)
+    await asyncio.wait_for(playback, timeout=0.1)
+
+
+async def test_audio_sink_rejects_odd_pcm_byte_count():
+    sink = PjsipAudioSink(PcmPlaybackBuffer())
+
+    with pytest.raises(ValueError, match="even byte count"):
+        await sink.play_pcm16(b"\x00")
 
 
 async def test_failed_priority_acquisition_terminates_unusable_call(settings):

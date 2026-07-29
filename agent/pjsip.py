@@ -10,7 +10,6 @@ import threading
 from collections import deque
 from contextlib import suppress
 
-from agent.audio import alaw_decode, resample_8k_to_16k
 from agent.config import Settings
 from agent.conversation import ConversationManager
 from agent.pjsip_poc import DelayedAnswerService
@@ -25,10 +24,6 @@ def caller_id_from_uri(remote_uri: str) -> str:
 
     match = _CALLER_URI.search(remote_uri)
     return match.group(1) if match else ""
-
-
-def _alaw_to_pcm16(alaw: bytes) -> bytes:
-    return resample_8k_to_16k(alaw_decode(alaw)).tobytes()
 
 
 class PcmPlaybackBuffer:
@@ -95,10 +90,11 @@ class PcmPlaybackBuffer:
 
 
 class PjsipAudioSink:
-    """Convert pipeline A-law output into PCM pulled by a PJSIP audio port."""
+    """Buffer pipeline PCM for the 16 kHz PJSIP audio port."""
 
     SAMPLE_RATE = 16_000
     BYTES_PER_SAMPLE = 2
+    PREBUFFER_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * 300 // 1000
     MAX_AHEAD_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * 2
 
     def __init__(self, buffer: PcmPlaybackBuffer) -> None:
@@ -113,6 +109,8 @@ class PjsipAudioSink:
         self._buffer.close()
 
     async def _write_with_backpressure(self, pcm: bytes) -> None:
+        if len(pcm) % self.BYTES_PER_SAMPLE:
+            raise ValueError("PCM16 requires an even byte count")
         while not self._closed and self._buffer.buffered_bytes > self.MAX_AHEAD_BYTES:
             await asyncio.sleep(0.02)
         if self._closed:
@@ -124,21 +122,35 @@ class PjsipAudioSink:
         while not self._closed and self._buffer.buffered_bytes:
             await asyncio.sleep(0.02)
 
-    async def play_audio(self, alaw: bytes) -> None:
+    async def play_pcm16(self, pcm: bytes) -> None:
         try:
-            await self._write_with_backpressure(_alaw_to_pcm16(alaw))
+            await self._write_with_backpressure(pcm)
             await self._wait_drained()
         except asyncio.CancelledError:
             self.clear()
             raise
 
-    async def play_audio_chunks(self, queue: asyncio.Queue) -> None:
+    async def play_pcm16_chunks(self, queue: asyncio.Queue) -> None:
+        pending = bytearray()
+        playback_started = False
         try:
             while not self._closed:
-                alaw = await queue.get()
-                if alaw is None:
+                pcm = await queue.get()
+                if pcm is None:
+                    if pending:
+                        await self._write_with_backpressure(bytes(pending))
                     break
-                await self._write_with_backpressure(_alaw_to_pcm16(alaw))
+                if len(pcm) % self.BYTES_PER_SAMPLE:
+                    raise ValueError("PCM16 requires an even byte count")
+                if not playback_started:
+                    pending.extend(pcm)
+                    if len(pending) < self.PREBUFFER_BYTES:
+                        continue
+                    await self._write_with_backpressure(bytes(pending))
+                    pending.clear()
+                    playback_started = True
+                    continue
+                await self._write_with_backpressure(pcm)
             await self._wait_drained()
         except asyncio.CancelledError:
             self.clear()

@@ -14,10 +14,10 @@ class FakeSink:
         self.cleared = 0
         self.closed = 0
 
-    async def play_audio(self, alaw):
-        self.played.append(alaw)
+    async def play_pcm16(self, pcm):
+        self.played.append(pcm)
 
-    async def play_audio_chunks(self, queue):
+    async def play_pcm16_chunks(self, queue):
         while (chunk := await queue.get()) is not None:
             self.played.append(chunk)
 
@@ -30,7 +30,7 @@ class FakeSink:
 
 def _manager(settings):
     pipeline = MagicMock()
-    pipeline.synthesize_alaw = AsyncMock(return_value=b"greeting")
+    pipeline.synthesize_pcm16 = AsyncMock(return_value=b"greeting")
     pipeline.process_turn_stream = MagicMock()
     lease = MagicMock()
     lease.renew = AsyncMock()
@@ -47,7 +47,7 @@ async def test_start_call_plays_greeting_and_listens(settings):
     assert await manager.start_call("1", "+49123", sink) is True
     await asyncio.sleep(0)
 
-    pipeline.synthesize_alaw.assert_awaited_once_with(settings.greeting_text)
+    pipeline.synthesize_pcm16.assert_awaited_once_with(settings.greeting_text)
     assert sink.played == [b"greeting"]
     assert manager._sessions["1"].state is SessionState.LISTENING
 
@@ -75,7 +75,7 @@ async def test_start_call_acquires_priority_before_session_or_greeting(settings)
         return lease
 
     priority.acquire = AsyncMock(side_effect=acquire)
-    pipeline.synthesize_alaw = AsyncMock(side_effect=greeting)
+    pipeline.synthesize_pcm16 = AsyncMock(side_effect=greeting)
     manager = ConversationManager(settings, pipeline, priority_client=priority)
 
     assert await manager.start_call("1", "+49123", FakeSink()) is True
@@ -86,7 +86,7 @@ async def test_start_call_acquires_priority_before_session_or_greeting(settings)
 
 async def test_priority_failure_starts_no_session_or_ai_operation(settings):
     pipeline = MagicMock()
-    pipeline.synthesize_alaw = AsyncMock()
+    pipeline.synthesize_pcm16 = AsyncMock()
     priority = MagicMock()
     priority.acquire = AsyncMock(side_effect=PriorityUnavailable())
     manager = ConversationManager(settings, pipeline, priority_client=priority)
@@ -95,12 +95,12 @@ async def test_priority_failure_starts_no_session_or_ai_operation(settings):
 
     assert started is False
     assert manager.call_count == 0
-    pipeline.synthesize_alaw.assert_not_awaited()
+    pipeline.synthesize_pcm16.assert_not_awaited()
 
 
 async def test_priority_renewal_failure_stops_call_and_clears_media(settings):
     pipeline = MagicMock()
-    pipeline.synthesize_alaw = AsyncMock(return_value=b"greeting")
+    pipeline.synthesize_pcm16 = AsyncMock(return_value=b"greeting")
     lease = MagicMock()
     lease.renew = AsyncMock(side_effect=PriorityUnavailable())
     lease.release = AsyncMock()

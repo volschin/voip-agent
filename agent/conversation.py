@@ -1,8 +1,8 @@
 """Transport-neutral call conversation orchestration.
 
 The media transport provides 16 kHz mono PCM from the caller and accepts the
-existing pipeline's G.711 A-law output. SIP/RTP lifecycle belongs to the
-transport adapter; VAD, turn detection, barge-in, and pipeline state live here.
+pipeline's 16 kHz mono PCM output. SIP/RTP lifecycle belongs to the transport
+adapter; VAD, turn detection, barge-in, and pipeline state live here.
 """
 
 from __future__ import annotations
@@ -27,9 +27,9 @@ log = logging.getLogger(__name__)
 class AudioSink(Protocol):
     """Playback boundary implemented by the active telephony transport."""
 
-    async def play_audio(self, alaw: bytes) -> None: ...
+    async def play_pcm16(self, pcm: bytes) -> None: ...
 
-    async def play_audio_chunks(self, queue: asyncio.Queue) -> None: ...
+    async def play_pcm16_chunks(self, queue: asyncio.Queue) -> None: ...
 
     def clear(self) -> None: ...
 
@@ -122,7 +122,7 @@ class ConversationManager:
         )
 
         try:
-            alaw = await self._pipeline.synthesize_alaw(self._s.greeting_text)
+            pcm = await self._pipeline.synthesize_pcm16(self._s.greeting_text)
         except Exception:
             log.exception("Greeting synthesis failed for call %s", call_id)
             await self.stop_call(call_id)
@@ -131,7 +131,7 @@ class ConversationManager:
         if self._sessions.get(call_id) is not session:
             return False
         generation = self._generation[call_id]
-        task = asyncio.create_task(self._play_audio(call_id, alaw, session, generation))
+        task = asyncio.create_task(self._play_pcm16(call_id, pcm, session, generation))
         self._playback_tasks[call_id] = task
         log.info("Call %s conversation ready", call_id)
         return True
@@ -214,10 +214,10 @@ class ConversationManager:
         for call_id in list(self._sessions):
             await self.stop_call(call_id)
 
-    async def _play_audio(
+    async def _play_pcm16(
         self,
         call_id: str,
-        alaw: bytes,
+        pcm: bytes,
         session: CallSession,
         generation: int,
     ) -> None:
@@ -226,7 +226,7 @@ class ConversationManager:
             return
         session.transition(SessionState.SPEAKING)
         try:
-            await sink.play_audio(alaw)
+            await sink.play_pcm16(pcm)
             if (
                 self._generation.get(call_id) == generation
                 and session.state is SessionState.SPEAKING
@@ -255,21 +255,21 @@ class ConversationManager:
         async def produce() -> None:
             nonlocal first_chunk_seen
             try:
-                async for alaw in self._pipeline.process_turn_stream(session, pcm):
+                async for pcm_chunk in self._pipeline.process_turn_stream(session, pcm):
                     if self._generation.get(call_id) != generation:
                         break
                     if not first_chunk_seen:
                         first_chunk_seen = True
                         if session.state is SessionState.PROCESSING:
                             session.transition(SessionState.SPEAKING)
-                    await out.put(alaw)
+                    await out.put(pcm_chunk)
             finally:
                 await out.put(None)
 
         try:
             async with asyncio.TaskGroup() as group:
                 group.create_task(produce())
-                group.create_task(sink.play_audio_chunks(out))
+                group.create_task(sink.play_pcm16_chunks(out))
         except* Exception:
             log.exception("Streaming turn failed for %s", call_id)
         finally:
