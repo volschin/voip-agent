@@ -8,10 +8,13 @@ runs on a DGX Spark over LAN.
 ```
 Fritzbox ──SIP/RTP──► PJSUA2 + Python asyncio agent (Docker/NUC)
                               │
-                    ┌───────────┼───────────┐
-                    ▼           ▼           ▼
-              Qwen3-ASR   Nous Hermes   Qwen3-TTS
-                (STT)     (LLM/vLLM)     (TTS)
+                              ▼
+                 authenticated HTTPS / Traefik
+                              │
+                    ┌─────────┼─────────┐
+                    ▼         ▼         ▼
+              Qwen3-ASR   Gemma/vLLM  Qwen3-TTS
+                (STT)       (LLM)       (TTS)
                     │
               ┌─────┴─────┐
               ▼           ▼
@@ -34,7 +37,7 @@ is on by default; set it to `false` for the legacy fixed 800 ms silence path.
 | Host | Role |
 |------|------|
 | ASUS NUC | Containerized PJSUA2/Python agent |
-| DGX Spark | Qwen3-ASR, Qwen3-TTS, multilingual-e5-large embedding, Nous Hermes via vLLM, pgvector |
+| DGX Spark | Traefik, Qwen3-ASR, Qwen3-TTS, Gemma via vLLM, ComfyUI; optional embedding/pgvector |
 
 ## Prerequisites
 
@@ -44,24 +47,14 @@ is on by default; set it to `false` for the legacy fixed 800 ms silence path.
 
 ## Setup
 
-### 1. DGX — start AI services
+### 1. DGX — start independently owned AI stacks
 
-```bash
-cd dgx
-cp .env.example .env   # adjust model names if needed
-docker compose up -d
-# wait ~60s for model loads
-docker compose logs -f qwen3-asr   # watch for "Uvicorn running"
-```
-
-Health checks:
-```bash
-curl -s http://dgx-spark:8001/health   # ASR
-curl -s http://dgx-spark:8002/health   # TTS
-curl -s http://dgx-spark:8003/health   # embedding
-```
-
-Nous Hermes via vLLM runs separately — set `LLM_BASE_URL` accordingly.
+The `voice`, `companion-llm`, and `proxy` stacks remain separate owners.
+Traefik joins their neutral internal networks and publishes only exact
+authenticated routes on `https://mate.olcon.de`. Direct ASR/TTS ports 8001
+and 8002 stay closed. See [`dgx/README.md`](dgx/README.md) for the voice-stack
+contract. The optional embedding service remains outside this Traefik
+cutover.
 
 ### 2. FRITZ!Box — internal IP telephone
 
@@ -88,6 +81,10 @@ git clone <repo> voip-agent && cd voip-agent
 cp .env.example .env
 cp .env.pjsip-poc.example .env.pjsip-poc
 # Fill AI/integration values in .env and FRITZ!Box credentials in .env.pjsip-poc.
+
+install -d -m 0700 /home/volsch/voip-agent/secrets
+# Install these three files out of band, owned by UID/GID 10001 and mode 0400:
+# shared_ai_password, mate_ca.crt, voice_priority_token
 
 docker compose -f compose.pjsip-poc.yml down  # stop the signalling-only PoC
 docker compose up --detach --build
@@ -118,10 +115,15 @@ Expected:
 | `PJSIP_LOCAL_PORT` | `5062` | Local SIP port on the Docker host |
 | `ANSWER_DELAY_SECONDS` | `20` | Delay before accepting an unanswered call |
 | `MAX_CALL_SECONDS` | `900` | Maximum accepted-call duration |
-| `STT_BASE_URL` | `http://dgx-spark:8001` | Qwen3-ASR |
-| `TTS_BASE_URL` | `http://dgx-spark:8002` | Qwen3-TTS |
-| `LLM_BASE_URL` | `http://dgx-spark:8000` | Nous Hermes via vLLM |
-| `LLM_MODEL` | `nous-hermes` | Model name passed to `/v1/chat/completions` |
+| `STT_BASE_URL` | `https://mate.olcon.de` | Exact authenticated Qwen3-ASR route |
+| `TTS_BASE_URL` | `https://mate.olcon.de` | Exact authenticated Qwen3-TTS routes |
+| `LLM_BASE_URL` | `https://mate.olcon.de` | Exact authenticated Gemma chat route |
+| `LLM_MODEL` | `companion-gemma` | Model name passed to `/v1/chat/completions` |
+| `AI_PROXY_USERNAME` | `voip-agent` | Dedicated Traefik BasicAuth account |
+| `AI_PROXY_PASSWORD_FILE` | `/run/secrets/shared_ai_password` | Protected client-password file |
+| `AI_PROXY_CA_FILE` | `/run/secrets/mate_ca.crt` | Private-CA trust file |
+| `VOICE_PRIORITY_TOKEN_FILE` | `/run/secrets/voice_priority_token` | Protected lease-token file |
+| `VOICE_PRIORITY_BASE_URL` | `https://mate.olcon.de` | Companion voice-priority API |
 | `EMBEDDING_BASE_URL` | `http://dgx-spark:8003` | multilingual-e5-large |
 | `TURN_DETECTION_ENABLED` | `true` | Smart Turn v3 in-process end-of-turn gating (on by default; set `false` for the legacy 800 ms path) |
 | `TURN_COMPLETE_THRESHOLD` | `0.70` | `prob` ≥ this ⇒ turn complete (0.70 biases toward fewer cut-ins on telephony) |
@@ -137,6 +139,11 @@ Expected:
 | `CALENDAR_USER_EMAIL` | — | Calendar owner |
 | `GREETING_TEXT` | `Hallo, wie kann ich Ihnen helfen?` | Spoken on answer |
 | `LLM_SYSTEM_PROMPT` | German assistant prompt | Injected as system message |
+
+Embedding and pgvector are optional and remain outside the Traefik cutover. If
+their independently managed services are unavailable, startup disables RAG
+with a warning; ordinary conversation stays available and data tools remain
+fail-closed.
 
 ## Development
 
@@ -185,18 +192,17 @@ Per-stage targets for the **non-streaming** whole-turn path (greeting / fallback
 | Stage | Target |
 |-------|--------|
 | STT (Qwen3-ASR-1.7B) | ~140 ms |
-| LLM (Nous Hermes, no tool) | ~500 ms |
+| LLM (Gemma, no tool) | ~500 ms |
 | TTS (Qwen3-TTS) | ~1500 ms |
 | Total turn | ~2200 ms |
 
 On the streaming live path these stages overlap, so the metric that matters is
 **time-to-first-audio** (STT + first LLM tokens + first TTS chunk), not the
 full-turn sum — the caller hears the start of the reply while the rest is still
-generating. On-box streaming numbers are not yet measured (see below).
+generating.
 
-If TTS exceeds 3 s, switch to the 0.6B variant in `dgx/.env`.
-
-> **Status:** the streaming pipeline (#3, faster-qwen3-tts) is implemented and
-> unit-tested but **not yet verified on-box** — the DGX TTS server is built
-> locally from `dgx/tts/` and its streaming endpoint has not been wire-tested
-> against the live agent.
+The 2026-07-29 authenticated on-box cutover measured 282 ms ASR, 861 ms
+non-streaming TTS, and 609 ms to the first streaming TTS chunk for short German
+probes. Longer real inference correlated with 94% ASR and 96% TTS GPU
+utilization on the NVIDIA GB10. These are acceptance probes, not long-running
+percentile benchmarks; there is no cloud, direct-port, or CPU fallback.
