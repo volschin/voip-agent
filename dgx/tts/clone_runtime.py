@@ -57,10 +57,13 @@ class CloneRuntime:
         *,
         cancel_event: Event | None = None,
         lock_timeout: float | None = None,
+        admission_deadline: float | None = None,
     ) -> tuple[list[Any], int]:
         profile = resolve_profile(voice, self._profiles, self._default_profile_id)
-        self._acquire_synthesis(cancel_event, lock_timeout)
+        deadline = self._acquire_synthesis(cancel_event, lock_timeout, admission_deadline)
         try:
+            if deadline is not None and monotonic() >= deadline:
+                raise SynthesisAdmissionTimeout()
             return self._model.generate_voice_clone(
                 text=text,
                 language=normalize_language(language) or profile.language,
@@ -75,8 +78,11 @@ class CloneRuntime:
         self,
         cancel_event: Event | None,
         lock_timeout: float | None,
-    ) -> None:
+        admission_deadline: float | None,
+    ) -> float | None:
         deadline = None if lock_timeout is None else monotonic() + lock_timeout
+        if admission_deadline is not None:
+            deadline = admission_deadline if deadline is None else min(deadline, admission_deadline)
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 raise SynthesisCancelled()
@@ -91,7 +97,10 @@ class CloneRuntime:
             if cancel_event is not None and cancel_event.is_set():
                 self._model_lock.release()
                 raise SynthesisCancelled()
-            return
+            if deadline is not None and monotonic() >= deadline:
+                self._model_lock.release()
+                raise SynthesisAdmissionTimeout()
+            return deadline
 
     def stream(
         self,

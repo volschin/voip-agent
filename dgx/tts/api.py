@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import suppress
 from dataclasses import dataclass
 from threading import Event, Lock
+from time import monotonic
 from typing import Any
 
 import numpy as np
@@ -130,8 +131,7 @@ async def _run_stable_synthesis(
     request: Request,
     admission_timeout_seconds: float,
 ) -> tuple[list[Any], int]:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + admission_timeout_seconds
+    deadline = monotonic() + admission_timeout_seconds
     cancelled = Event()
     operation = asyncio.create_task(
         asyncio.to_thread(
@@ -141,11 +141,12 @@ async def _run_stable_synthesis(
             speech.language,
             cancel_event=cancelled,
             lock_timeout=admission_timeout_seconds,
+            admission_deadline=deadline,
         )
     )
     try:
         while True:
-            remaining = deadline - loop.time()
+            remaining = deadline - monotonic()
             if remaining <= 0:
                 await _cancel_stable_operation(operation, cancelled)
                 raise SynthesisAdmissionTimeout()
@@ -154,7 +155,11 @@ async def _run_stable_synthesis(
                 timeout=min(0.025, remaining),
             )
             if operation in done:
-                return operation.result()
+                result = operation.result()
+                if monotonic() >= deadline:
+                    await _cancel_stable_operation(operation, cancelled)
+                    raise SynthesisAdmissionTimeout()
+                return result
             if await request.is_disconnected():
                 await _cancel_stable_operation(operation, cancelled)
                 raise _ClientDisconnected()

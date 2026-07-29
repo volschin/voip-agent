@@ -8,7 +8,7 @@ import time
 import wave
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -412,6 +412,121 @@ async def test_stable_timeout_includes_saturated_executor_queue_time() -> None:
 
     await asyncio.sleep(0)
     assert runtime.calls == []
+
+
+async def test_stable_absolute_deadline_prevents_late_executor_model_start() -> None:
+    loop = asyncio.get_running_loop()
+    await asyncio.to_thread(lambda: None)
+    previous_executor = loop._default_executor
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    blocker_started = threading.Event()
+    release_worker = threading.Event()
+
+    def blocker() -> None:
+        blocker_started.set()
+        release_worker.wait(timeout=2)
+
+    blocker_future = loop.run_in_executor(None, blocker)
+    timer: threading.Timer | None = None
+    try:
+        await _wait_for_thread_event(blocker_started)
+        profile = _runtime_profile()
+
+        class CountingModel:
+            def __init__(self) -> None:
+                self.generated_texts: list[str] = []
+
+            def generate_voice_clone(self, **kwargs):
+                self.generated_texts.append(kwargs["text"])
+                return [np.array([0.0], dtype=np.float32)], 24_000
+
+        model = CountingModel()
+        runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+        operation = asyncio.create_task(
+            _run_stable_synthesis(
+                runtime,
+                SpeechRequest(input="late", voice=profile.profile_id),
+                _DisconnectRequest(),
+                0.05,
+            )
+        )
+        await asyncio.sleep(0.01)
+        timer = threading.Timer(0.06, release_worker.set)
+        timer.start()
+
+        time.sleep(0.12)
+
+        with pytest.raises(SynthesisAdmissionTimeout):
+            await operation
+        assert model.generated_texts == []
+    finally:
+        release_worker.set()
+        await blocker_future
+        if timer is not None:
+            timer.cancel()
+        loop.set_default_executor(previous_executor)
+        executor.shutdown(wait=True)
+
+
+async def test_stable_absolute_deadline_rejects_late_success() -> None:
+    class LateSuccessRuntime(_StableRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.finished = threading.Event()
+            self.cancel_event: threading.Event | None = None
+
+        def synthesize(
+            self,
+            text: str,
+            _voice: str | None,
+            _language: str | None,
+            *,
+            cancel_event: threading.Event,
+            **_admission: Any,
+        ) -> tuple[list[np.ndarray], int]:
+            self.calls.append(text)
+            self.cancel_event = cancel_event
+            self.started.set()
+            try:
+                self.release.wait(timeout=2)
+                return [np.array([0.0], dtype=np.float32)], 24_000
+            finally:
+                self.finished.set()
+
+    runtime = LateSuccessRuntime()
+    operation = asyncio.create_task(
+        _run_stable_synthesis(
+            runtime,
+            SpeechRequest(input="started-in-time"),
+            _DisconnectRequest(),
+            0.05,
+        )
+    )
+    timer: threading.Timer | None = None
+    try:
+        await _wait_for_thread_event(runtime.started)
+        timer = threading.Timer(0.06, runtime.release.set)
+        timer.start()
+
+        time.sleep(0.12)
+
+        with pytest.raises(SynthesisAdmissionTimeout):
+            await operation
+        assert runtime.calls == ["started-in-time"]
+        assert runtime.cancel_event is not None
+        assert runtime.cancel_event.is_set()
+    finally:
+        runtime.release.set()
+        if timer is not None:
+            timer.cancel()
+        if not operation.done():
+            operation.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await operation
+        await _wait_for_thread_event(runtime.finished)
 
 
 async def test_stable_disconnect_cancels_saturated_executor_work() -> None:
