@@ -4,8 +4,12 @@ import json
 import threading
 import time
 import wave
+from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 import numpy as np
@@ -14,10 +18,17 @@ import pytest
 from dgx.tts.api import (
     MAX_SPEECH_INPUT_CHARACTERS,
     HealthMetadata,
+    SpeechRequest,
+    _ClientDisconnected,
+    _run_stable_synthesis,
     create_app,
     encode_pcm_stream,
 )
-from dgx.tts.clone_runtime import CloneRuntime
+from dgx.tts.clone_runtime import (
+    CloneRuntime,
+    SynthesisAdmissionTimeout,
+    SynthesisCancelled,
+)
 from dgx.tts.profiles import ProfileError, VoiceProfile
 
 
@@ -217,6 +228,178 @@ def _runtime_profile() -> VoiceProfile:
     )
 
 
+class _StableRuntime:
+    def __init__(self, failure: Exception | None = None) -> None:
+        self.calls: list[str] = []
+        self.failure = failure
+
+    def synthesize(
+        self,
+        text: str,
+        _voice: str | None,
+        _language: str | None,
+        **_admission: Any,
+    ) -> tuple[list[np.ndarray], int]:
+        self.calls.append(text)
+        if self.failure is not None:
+            raise self.failure
+        return [np.array([0.0, 0.25], dtype=np.float32)], 24_000
+
+
+class _DisconnectRequest:
+    def __init__(self, disconnected: bool = False) -> None:
+        self.disconnected = disconnected
+
+    async def is_disconnected(self) -> bool:
+        return self.disconnected
+
+
+def _block_executor_worker(started: threading.Event, release: threading.Event) -> None:
+    started.set()
+    release.wait(timeout=2)
+
+
+@asynccontextmanager
+async def _saturated_default_executor() -> AsyncIterator[None]:
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=2)
+    loop.set_default_executor(executor)
+    release = threading.Event()
+    started = [threading.Event() for _ in range(2)]
+    blockers = [
+        loop.run_in_executor(None, _block_executor_worker, worker_started, release)
+        for worker_started in started
+    ]
+    safety_release = threading.Timer(0.5, release.set)
+    safety_release.daemon = True
+    safety_release.start()
+    try:
+        async with asyncio.timeout(0.2):
+            while not all(worker_started.is_set() for worker_started in started):
+                await asyncio.sleep(0.001)
+        yield
+    finally:
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(*blockers)
+        safety_release.cancel()
+
+
+def _background_tasks() -> set[asyncio.Task]:
+    current = asyncio.current_task()
+    return {task for task in asyncio.all_tasks() if task is not current}
+
+
+def _stable_helper_tasks() -> set[asyncio.Task]:
+    return {
+        task
+        for task in _background_tasks()
+        if any(
+            helper in getattr(task.get_coro(), "__qualname__", "")
+            for helper in ("_run_stable_synthesis", "_wait_for_disconnect")
+        )
+    }
+
+
+async def test_stable_timeout_includes_saturated_executor_queue_time() -> None:
+    runtime = _StableRuntime()
+    request = _DisconnectRequest()
+
+    async with _saturated_default_executor():
+        operation = _run_stable_synthesis(
+            runtime,
+            SpeechRequest(input="queued"),
+            request,
+            0.05,
+        )
+        with pytest.raises(SynthesisAdmissionTimeout):
+            await asyncio.wait_for(operation, timeout=0.20)
+        assert runtime.calls == []
+
+    await asyncio.sleep(0)
+    assert runtime.calls == []
+
+
+async def test_stable_disconnect_cancels_saturated_executor_work() -> None:
+    runtime = _StableRuntime()
+    request = _DisconnectRequest(disconnected=True)
+    tasks_before = _background_tasks()
+
+    async with _saturated_default_executor():
+        operation = _run_stable_synthesis(
+            runtime,
+            SpeechRequest(input="queued"),
+            request,
+            1.0,
+        )
+        with pytest.raises(_ClientDisconnected):
+            await asyncio.wait_for(operation, timeout=0.20)
+        assert runtime.calls == []
+
+    await asyncio.sleep(0)
+    assert runtime.calls == []
+    assert _background_tasks() == tasks_before
+
+
+async def test_stable_monitor_finalization_covers_every_exit() -> None:
+    speech = SpeechRequest(input="Hallo")
+
+    tasks_before = _stable_helper_tasks()
+    await _run_stable_synthesis(_StableRuntime(), speech, _DisconnectRequest(), 1.0)
+    assert _stable_helper_tasks() == tasks_before
+
+    tasks_before = _stable_helper_tasks()
+    with pytest.raises(SynthesisAdmissionTimeout):
+        await _run_stable_synthesis(
+            _StableRuntime(SynthesisAdmissionTimeout()),
+            speech,
+            _DisconnectRequest(),
+            1.0,
+        )
+    assert _stable_helper_tasks() == tasks_before
+
+    class CancelAwareRuntime(_StableRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+
+        def synthesize(self, text, voice, language, *, cancel_event, **admission):
+            del voice, language, admission
+            self.calls.append(text)
+            self.started.set()
+            cancel_event.wait(timeout=1)
+            raise SynthesisCancelled()
+
+    disconnected_runtime = CancelAwareRuntime()
+    tasks_before = _stable_helper_tasks()
+    with pytest.raises(_ClientDisconnected):
+        await _run_stable_synthesis(
+            disconnected_runtime,
+            speech,
+            _DisconnectRequest(disconnected=True),
+            1.0,
+        )
+    assert _stable_helper_tasks() == tasks_before
+
+    cancelled_runtime = CancelAwareRuntime()
+    tasks_before = _stable_helper_tasks()
+    operation = asyncio.create_task(
+        _run_stable_synthesis(
+            cancelled_runtime,
+            speech,
+            _DisconnectRequest(),
+            1.0,
+        )
+    )
+    async with asyncio.timeout(0.2):
+        while not cancelled_runtime.started.is_set():
+            await asyncio.sleep(0.001)
+    operation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    assert _stable_helper_tasks() == tasks_before
+
+
 async def test_cancelled_queued_stable_route_never_starts_model_generation() -> None:
     profile = _runtime_profile()
     active_started = threading.Event()
@@ -300,9 +483,13 @@ async def test_stable_route_admission_timeout_is_bounded_and_recovers() -> None:
         base_url="http://test",
     ) as client:
         active = asyncio.create_task(
-            client.post(
-                "/v1/audio/speech",
-                json={"input": "active", "voice": profile.profile_id, "language": "german"},
+            asyncio.to_thread(
+                runtime.synthesize,
+                "active",
+                profile.profile_id,
+                "german",
+                cancel_event=threading.Event(),
+                lock_timeout=1.0,
             )
         )
         assert await asyncio.to_thread(active_started.wait, 1)
@@ -311,7 +498,7 @@ async def test_stable_route_admission_timeout_is_bounded_and_recovers() -> None:
             json={"input": "timed-out", "voice": profile.profile_id, "language": "german"},
         )
         release_active.set()
-        assert (await active).status_code == 200
+        await active
         following = await client.post(
             "/v1/audio/speech",
             json={"input": "following", "voice": profile.profile_id, "language": "german"},

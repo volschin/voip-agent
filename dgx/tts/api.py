@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import io
 from collections.abc import AsyncIterator, Iterator
-from contextlib import suppress
 from dataclasses import dataclass
 from threading import Event, Lock
 from typing import Any
@@ -16,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from dgx.tts.clone_runtime import SynthesisAdmissionTimeout, SynthesisCancelled
+from dgx.tts.clone_runtime import SynthesisAdmissionTimeout
 from dgx.tts.profiles import ProfileError
 
 MAX_SPEECH_INPUT_CHARACTERS = 2_000
@@ -130,6 +129,8 @@ async def _run_stable_synthesis(
     request: Request,
     admission_timeout_seconds: float,
 ) -> tuple[list[Any], int]:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + admission_timeout_seconds
     cancelled = Event()
     operation = asyncio.create_task(
         asyncio.to_thread(
@@ -141,32 +142,34 @@ async def _run_stable_synthesis(
             lock_timeout=admission_timeout_seconds,
         )
     )
-    disconnect = asyncio.create_task(_wait_for_disconnect(request))
     try:
-        done, _pending = await asyncio.wait(
-            {operation, disconnect},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if disconnect in done and disconnect.result():
-            cancelled.set()
-            with suppress(SynthesisCancelled):
-                await asyncio.shield(operation)
-            raise _ClientDisconnected()
-        return await asyncio.shield(operation)
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                _cancel_stable_operation(operation, cancelled)
+                raise SynthesisAdmissionTimeout()
+            done, _pending = await asyncio.wait(
+                {operation},
+                timeout=min(0.025, remaining),
+            )
+            if operation in done:
+                return operation.result()
+            if await request.is_disconnected():
+                _cancel_stable_operation(operation, cancelled)
+                raise _ClientDisconnected()
     except asyncio.CancelledError:
-        cancelled.set()
-        with suppress(SynthesisCancelled):
-            await asyncio.shield(operation)
+        _cancel_stable_operation(operation, cancelled)
         raise
-    finally:
-        if not disconnect.done():
-            disconnect.cancel()
 
 
-async def _wait_for_disconnect(request: Request) -> bool:
-    while not await request.is_disconnected():
-        await asyncio.sleep(0.025)
-    return True
+def _cancel_stable_operation(operation: asyncio.Task, cancelled: Event) -> None:
+    cancelled.set()
+    operation.cancel()
+    if operation.done():
+        try:
+            operation.result()
+        except BaseException:
+            pass
 
 
 async def encode_pcm_stream(
