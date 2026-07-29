@@ -68,7 +68,7 @@ pytest, Ruff, Docker Compose, Portainer, NVIDIA GB10 CUDA.
 
   ```json
   {
-    "schema_version": 1,
+    "schema_version": 2,
     "usage_scope": "private-user-assistant-only",
     "profiles": [{
       "id": "shared-female-de-v1",
@@ -76,9 +76,14 @@ pytest, Ruff, Docker Compose, Portainer, NVIDIA GB10 CUDA.
       "reference_text": "Guten Tag.",
       "language": "german",
       "source_type": "licensed-human-reference-private",
+      "source_model": null,
       "source_revision": "private-sha256:0123456789abcdef",
+      "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "selected_at": "2026-07-29T12:00:00Z"
+      "selected_at": "2026-07-29T12:00:00Z",
+      "evaluation_score": 80,
+      "selected_candidate_id": "candidate-a",
+      "design_instruction": null
     }]
   }
   ```
@@ -515,7 +520,19 @@ pytest, Ruff, Docker Compose, Portainer, NVIDIA GB10 CUDA.
   rejected references and all generated evaluation outputs after the report's
   bounded metrics are recorded.
 
-- [ ] **Step 7: Recreate and verify production TTS**
+- [ ] **Step 7: Migrate the live manifest atomically**
+
+  Before starting an image whose loader requires schema 2, copy the private
+  schema-1 manifest to the evaluation directory as a mode-0600 rollback file.
+  Create a sibling temporary manifest that changes only `schema_version` to 2,
+  preserves every provenance field, and retains the original owner and mode.
+  Mount a private test bundle read-only into the exact new image and require
+  `load_profiles()` to accept precisely `shared-female-de-v1`. Only then rename
+  the temporary file atomically over the live manifest and immediately update
+  the existing Portainer stack. If the stack update or health gate fails,
+  restore both the schema-1 manifest and prior image before retrying.
+
+- [ ] **Step 8: Recreate and verify production TTS**
 
   Recreate TTS against the winner-only bundle. Health must prove Base revision,
   `shared-female-de-v1`, NVIDIA GB10, warm prompt, and restart count zero.
