@@ -113,6 +113,7 @@ def test_tts_deployment_is_offline_base_only_with_private_read_only_profile() ->
     assert "/home/volsch/voice-private/profiles:/run/voice-profiles:ro" in volumes
     assert TTS_BASE_REVISION in health_command
     assert "shared-female-de-v1" in health_command
+    assert service["healthcheck"]["start_period"] == "300s"
 
 
 def test_tts_image_copies_clone_code_but_no_private_profile_assets() -> None:
