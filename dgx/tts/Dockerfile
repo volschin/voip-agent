@@ -39,9 +39,12 @@ RUN pip install --no-cache-dir --break-system-packages --no-build-isolation \
 RUN pip install --no-cache-dir --break-system-packages --no-deps "av>=12"
 
 WORKDIR /app
-COPY server.py /app/server.py
-COPY runtime.py /app/runtime.py
+COPY tts/server.py /app/dgx/tts/server.py
+COPY tts/runtime.py /app/dgx/tts/runtime.py
+COPY tts/profiles.py /app/dgx/tts/profiles.py
+COPY tts/clone_runtime.py /app/dgx/tts/clone_runtime.py
+COPY tts/api.py /app/dgx/tts/api.py
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8002
-CMD ["python3", "server.py"]
+CMD ["python3", "-m", "dgx.tts.server"]

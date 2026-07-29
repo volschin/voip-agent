@@ -55,7 +55,9 @@ services:
     # Built locally from ./tts — faster-qwen3-tts runtime with the custom
     # /v1/audio/speech/stream endpoint the streaming pipeline (#3) depends on.
     # The aeon-7 upstream image cannot carry this endpoint.
-    build: ./tts
+    build:
+      context: .
+      dockerfile: tts/Dockerfile
     container_name: qwen3-tts
     deploy:
       resources:
@@ -66,19 +68,20 @@ services:
               capabilities: [gpu]
     environment:
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
-      # - QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign
-      # - QWEN_TTS_TOKENIZER=Qwen/Qwen3-TTS-Tokenizer-12Hz
-      # - QWEN_TTS_ATTN_IMPL=flash_attention_2
-      # - QWEN_TTS_DEFAULT_VOICE=A neutral, friendly adult voice ...
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
+      - QWEN_TTS_MODEL=/root/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-Base/snapshots/fd4b254389122332181a7c3db7f27e918eec64e3
+      - QWEN_TTS_DEFAULT_PROFILE=shared-female-de-v1
     volumes:
-      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface:ro
+      - /home/volsch/voice-private/profiles:/run/voice-profiles:ro
     networks:
       - default
       - shared_ai_voice
     shm_size: "4gb"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python3", "-c", "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8002/health',timeout=3)); assert data.get('model_loaded') is True"]
+      test: ["CMD", "python3", "-c", "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8002/health',timeout=3)); assert data.get('status') == 'ok'; assert data.get('model_revision') == 'fd4b254389122332181a7c3db7f27e918eec64e3'; assert data.get('default_profile') == 'shared-female-de-v1'"]
       interval: 30s
       timeout: 5s
       retries: 5

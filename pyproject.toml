@@ -25,10 +25,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "fastapi>=0.110",
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
     "respx>=0.21",
     "pytest-mock>=3.14",
+    "soundfile>=0.12",
 ]
 
 [tool.pytest.ini_options]

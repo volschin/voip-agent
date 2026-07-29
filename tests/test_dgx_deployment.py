@@ -9,6 +9,7 @@ from dgx.tts.runtime import normalize_language, require_gb10_cuda
 
 ROOT = Path(__file__).resolve().parents[1]
 ASR_REVISION = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
+TTS_BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
 
 
 def _compose() -> dict:
@@ -97,9 +98,34 @@ def test_tts_runtime_maps_openai_language_codes(language: str | None, expected: 
     assert normalize_language(language) == expected
 
 
-def test_tts_image_installs_runtime_gate_and_health_requires_loaded_model() -> None:
-    dockerfile = (ROOT / "dgx/tts/Dockerfile").read_text(encoding="utf-8")
-    health_command = " ".join(_compose()["services"]["qwen3-tts"]["healthcheck"]["test"])
+def test_tts_deployment_is_offline_base_only_with_private_read_only_profile() -> None:
+    service = _compose()["services"]["qwen3-tts"]
+    environment = set(service["environment"])
+    volumes = set(service["volumes"])
+    health_command = " ".join(service["healthcheck"]["test"])
 
-    assert "COPY runtime.py /app/runtime.py" in dockerfile
-    assert "model_loaded" in health_command
+    assert "HF_HUB_OFFLINE=1" in environment
+    assert "TRANSFORMERS_OFFLINE=1" in environment
+    assert any(TTS_BASE_REVISION in value and "1.7B-Base" in value for value in environment)
+    assert not any("VoiceDesign" in value for value in environment)
+    assert "QWEN_TTS_DEFAULT_PROFILE=shared-female-de-v1" in environment
+    assert "${HOME}/.cache/huggingface:/root/.cache/huggingface:ro" in volumes
+    assert "/home/volsch/voice-private/profiles:/run/voice-profiles:ro" in volumes
+    assert TTS_BASE_REVISION in health_command
+    assert "shared-female-de-v1" in health_command
+
+
+def test_tts_image_copies_clone_code_but_no_private_profile_assets() -> None:
+    dockerfile = (ROOT / "dgx/tts/Dockerfile").read_text(encoding="utf-8")
+    copy_lines = {line.strip() for line in dockerfile.splitlines() if line.startswith("COPY ")}
+    server = (ROOT / "dgx/tts/server.py").read_text(encoding="utf-8")
+    build = _compose()["services"]["qwen3-tts"]["build"]
+
+    assert build == {"context": ".", "dockerfile": "tts/Dockerfile"}
+    assert "COPY tts/runtime.py /app/dgx/tts/runtime.py" in dockerfile
+    assert "COPY tts/profiles.py /app/dgx/tts/profiles.py" in dockerfile
+    assert "COPY tts/clone_runtime.py /app/dgx/tts/clone_runtime.py" in dockerfile
+    assert "COPY tts/api.py /app/dgx/tts/api.py" in dockerfile
+    assert not any(".wav" in line or "profiles/" in line for line in copy_lines)
+    assert "generate_voice_design" not in server
+    assert 'CMD ["python3", "-m", "dgx.tts.server"]' in dockerfile
