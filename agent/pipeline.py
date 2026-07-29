@@ -6,7 +6,7 @@ from contextlib import suppress
 
 import numpy as np
 
-from agent.audio import resample_pcm16
+from agent.audio import PCM16_PLAYBACK_BLOCK_BYTES, resample_pcm16
 from agent.session import CallSession, SessionState
 
 log = logging.getLogger(__name__)
@@ -24,18 +24,14 @@ def _decode_wav(data: bytes) -> np.ndarray:
     the resampler as audio. Parse the container instead.
     """
     with wave.open(io.BytesIO(data), "rb") as wf:
+        if wf.getnchannels() != 1:
+            raise ValueError(f"expected mono TTS WAV, got {wf.getnchannels()} channels")
         if wf.getsampwidth() != 2:
             raise ValueError(f"expected 16-bit PCM, got {wf.getsampwidth() * 8}-bit")
         if wf.getframerate() != _TTS_SAMPLE_RATE:
-            log.warning(
-                "TTS WAV is %d Hz, resampler expects %d Hz",
-                wf.getframerate(),
-                _TTS_SAMPLE_RATE,
-            )
+            raise ValueError(f"expected 24 kHz TTS WAV, got {wf.getframerate()} Hz")
         frames = wf.readframes(wf.getnframes())
         pcm = np.frombuffer(frames, dtype=np.int16)
-        if wf.getnchannels() > 1:  # collapse to mono
-            pcm = pcm.reshape(-1, wf.getnchannels())[:, 0].copy()
     return pcm
 
 
@@ -93,8 +89,10 @@ class VoicePipeline:
     async def _tts_pcm16_chunks(self, text):
         """Synthesize one stable sentence and yield 16 kHz mono PCM16."""
         pcm_16k = await self.synthesize_pcm16(text)
-        if pcm_16k:
-            yield pcm_16k
+        if len(pcm_16k) % 2:
+            raise RuntimeError("stable TTS returned incomplete PCM16")
+        for offset in range(0, len(pcm_16k), PCM16_PLAYBACK_BLOCK_BYTES):
+            yield pcm_16k[offset : offset + PCM16_PLAYBACK_BLOCK_BYTES]
 
     async def process_turn_stream(self, session: CallSession, pcm_16k: np.ndarray):
         """Stream a turn: STT (full) -> LLM tokens -> segments -> 16 kHz PCM.
@@ -164,6 +162,8 @@ class VoicePipeline:
                 if kind == "error":
                     raise RuntimeError("llm stream failed")
                 if kind == "done":
+                    if not "".join(parts).strip():
+                        raise RuntimeError("llm stream returned no text")
                     break
                 emitted = False
                 async for c in self._tts_pcm16_chunks(payload):

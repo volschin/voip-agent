@@ -8,7 +8,11 @@ import numpy as np
 import pytest
 
 from dgx.tts.api import encode_pcm_stream
-from dgx.tts.clone_runtime import CloneRuntime
+from dgx.tts.clone_runtime import (
+    CloneRuntime,
+    SynthesisAdmissionTimeout,
+    SynthesisCancelled,
+)
 from dgx.tts.profiles import ProfileError, VoiceProfile
 
 
@@ -150,6 +154,88 @@ def test_clone_runtime_serializes_model_inference(tmp_path: Path) -> None:
             future.result(timeout=2)
 
     assert model.maximum_active == 1
+
+
+def test_cancelled_queued_synthesis_never_starts_model_generation(tmp_path: Path) -> None:
+    profile = _profile(tmp_path)
+    active_started = threading.Event()
+    release_active = threading.Event()
+    cancel_queued = threading.Event()
+
+    class BlockingSynthesisModel(ExactCloneModel):
+        def __init__(self, selected_profile: VoiceProfile) -> None:
+            super().__init__(selected_profile)
+            self.generated_texts: list[str] = []
+
+        def generate_voice_clone(self, **kwargs):
+            self.generated_texts.append(kwargs["text"])
+            if kwargs["text"] == "active":
+                active_started.set()
+                release_active.wait(timeout=2)
+            return self.warm_audio, self.sample_rate
+
+    model = BlockingSynthesisModel(profile)
+    runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        active = executor.submit(runtime.synthesize, "active", profile.profile_id, "de")
+        assert active_started.wait(timeout=1)
+        queued = executor.submit(
+            runtime.synthesize,
+            "queued",
+            profile.profile_id,
+            "de",
+            cancel_event=cancel_queued,
+            lock_timeout=1.0,
+        )
+        cancel_queued.set()
+
+        with pytest.raises(SynthesisCancelled):
+            queued.result(timeout=1)
+        release_active.set()
+        active.result(timeout=1)
+
+    assert model.generated_texts == ["active"]
+
+
+def test_synthesis_admission_timeout_recovers_for_following_request(tmp_path: Path) -> None:
+    profile = _profile(tmp_path)
+    active_started = threading.Event()
+    release_active = threading.Event()
+
+    class BlockingSynthesisModel(ExactCloneModel):
+        def __init__(self, selected_profile: VoiceProfile) -> None:
+            super().__init__(selected_profile)
+            self.generated_texts: list[str] = []
+
+        def generate_voice_clone(self, **kwargs):
+            self.generated_texts.append(kwargs["text"])
+            if kwargs["text"] == "active":
+                active_started.set()
+                release_active.wait(timeout=2)
+            return self.warm_audio, self.sample_rate
+
+    model = BlockingSynthesisModel(profile)
+    runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        active = executor.submit(runtime.synthesize, "active", profile.profile_id, "de")
+        assert active_started.wait(timeout=1)
+        timed_out = executor.submit(
+            runtime.synthesize,
+            "timed-out",
+            profile.profile_id,
+            "de",
+            lock_timeout=0.05,
+        )
+        with pytest.raises(SynthesisAdmissionTimeout):
+            timed_out.result(timeout=1)
+        release_active.set()
+        active.result(timeout=1)
+
+    runtime.synthesize("following", profile.profile_id, "de", lock_timeout=0.1)
+
+    assert model.generated_texts == ["active", "following"]
 
 
 def test_clone_runtime_holds_lock_for_complete_stream_lifetime(tmp_path: Path) -> None:

@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from threading import Event, Lock
+from time import monotonic
 from typing import Any
 
 import numpy as np
 
 from dgx.tts.profiles import VoiceProfile, resolve_profile
 from dgx.tts.runtime import normalize_language
+
+
+class SynthesisAdmissionTimeout(RuntimeError):
+    """The stable model stayed busy beyond the bounded admission wait."""
+
+
+class SynthesisCancelled(RuntimeError):
+    """A queued stable request was cancelled before model generation."""
 
 
 class CloneRuntime:
@@ -45,9 +54,13 @@ class CloneRuntime:
         text: str,
         voice: str | None,
         language: str | None,
+        *,
+        cancel_event: Event | None = None,
+        lock_timeout: float | None = None,
     ) -> tuple[list[Any], int]:
         profile = resolve_profile(voice, self._profiles, self._default_profile_id)
-        with self._model_lock:
+        self._acquire_synthesis(cancel_event, lock_timeout)
+        try:
             return self._model.generate_voice_clone(
                 text=text,
                 language=normalize_language(language) or profile.language,
@@ -55,6 +68,30 @@ class CloneRuntime:
                 ref_text=profile.reference_text,
                 non_streaming_mode=True,
             )
+        finally:
+            self._model_lock.release()
+
+    def _acquire_synthesis(
+        self,
+        cancel_event: Event | None,
+        lock_timeout: float | None,
+    ) -> None:
+        deadline = None if lock_timeout is None else monotonic() + lock_timeout
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise SynthesisCancelled()
+            wait_seconds = 0.05
+            if deadline is not None:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise SynthesisAdmissionTimeout()
+                wait_seconds = min(wait_seconds, remaining)
+            if not self._model_lock.acquire(timeout=wait_seconds):
+                continue
+            if cancel_event is not None and cancel_event.is_set():
+                self._model_lock.release()
+                raise SynthesisCancelled()
+            return
 
     def stream(
         self,

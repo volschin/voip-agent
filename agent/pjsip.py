@@ -10,6 +10,7 @@ import threading
 from collections import deque
 from contextlib import suppress
 
+from agent.audio import PCM16_PLAYBACK_BLOCK_BYTES
 from agent.config import Settings
 from agent.conversation import ConversationManager
 from agent.pjsip_poc import DelayedAnswerService
@@ -96,6 +97,8 @@ class PjsipAudioSink:
     BYTES_PER_SAMPLE = 2
     PREBUFFER_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * 300 // 1000
     MAX_AHEAD_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * 2
+    PCM_BLOCK_BYTES = PCM16_PLAYBACK_BLOCK_BYTES
+    STREAM_BUFFER_MAX_BYTES = MAX_AHEAD_BYTES - 2 * PCM_BLOCK_BYTES
 
     def __init__(self, buffer: PcmPlaybackBuffer) -> None:
         self._buffer = buffer
@@ -108,13 +111,19 @@ class PjsipAudioSink:
         self._closed = True
         self._buffer.close()
 
-    async def _write_with_backpressure(self, pcm: bytes) -> None:
+    async def _write_with_backpressure(
+        self,
+        pcm: bytes,
+        *,
+        max_buffer_bytes: int | None = None,
+    ) -> None:
         if len(pcm) % self.BYTES_PER_SAMPLE:
             raise ValueError("PCM16 requires an even byte count")
+        buffer_limit = max_buffer_bytes or self.MAX_AHEAD_BYTES
         offset = 0
         while offset < len(pcm):
             while not self._closed:
-                available = self.MAX_AHEAD_BYTES - self._buffer.buffered_bytes
+                available = buffer_limit - self._buffer.buffered_bytes
                 available -= available % self.BYTES_PER_SAMPLE
                 if available >= self.BYTES_PER_SAMPLE:
                     break
@@ -146,24 +155,38 @@ class PjsipAudioSink:
                 pcm = await queue.get()
                 if pcm is None:
                     if pending:
-                        await self._write_with_backpressure(bytes(pending))
+                        await self._write_with_backpressure(
+                            bytes(pending),
+                            max_buffer_bytes=self.STREAM_BUFFER_MAX_BYTES,
+                        )
                     break
                 if len(pcm) % self.BYTES_PER_SAMPLE:
                     raise ValueError("PCM16 requires an even byte count")
+                if len(pcm) > self.PCM_BLOCK_BYTES:
+                    raise ValueError("PCM playback block exceeds transport quantum")
                 if not playback_started:
                     needed = self.PREBUFFER_BYTES - len(pending)
                     pending.extend(pcm[:needed])
                     pcm = pcm[needed:]
                     if len(pending) < self.PREBUFFER_BYTES:
                         continue
-                    await self._write_with_backpressure(bytes(pending))
+                    await self._write_with_backpressure(
+                        bytes(pending),
+                        max_buffer_bytes=self.STREAM_BUFFER_MAX_BYTES,
+                    )
                     pending.clear()
                     playback_started = True
                     if not pcm:
                         continue
-                await self._write_with_backpressure(pcm)
+                await self._write_with_backpressure(
+                    pcm,
+                    max_buffer_bytes=self.STREAM_BUFFER_MAX_BYTES,
+                )
             await self._wait_drained()
         except asyncio.CancelledError:
+            self.clear()
+            raise
+        except Exception:
             self.clear()
             raise
 

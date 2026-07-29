@@ -16,7 +16,7 @@ from typing import Protocol
 
 import numpy as np
 
-from agent.audio import VadBuffer
+from agent.audio import PCM16_PLAYBACK_BLOCK_BYTES, VadBuffer
 from agent.config import Settings
 from agent.pipeline import VoicePipeline
 from agent.priority import LeaseHandle, PriorityLeaseClient, PriorityUnavailable
@@ -56,6 +56,49 @@ class _PendingStart:
     termination: _TransportTermination
 
 
+class _PcmByteQueue:
+    """Bound playback handoff by PCM bytes, independent of item count."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self._queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._max_bytes = max_bytes
+        self._queued_bytes = 0
+        self._space_available = asyncio.Event()
+        self._space_available.set()
+
+    @property
+    def queued_bytes(self) -> int:
+        return self._queued_bytes
+
+    def full(self) -> bool:
+        return self._queued_bytes >= self._max_bytes
+
+    async def put(self, item: bytes | None) -> None:
+        size = len(item) if item is not None else 0
+        if size > self._max_bytes:
+            raise ValueError("PCM playback block exceeds queue byte limit")
+        while size and self._queued_bytes + size > self._max_bytes:
+            self._space_available.clear()
+            await self._space_available.wait()
+        self._queued_bytes += size
+        self._queue.put_nowait(item)
+
+    async def get(self) -> bytes | None:
+        item = await self._queue.get()
+        self._release(item)
+        return item
+
+    def get_nowait(self) -> bytes | None:
+        item = self._queue.get_nowait()
+        self._release(item)
+        return item
+
+    def _release(self, item: bytes | None) -> None:
+        if item is not None:
+            self._queued_bytes -= len(item)
+            self._space_available.set()
+
+
 class ConversationManager:
     """Drive one or more calls independently from SIP/ARI transport details."""
 
@@ -86,7 +129,7 @@ class ConversationManager:
         self._bargein_buffers: dict[str, VadBuffer] = {}
         self._playback_tasks: dict[str, asyncio.Task] = {}
         self._audio_queues: dict[str, asyncio.Queue[bytes]] = {}
-        self._out_queues: dict[str, asyncio.Queue] = {}
+        self._out_queues: dict[str, _PcmByteQueue] = {}
         self._consumer_tasks: dict[str, asyncio.Task] = {}
         self._turn_locks: dict[str, asyncio.Lock] = {}
         self._generation: dict[str, int] = {}
@@ -319,7 +362,7 @@ class ConversationManager:
         if sink is None or self._generation.get(call_id) != generation:
             return
 
-        out: asyncio.Queue = asyncio.Queue(maxsize=50)
+        out = _PcmByteQueue(max_bytes=PCM16_PLAYBACK_BLOCK_BYTES)
         self._out_queues[call_id] = out
         first_chunk_seen = False
 
@@ -336,11 +379,16 @@ class ConversationManager:
             await out.put(None)
 
         try:
-            async with asyncio.TaskGroup() as group:
-                group.create_task(produce())
-                group.create_task(sink.play_pcm16_chunks(out))
-        except* Exception:
-            log.exception("Streaming turn failed for %s", call_id)
+            try:
+                async with asyncio.TaskGroup() as group:
+                    group.create_task(produce())
+                    group.create_task(sink.play_pcm16_chunks(out))
+            except* Exception:
+                sink.clear()
+                log.exception("Streaming turn failed for %s", call_id)
+        except asyncio.CancelledError:
+            sink.clear()
+            raise
         finally:
             self._out_queues.pop(call_id, None)
 
@@ -391,6 +439,7 @@ class ConversationManager:
             task = self._playback_tasks.pop(call_id, None)
             if task and not task.done():
                 task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             sink = self._sinks.get(call_id)
             if sink:
                 sink.clear()

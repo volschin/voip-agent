@@ -5,17 +5,22 @@ from __future__ import annotations
 import asyncio
 import io
 from collections.abc import AsyncIterator, Iterator
+from contextlib import suppress
 from dataclasses import dataclass
-from threading import Lock
+from threading import Event, Lock
 from typing import Any
 
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from dgx.tts.clone_runtime import SynthesisAdmissionTimeout, SynthesisCancelled
 from dgx.tts.profiles import ProfileError
+
+MAX_SPEECH_INPUT_CHARACTERS = 2_000
+DEFAULT_SYNTHESIS_ADMISSION_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -28,13 +33,23 @@ class HealthMetadata:
 
 class SpeechRequest(BaseModel):
     model: str = Field(default="qwen3-tts", description="Ignored; one served model")
-    input: str = Field(..., min_length=1, description="Text to synthesize")
+    input: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_SPEECH_INPUT_CHARACTERS,
+        description="Text to synthesize",
+    )
     voice: str | None = Field(default=None, description="Server-owned voice profile ID")
     response_format: str = Field(default="wav", description="wav | flac | mp3")
     language: str | None = Field(default=None, description="Optional language hint")
 
 
-def create_app(runtime: Any, health: HealthMetadata) -> FastAPI:
+def create_app(
+    runtime: Any,
+    health: HealthMetadata,
+    *,
+    synthesis_admission_timeout_seconds: float = DEFAULT_SYNTHESIS_ADMISSION_TIMEOUT_SECONDS,
+) -> FastAPI:
     app = FastAPI(title="Qwen3-TTS Clone Server", version="0.2.0")
 
     @app.get("/health")
@@ -63,22 +78,27 @@ def create_app(runtime: Any, health: HealthMetadata) -> FastAPI:
         }
 
     @app.post("/v1/audio/speech")
-    def synthesize(request: SpeechRequest) -> Response:
+    async def synthesize(speech: SpeechRequest, request: Request) -> Response:
         try:
-            audios, sample_rate = runtime.synthesize(
-                request.input,
-                request.voice,
-                request.language,
+            audios, sample_rate = await _run_stable_synthesis(
+                runtime,
+                speech,
+                request,
+                synthesis_admission_timeout_seconds,
             )
             if not audios or np.asarray(audios[0]).size == 0:
                 raise RuntimeError("empty audio")
             return _audio_response(
                 np.asarray(audios[0]),
                 sample_rate,
-                request.response_format,
+                speech.response_format,
             )
         except ProfileError as error:
             raise HTTPException(422, detail="unsupported voice profile") from error
+        except SynthesisAdmissionTimeout as error:
+            raise HTTPException(503, detail="synthesis admission timed out") from error
+        except _ClientDisconnected:
+            return Response(status_code=499)
         except HTTPException:
             raise
         except Exception:
@@ -98,6 +118,55 @@ def create_app(runtime: Any, health: HealthMetadata) -> FastAPI:
         )
 
     return app
+
+
+class _ClientDisconnected(RuntimeError):
+    pass
+
+
+async def _run_stable_synthesis(
+    runtime: Any,
+    speech: SpeechRequest,
+    request: Request,
+    admission_timeout_seconds: float,
+) -> tuple[list[Any], int]:
+    cancelled = Event()
+    operation = asyncio.create_task(
+        asyncio.to_thread(
+            runtime.synthesize,
+            speech.input,
+            speech.voice,
+            speech.language,
+            cancel_event=cancelled,
+            lock_timeout=admission_timeout_seconds,
+        )
+    )
+    disconnect = asyncio.create_task(_wait_for_disconnect(request))
+    try:
+        done, _pending = await asyncio.wait(
+            {operation, disconnect},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if disconnect in done and disconnect.result():
+            cancelled.set()
+            with suppress(SynthesisCancelled):
+                await asyncio.shield(operation)
+            raise _ClientDisconnected()
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        cancelled.set()
+        with suppress(SynthesisCancelled):
+            await asyncio.shield(operation)
+        raise
+    finally:
+        if not disconnect.done():
+            disconnect.cancel()
+
+
+async def _wait_for_disconnect(request: Request) -> bool:
+    while not await request.is_disconnected():
+        await asyncio.sleep(0.025)
+    return True
 
 
 async def encode_pcm_stream(
@@ -182,6 +251,7 @@ class _SerializedIterator:
 def _audio_response(audio: np.ndarray, sample_rate: int, response_format: str) -> Response:
     if sample_rate != 24_000:
         raise RuntimeError("synthesis must return 24 kHz audio")
+    audio = _validate_stable_audio(audio)
     formats = {
         "wav": ("WAV", "audio/wav"),
         "flac": ("FLAC", "audio/flac"),
@@ -198,3 +268,26 @@ def _audio_response(audio: np.ndarray, sample_rate: int, response_format: str) -
             raise HTTPException(400, detail="mp3 encoding unavailable") from None
         raise
     return Response(content=output.getvalue(), media_type=selected[1])
+
+
+def _validate_stable_audio(audio: np.ndarray) -> np.ndarray:
+    array = np.asarray(audio)
+    if array.ndim != 1:
+        raise RuntimeError("synthesis must return mono audio")
+    if array.size == 0:
+        raise RuntimeError("synthesis returned empty audio")
+    if not (
+        np.issubdtype(array.dtype, np.floating)
+        or np.issubdtype(array.dtype, np.signedinteger)
+        or np.issubdtype(array.dtype, np.unsignedinteger)
+    ):
+        raise RuntimeError("synthesis returned unsupported audio samples")
+    if not np.all(np.isfinite(array)):
+        raise RuntimeError("synthesis returned non-finite audio")
+    if np.issubdtype(array.dtype, np.floating):
+        if np.any(array < -1.0) or np.any(array > 1.0):
+            raise RuntimeError("synthesis returned out-of-range audio")
+        return array
+    if np.any(array < -32_768) or np.any(array > 32_767):
+        raise RuntimeError("synthesis returned out-of-range audio")
+    return array.astype(np.int16, copy=False)

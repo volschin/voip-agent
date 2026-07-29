@@ -5,13 +5,20 @@ import threading
 import time
 import wave
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 import numpy as np
 import pytest
 
-from dgx.tts.api import HealthMetadata, create_app, encode_pcm_stream
-from dgx.tts.profiles import ProfileError
+from dgx.tts.api import (
+    MAX_SPEECH_INPUT_CHARACTERS,
+    HealthMetadata,
+    create_app,
+    encode_pcm_stream,
+)
+from dgx.tts.clone_runtime import CloneRuntime
+from dgx.tts.profiles import ProfileError, VoiceProfile
 
 
 @dataclass
@@ -20,7 +27,13 @@ class FakeRuntime:
     selected_language: str | None = None
     fail: Exception | None = None
 
-    def synthesize(self, text: str, voice: str | None, language: str | None):
+    def synthesize(
+        self,
+        text: str,
+        voice: str | None,
+        language: str | None,
+        **_admission,
+    ):
         if self.fail:
             raise self.fail
         self.selected_voice = voice
@@ -91,6 +104,37 @@ async def test_non_streaming_endpoint_returns_valid_24khz_wav() -> None:
     assert runtime.selected_language == "german"
 
 
+@pytest.mark.parametrize(
+    "audio",
+    [
+        np.array([[0.0, 0.25], [-0.25, 0.0]], dtype=np.float32),
+        np.array([0.0, np.nan], dtype=np.float32),
+        np.array([0.0, np.inf], dtype=np.float32),
+        np.array([0.0, 1.01], dtype=np.float32),
+        np.array([-32_769, 0], dtype=np.int32),
+        np.array([0, 32_768], dtype=np.int32),
+    ],
+    ids=["stereo", "nan", "infinite", "float-range", "int16-low", "int16-high"],
+)
+async def test_non_streaming_endpoint_rejects_unsafe_model_audio(audio: np.ndarray) -> None:
+    class InvalidAudioRuntime(FakeRuntime):
+        def synthesize(self, *_args, **_kwargs):
+            return [audio], 24_000
+
+    async with await _client(InvalidAudioRuntime()) as client:
+        response = await client.post(
+            "/v1/audio/speech",
+            json={
+                "input": "Hallo",
+                "voice": "shared-female-de-v1",
+                "language": "german",
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "synthesis failed"}
+
+
 async def test_streaming_endpoint_scales_and_clips_float_pcm() -> None:
     runtime = FakeRuntime()
     async with await _client(runtime) as client:
@@ -137,6 +181,146 @@ async def test_model_failure_returns_bounded_500() -> None:
     assert response.status_code == 500
     assert response.json() == {"detail": "synthesis failed"}
     assert "secret model path" not in response.text
+
+
+async def test_non_streaming_endpoint_rejects_oversized_input_before_generation() -> None:
+    runtime = FakeRuntime()
+    async with await _client(runtime) as client:
+        response = await client.post(
+            "/v1/audio/speech",
+            json={
+                "input": "x" * (MAX_SPEECH_INPUT_CHARACTERS + 1),
+                "voice": "shared-female-de-v1",
+                "language": "german",
+            },
+        )
+
+    assert response.status_code == 422
+    assert runtime.selected_voice is None
+
+
+def _runtime_profile() -> VoiceProfile:
+    return VoiceProfile(
+        profile_id="shared-female-de-v1",
+        audio_path=Path("/private/reference.wav"),
+        reference_text="Guten Tag.",
+        language="german",
+        source_type="licensed-human-reference-private",
+        source_model=None,
+        source_revision="private-v1",
+        source_sha256="1" * 64,
+        sha256="2" * 64,
+        selected_at="2026-07-29T12:00:00Z",
+        evaluation_score=91.25,
+        selected_candidate_id="candidate-a",
+        design_instruction=None,
+    )
+
+
+async def test_cancelled_queued_stable_route_never_starts_model_generation() -> None:
+    profile = _runtime_profile()
+    active_started = threading.Event()
+    release_active = threading.Event()
+    queued_entered = threading.Event()
+
+    class BlockingModel:
+        def __init__(self) -> None:
+            self.generated_texts: list[str] = []
+
+        def generate_voice_clone(self, **kwargs):
+            self.generated_texts.append(kwargs["text"])
+            if kwargs["text"] == "active":
+                active_started.set()
+                release_active.wait(timeout=2)
+            return [np.array([0.0, 0.25], dtype=np.float32)], 24_000
+
+    class TrackingRuntime(CloneRuntime):
+        def synthesize(self, text, voice, language, **kwargs):
+            if text == "queued":
+                queued_entered.set()
+            return super().synthesize(text, voice, language, **kwargs)
+
+    model = BlockingModel()
+    runtime = TrackingRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+    app = create_app(runtime, _health())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        active = asyncio.create_task(
+            client.post(
+                "/v1/audio/speech",
+                json={"input": "active", "voice": profile.profile_id, "language": "german"},
+            )
+        )
+        assert await asyncio.to_thread(active_started.wait, 1)
+        queued = asyncio.create_task(
+            client.post(
+                "/v1/audio/speech",
+                json={"input": "queued", "voice": profile.profile_id, "language": "german"},
+            )
+        )
+        assert await asyncio.to_thread(queued_entered.wait, 1)
+
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        release_active.set()
+        assert (await active).status_code == 200
+        following = await client.post(
+            "/v1/audio/speech",
+            json={"input": "following", "voice": profile.profile_id, "language": "german"},
+        )
+
+    assert following.status_code == 200
+    assert model.generated_texts == ["active", "following"]
+
+
+async def test_stable_route_admission_timeout_is_bounded_and_recovers() -> None:
+    profile = _runtime_profile()
+    active_started = threading.Event()
+    release_active = threading.Event()
+
+    class BlockingModel:
+        def __init__(self) -> None:
+            self.generated_texts: list[str] = []
+
+        def generate_voice_clone(self, **kwargs):
+            self.generated_texts.append(kwargs["text"])
+            if kwargs["text"] == "active":
+                active_started.set()
+                release_active.wait(timeout=2)
+            return [np.array([0.0, 0.25], dtype=np.float32)], 24_000
+
+    model = BlockingModel()
+    runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+    app = create_app(runtime, _health(), synthesis_admission_timeout_seconds=0.05)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        active = asyncio.create_task(
+            client.post(
+                "/v1/audio/speech",
+                json={"input": "active", "voice": profile.profile_id, "language": "german"},
+            )
+        )
+        assert await asyncio.to_thread(active_started.wait, 1)
+        timed_out = await client.post(
+            "/v1/audio/speech",
+            json={"input": "timed-out", "voice": profile.profile_id, "language": "german"},
+        )
+        release_active.set()
+        assert (await active).status_code == 200
+        following = await client.post(
+            "/v1/audio/speech",
+            json={"input": "following", "voice": profile.profile_id, "language": "german"},
+        )
+
+    assert timed_out.status_code == 503
+    assert timed_out.json() == {"detail": "synthesis admission timed out"}
+    assert following.status_code == 200
+    assert model.generated_texts == ["active", "following"]
 
 
 async def test_closing_pcm_stream_closes_model_iterator() -> None:

@@ -1,11 +1,13 @@
 import asyncio
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 
 from agent.conversation import ConversationManager
+from agent.pjsip import PcmPlaybackBuffer, PjsipAudioSink
 from agent.priority import PriorityUnavailable
-from agent.session import SessionState
+from agent.session import CallSession, SessionState
 
 
 class FakeSink:
@@ -31,6 +33,17 @@ class FakeSink:
 class BlockingStreamSink(FakeSink):
     async def play_pcm16_chunks(self, _queue):
         await asyncio.Event().wait()
+
+
+class ObservedPlaybackBuffer(PcmPlaybackBuffer):
+    def __init__(self):
+        super().__init__()
+        self.maximum_buffered_bytes = 0
+
+    def write(self, pcm):
+        written = super().write(pcm)
+        self.maximum_buffered_bytes = max(self.maximum_buffered_bytes, self.buffered_bytes)
+        return written
 
 
 def _manager(settings):
@@ -263,7 +276,7 @@ async def test_full_output_queue_does_not_deadlock_stream_cancellation(settings)
         _session.transition(SessionState.PROCESSING)
         try:
             for _ in range(100):
-                yield b"\x00\x00"
+                yield b"\x00\x00" * 320
         finally:
             closed.set()
 
@@ -287,6 +300,179 @@ async def test_full_output_queue_does_not_deadlock_stream_cancellation(settings)
 
     assert completed_without_unblock
     assert closed.is_set()
+    await manager.stop_call("1")
+
+
+async def test_blocked_pjsip_playback_never_exceeds_two_second_aggregate_backlog(settings):
+    manager, pipeline = _manager(settings)
+    buffer = PcmPlaybackBuffer()
+    sink = PjsipAudioSink(buffer)
+    session = CallSession(
+        call_id="1",
+        caller_id="+49123",
+        history=[],
+        created_at=datetime.now(timezone.utc),
+    )
+    session.transition(SessionState.LISTENING)
+    manager._sinks["1"] = sink
+    manager._generation["1"] = 0
+
+    async def stream(_session, _pcm):
+        _session.transition(SessionState.PROCESSING)
+        for value in range(200):
+            yield np.full(320, value, dtype="<i2").tobytes()
+
+    pipeline.process_turn_stream = stream
+    playback = asyncio.create_task(
+        manager._play_stream("1", session, generation=0, pcm=np.zeros(1, dtype=np.int16))
+    )
+    try:
+        for _ in range(1_000):
+            queue = manager._out_queues.get("1")
+            if queue is not None and queue.full():
+                break
+            await asyncio.sleep(0)
+        queue = manager._out_queues["1"]
+
+        assert (
+            buffer.buffered_bytes + queue.queued_bytes + PjsipAudioSink.PCM_BLOCK_BYTES
+            <= PjsipAudioSink.MAX_AHEAD_BYTES
+        )
+    finally:
+        playback.cancel()
+        await asyncio.gather(playback, return_exceptions=True)
+
+
+async def test_streaming_playback_error_clears_prefix_before_following_turn(settings):
+    manager, pipeline = _manager(settings)
+    buffer = ObservedPlaybackBuffer()
+    sink = PjsipAudioSink(buffer)
+    session = CallSession(
+        call_id="1",
+        caller_id="+49123",
+        history=[],
+        created_at=datetime.now(timezone.utc),
+    )
+    session.transition(SessionState.LISTENING)
+    manager._sinks["1"] = sink
+    manager._generation["1"] = 0
+    first = True
+
+    async def stream(_session, _pcm):
+        nonlocal first
+        _session.transition(SessionState.PROCESSING)
+        if first:
+            first = False
+            for _ in range(15):
+                yield b"\x11\x00" * 320
+            yield b"\xff"
+            return
+        yield b"\x22\x00" * 320
+
+    pipeline.process_turn_stream = stream
+
+    await manager._play_stream("1", session, generation=0, pcm=np.zeros(1, dtype=np.int16))
+
+    assert buffer.maximum_buffered_bytes >= sink.PREBUFFER_BYTES
+    assert buffer.buffered_bytes == 0
+    assert session.state is SessionState.LISTENING
+
+    following = asyncio.create_task(
+        manager._play_stream("1", session, generation=0, pcm=np.zeros(1, dtype=np.int16))
+    )
+    for _ in range(100):
+        if buffer.buffered_bytes:
+            break
+        await asyncio.sleep(0)
+    assert buffer.read(sink.PCM_BLOCK_BYTES) == b"\x22\x00" * 320
+    await asyncio.wait_for(following, timeout=0.1)
+
+
+async def test_real_pjsip_barge_in_finalizes_old_producer_and_starts_clean(settings):
+    pipeline = MagicMock()
+    pipeline.synthesize_pcm16 = AsyncMock(return_value=b"\x00\x00" * 320)
+    lease = MagicMock()
+    lease.renew = AsyncMock()
+    lease.release = AsyncMock()
+    priority = MagicMock()
+    priority.acquire = AsyncMock(return_value=lease)
+    manager = ConversationManager(settings, pipeline, priority_client=priority)
+    buffer = PcmPlaybackBuffer()
+    sink = PjsipAudioSink(buffer)
+
+    assert await manager.start_call("1", "+49123", sink) is True
+    for _ in range(100):
+        if buffer.buffered_bytes:
+            break
+        await asyncio.sleep(0)
+    buffer.read(buffer.buffered_bytes)
+    await asyncio.wait_for(manager._playback_tasks["1"], timeout=0.1)
+
+    first_finalized = asyncio.Event()
+    first_finalizing = asyncio.Event()
+    release_first_finalizer = asyncio.Event()
+    second_started = asyncio.Event()
+    generation_count = 0
+
+    async def stream(session, _pcm):
+        nonlocal generation_count
+        generation_count += 1
+        current = generation_count
+        session.transition(SessionState.PROCESSING)
+        session.history.append({"role": "user", "content": f"user-{current}"})
+        if current == 1:
+            try:
+                for _ in range(15):
+                    yield b"\x11\x00" * 320
+                await asyncio.Event().wait()
+            finally:
+                first_finalizing.set()
+                await release_first_finalizer.wait()
+                first_finalized.set()
+            session.history.append({"role": "assistant", "content": "late-old"})
+            return
+        second_started.set()
+        for _ in range(15):
+            yield b"\x22\x00" * 320
+        session.history.append({"role": "assistant", "content": "new"})
+
+    pipeline.process_turn_stream = stream
+    vad = MagicMock()
+    vad.add_frame.return_value = np.ones(320, dtype=np.int16)
+    manager._vad_buffers["1"] = vad
+
+    await manager._on_pcm("1", np.zeros(320, dtype=np.int16).tobytes())
+    for _ in range(100):
+        if buffer.buffered_bytes >= sink.PREBUFFER_BYTES:
+            break
+        await asyncio.sleep(0)
+    assert buffer.buffered_bytes >= sink.PREBUFFER_BYTES
+
+    barge_in = asyncio.create_task(manager._on_pcm("1", np.zeros(320, dtype=np.int16).tobytes()))
+    await asyncio.wait_for(first_finalizing.wait(), timeout=0.1)
+    await asyncio.sleep(0)
+    assert second_started.is_set() is False
+    release_first_finalizer.set()
+    await asyncio.wait_for(barge_in, timeout=0.1)
+    assert first_finalized.is_set()
+    for _ in range(100):
+        if buffer.buffered_bytes >= sink.PREBUFFER_BYTES:
+            break
+        await asyncio.sleep(0)
+
+    assert buffer.read(sink.PREBUFFER_BYTES) == b"\x22\x00" * 4_800
+    current = manager._playback_tasks["1"]
+    while not current.done():
+        if buffer.buffered_bytes:
+            buffer.read(buffer.buffered_bytes)
+        await asyncio.sleep(0)
+    await current
+
+    assert manager._sessions["1"].history == [
+        {"role": "user", "content": "user-1"},
+        {"role": "user", "content": "user-2"},
+        {"role": "assistant", "content": "new"},
+    ]
     await manager.stop_call("1")
 
 

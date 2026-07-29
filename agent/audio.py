@@ -4,6 +4,13 @@ import numpy as np
 import webrtcvad
 from scipy.signal import resample_poly
 
+PCM16_SAMPLE_RATE = 16_000
+PCM16_BYTES_PER_SAMPLE = 2
+PCM16_PLAYBACK_BLOCK_MS = 20
+PCM16_PLAYBACK_BLOCK_BYTES = (
+    PCM16_SAMPLE_RATE * PCM16_BYTES_PER_SAMPLE * PCM16_PLAYBACK_BLOCK_MS // 1000
+)
+
 
 def alaw_decode(data: bytes) -> np.ndarray:
     return np.frombuffer(audioop.alaw2lin(data, 2), dtype=np.int16)

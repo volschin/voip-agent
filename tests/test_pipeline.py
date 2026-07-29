@@ -23,10 +23,14 @@ def _wav(n_samples: int = 24000, rate: int = 24000) -> bytes:
     return buf.getvalue()
 
 
-def _wav_samples(samples: np.ndarray, rate: int = 24_000) -> bytes:
+def _wav_samples(
+    samples: np.ndarray,
+    rate: int = 24_000,
+    channels: int = 1,
+) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
+        wf.setnchannels(channels)
         wf.setsampwidth(2)
         wf.setframerate(rate)
         wf.writeframes(samples.astype("<i2", copy=False).tobytes())
@@ -62,6 +66,18 @@ def test_decode_wav_strips_header():
     pcm = _decode_wav(_wav(24000))
     assert pcm.dtype == np.int16
     assert len(pcm) == 24000
+
+
+def test_decode_wav_rejects_non_24khz_audio():
+    with pytest.raises(ValueError, match="24 kHz"):
+        _decode_wav(_wav_samples(np.zeros(160, dtype=np.int16), rate=16_000))
+
+
+def test_decode_wav_rejects_non_mono_audio():
+    stereo = np.zeros((160, 2), dtype=np.int16)
+
+    with pytest.raises(ValueError, match="mono"):
+        _decode_wav(_wav_samples(stereo, channels=2))
 
 
 async def test_synthesize_pcm16_falls_back_on_non_wav():
@@ -136,7 +152,7 @@ def _pcm_zero() -> np.ndarray:
     return np.zeros(320, dtype=np.int16)
 
 
-async def test_tts_pcm16_chunks_use_stable_whole_wav_synthesis():
+async def test_tts_pcm16_chunks_rechunk_stable_wav_in_exact_source_order():
     source = np.arange(-3000, 3000, dtype=np.int16)
     tts = AsyncMock(return_value=_wav_samples(source))
     tts_stream = AsyncMock()
@@ -149,7 +165,11 @@ async def test_tts_pcm16_chunks_use_stable_whole_wav_synthesis():
 
     chunks = [chunk async for chunk in pipe._tts_pcm16_chunks("Hallo")]
 
-    assert chunks == [resample_pcm16(source, 24_000, 16_000)]
+    expected = resample_pcm16(source, 24_000, 16_000)
+    assert chunks == [expected[offset : offset + 640] for offset in range(0, len(expected), 640)]
+    assert len(chunks) > 2
+    assert chunks[0] != chunks[1]
+    assert all(len(chunk) <= 640 and len(chunk) % 2 == 0 for chunk in chunks)
     tts.assert_awaited_once_with("Hallo")
     tts_stream.assert_not_called()
 
@@ -342,6 +362,38 @@ async def test_process_turn_stream_recovers_on_midstream_error():
     chunks = [c async for c in pipe.process_turn_stream(s, _pcm_zero())]
     assert chunks
     assert tts_calls[-1] == FALLBACK_RECOVERY
+
+
+@pytest.mark.parametrize("tokens", [[], [" ", "\t", "\n"]], ids=["zero-token", "whitespace"])
+async def test_process_turn_stream_recovers_from_empty_llm_output_without_blank_history(tokens):
+    async def stt(_pcm):
+        return "hallo"
+
+    async def llm_stream(_msgs, _caller, on_tool_round=None):
+        for token in tokens:
+            yield token
+
+    tts_calls = []
+
+    async def tts(text):
+        tts_calls.append(text)
+        return _wav(2400)
+
+    pipe = VoicePipeline(
+        stt=stt,
+        llm=None,
+        tts=tts,
+        llm_stream=llm_stream,
+        tts_stream=AsyncMock(),
+    )
+    session = _strm_session()
+    session.transition(SessionState.LISTENING)
+
+    chunks = [chunk async for chunk in pipe.process_turn_stream(session, _pcm_zero())]
+
+    assert chunks
+    assert tts_calls == [FALLBACK_RECOVERY]
+    assert session.history == [{"role": "user", "content": "hallo"}]
 
 
 @pytest.mark.parametrize("failed_audio", [b"", b"not a wav"])

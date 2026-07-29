@@ -25,6 +25,11 @@ class RecordingPlaybackBuffer(PcmPlaybackBuffer):
         return super().write(pcm)
 
 
+async def _put_stream_pcm(queue: asyncio.Queue, pcm: bytes) -> None:
+    for offset in range(0, len(pcm), PjsipAudioSink.PCM_BLOCK_BYTES):
+        await queue.put(pcm[offset : offset + PjsipAudioSink.PCM_BLOCK_BYTES])
+
+
 def test_caller_id_is_extracted_without_display_name():
     uri = '"Caller" <sip:+4912345@fritz.box>;tag=abc'
 
@@ -69,11 +74,11 @@ async def test_stream_playback_waits_for_300ms_prebuffer():
     queue = asyncio.Queue()
     playback = asyncio.create_task(sink.play_pcm16_chunks(queue))
 
-    await queue.put(b"\x01\x00" * 4_799)
+    await _put_stream_pcm(queue, b"\x01\x00" * 4_480)
     await asyncio.sleep(0)
     assert buffer.buffered_bytes == 0
 
-    await queue.put(b"\x02\x00")
+    await queue.put(b"\x02\x00" * 320)
     await asyncio.sleep(0)
     assert buffer.buffered_bytes == 9_600
 
@@ -86,7 +91,7 @@ async def test_stream_playback_releases_short_response_at_end_of_stream():
     buffer = PcmPlaybackBuffer()
     sink = PjsipAudioSink(buffer)
     queue = asyncio.Queue()
-    await queue.put(b"\x01\x00" * 1_000)
+    await _put_stream_pcm(queue, b"\x01\x00" * 1_000)
     await queue.put(None)
 
     playback = asyncio.create_task(sink.play_pcm16_chunks(queue))
@@ -97,11 +102,11 @@ async def test_stream_playback_releases_short_response_at_end_of_stream():
     await asyncio.wait_for(playback, timeout=0.1)
 
 
-async def test_stream_prebuffer_splits_oversized_threshold_chunk():
+async def test_stream_prebuffer_combines_transport_blocks_without_reordering():
     buffer = RecordingPlaybackBuffer()
     sink = PjsipAudioSink(buffer)
     queue = asyncio.Queue()
-    await queue.put(b"\x01\x00" * 6_000)
+    await _put_stream_pcm(queue, b"\x01\x00" * 6_000)
     await queue.put(None)
     playback = asyncio.create_task(sink.play_pcm16_chunks(queue))
 
@@ -137,12 +142,21 @@ async def test_audio_sink_rejects_odd_pcm_byte_count():
         await sink.play_pcm16(b"\x00")
 
 
+async def test_stream_sink_rejects_pcm_block_larger_than_transport_quantum():
+    sink = PjsipAudioSink(PcmPlaybackBuffer())
+    queue = asyncio.Queue()
+    await queue.put(b"\x00\x00" * 321)
+
+    with pytest.raises(ValueError, match="playback block"):
+        await sink.play_pcm16_chunks(queue)
+
+
 async def test_cancelled_stream_discards_prebuffered_pcm():
     buffer = PcmPlaybackBuffer()
     sink = PjsipAudioSink(buffer)
     queue = asyncio.Queue()
     playback = asyncio.create_task(sink.play_pcm16_chunks(queue))
-    await queue.put(b"\x01\x00" * 1_000)
+    await _put_stream_pcm(queue, b"\x01\x00" * 1_000)
     await asyncio.sleep(0)
 
     playback.cancel()
