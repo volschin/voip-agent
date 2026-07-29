@@ -212,3 +212,30 @@ async def test_asgi_disconnect_closes_model_iterator() -> None:
     await asyncio.wait_for(app(scope, receive, send), timeout=2)
 
     assert closed.wait(timeout=1)
+
+
+async def test_cancelling_inflight_next_waits_before_closing_iterator() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+
+    def chunks():
+        try:
+            started.set()
+            release.wait(timeout=2)
+            yield np.array([1, 2], dtype=np.int16), 24_000, {}
+        finally:
+            closed.set()
+
+    encoded = encode_pcm_stream(chunks())
+    request = asyncio.create_task(anext(encoded))
+    assert await asyncio.to_thread(started.wait, 1)
+
+    request.cancel()
+    await asyncio.sleep(0.05)
+    assert request.done() is False
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+
+    assert closed.wait(timeout=1)

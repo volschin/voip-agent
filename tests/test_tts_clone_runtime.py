@@ -1,3 +1,4 @@
+import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -6,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from dgx.tts.api import encode_pcm_stream
 from dgx.tts.clone_runtime import CloneRuntime
 from dgx.tts.profiles import ProfileError, VoiceProfile
 
@@ -180,3 +182,33 @@ def test_clone_runtime_holds_lock_for_complete_stream_lifetime(tmp_path: Path) -
         stream.close()
         release_stream.set()
         synthesize_future.result(timeout=2)
+
+
+async def test_cancelled_queued_stream_never_starts_model_generation(
+    tmp_path: Path,
+) -> None:
+    profile = _profile(tmp_path)
+
+    class CountingStreamModel(ExactCloneModel):
+        def __init__(self, selected_profile: VoiceProfile) -> None:
+            super().__init__(selected_profile)
+            self.stream_calls = 0
+
+        def generate_voice_clone_streaming(self, **kwargs):
+            self.stream_calls += 1
+            yield np.array([1, 2], dtype=np.int16), self.sample_rate, {}
+
+    model = CountingStreamModel(profile)
+    runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+    active = runtime.stream("active", profile.profile_id, "de")
+    next(active)
+    queued = encode_pcm_stream(runtime.stream("queued", profile.profile_id, "de"))
+    queued_request = asyncio.create_task(anext(queued))
+    await asyncio.sleep(0.05)
+
+    queued_request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(queued_request, timeout=1)
+    active.close()
+
+    assert model.stream_calls == 1

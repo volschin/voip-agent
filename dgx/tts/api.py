@@ -6,6 +6,7 @@ import asyncio
 import io
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 import numpy as np
@@ -103,13 +104,14 @@ async def encode_pcm_stream(
     chunks: Iterator[tuple[Any, int, dict]],
 ) -> AsyncIterator[bytes]:
     """Bridge blocking model chunks to async PCM and always close upstream."""
-    iterator = iter(chunks)
+    iterator = _SerializedIterator(iter(chunks))
     try:
         while True:
             next_task = asyncio.create_task(asyncio.to_thread(_next_chunk, iterator))
             try:
-                item = await next_task
+                item = await asyncio.shield(next_task)
             except asyncio.CancelledError:
+                _cancel_iterator(iterator)
                 try:
                     await asyncio.shield(next_task)
                 except BaseException:
@@ -143,6 +145,38 @@ def _close_iterator(iterator: Iterator[tuple[Any, int, dict]]) -> None:
     close = getattr(iterator, "close", None)
     if close is not None:
         close()
+
+
+def _cancel_iterator(iterator: Iterator[tuple[Any, int, dict]]) -> None:
+    cancel = getattr(iterator, "cancel", None)
+    if cancel is not None:
+        cancel()
+
+
+class _SerializedIterator:
+    """Never close a blocking iterator while its ``next`` call is executing."""
+
+    def __init__(self, iterator: Iterator[tuple[Any, int, dict]]) -> None:
+        self._iterator = iterator
+        self._operation_lock = Lock()
+
+    def __iter__(self) -> "_SerializedIterator":
+        return self
+
+    def __next__(self) -> tuple[Any, int, dict]:
+        with self._operation_lock:
+            return next(self._iterator)
+
+    def cancel(self) -> None:
+        cancel = getattr(self._iterator, "cancel", None)
+        if cancel is not None:
+            cancel()
+
+    def close(self) -> None:
+        with self._operation_lock:
+            close = getattr(self._iterator, "close", None)
+            if close is not None:
+                close()
 
 
 def _audio_response(audio: np.ndarray, sample_rate: int, response_format: str) -> Response:

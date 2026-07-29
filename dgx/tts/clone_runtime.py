@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from threading import Lock
+from collections.abc import Callable, Iterator, Mapping
+from threading import Event, Lock
 from typing import Any
 
 import numpy as np
@@ -64,22 +64,71 @@ class CloneRuntime:
     ) -> Iterator[tuple[Any, int, dict]]:
         profile = resolve_profile(voice, self._profiles, self._default_profile_id)
 
-        def locked_stream() -> Iterator[tuple[Any, int, dict]]:
-            with self._model_lock:
-                upstream = iter(
-                    self._model.generate_voice_clone_streaming(
-                        text=text,
-                        language=normalize_language(language) or profile.language,
-                        ref_audio=profile.audio_path,
-                        ref_text=profile.reference_text,
-                        chunk_size=8,
-                    )
-                )
-                try:
-                    yield from upstream
-                finally:
-                    close = getattr(upstream, "close", None)
-                    if close is not None:
-                        close()
+        return _LockedModelStream(
+            self._model_lock,
+            lambda: self._model.generate_voice_clone_streaming(
+                text=text,
+                language=normalize_language(language) or profile.language,
+                ref_audio=profile.audio_path,
+                ref_text=profile.reference_text,
+                chunk_size=8,
+            ),
+        )
 
-        return locked_stream()
+
+class _LockedModelStream:
+    """Hold the model lock across a stream and abort queued acquisition."""
+
+    def __init__(
+        self,
+        model_lock: Any,
+        factory: Callable[[], Iterator[tuple[Any, int, dict]]],
+    ) -> None:
+        self._model_lock = model_lock
+        self._factory = factory
+        self._cancelled = Event()
+        self._upstream: Iterator[tuple[Any, int, dict]] | None = None
+        self._owns_lock = False
+        self._closed = False
+
+    def __iter__(self) -> "_LockedModelStream":
+        return self
+
+    def __next__(self) -> tuple[Any, int, dict]:
+        if self._closed:
+            raise StopIteration
+        if self._upstream is None:
+            while not self._cancelled.is_set():
+                if self._model_lock.acquire(timeout=0.05):
+                    self._owns_lock = True
+                    break
+            if not self._owns_lock or self._cancelled.is_set():
+                self.close()
+                raise StopIteration
+            self._upstream = iter(self._factory())
+        if self._cancelled.is_set():
+            self.close()
+            raise StopIteration
+        try:
+            return next(self._upstream)
+        except BaseException:
+            self.close()
+            raise
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        upstream = self._upstream
+        self._upstream = None
+        try:
+            close = getattr(upstream, "close", None)
+            if close is not None:
+                close()
+        finally:
+            if self._owns_lock:
+                self._owns_lock = False
+                self._model_lock.release()

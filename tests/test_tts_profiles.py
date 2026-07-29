@@ -52,7 +52,7 @@ def _bundle(tmp_path: Path) -> tuple[Path, Path, dict]:
     _write_wav(audio)
     audio_hash = hashlib.sha256(audio.read_bytes()).hexdigest()
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "usage_scope": "private-user-assistant-only",
         "profiles": [_profile(audio_hash)],
     }
@@ -84,7 +84,7 @@ def test_load_profiles_accepts_private_read_only_pcm_bundle(tmp_path: Path) -> N
     ("field", "value", "message"),
     [
         ("usage_scope", "public", "usage scope"),
-        ("schema_version", 2, "schema version"),
+        ("schema_version", 1, "schema version"),
     ],
 )
 def test_load_profiles_rejects_wrong_bundle_contract(
@@ -101,7 +101,7 @@ def test_load_profiles_rejects_wrong_bundle_contract(
 def test_load_profiles_rejects_duplicate_json_keys(tmp_path: Path) -> None:
     profile_dir, mountinfo, payload = _bundle(tmp_path)
     encoded = json.dumps(payload)
-    encoded = encoded.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1')
+    encoded = encoded.replace('"schema_version": 2', '"schema_version": 2, "schema_version": 2')
     (profile_dir / "profiles.json").write_text(encoded, encoding="utf-8")
 
     with pytest.raises(ProfileError, match="duplicate JSON key"):

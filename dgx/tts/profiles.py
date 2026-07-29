@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 PROFILE_ID = "shared-female-de-v1"
+SCHEMA_VERSION = 2
 USAGE_SCOPE = "private-user-assistant-only"
 SYNTHETIC_SOURCE_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 SYNTHETIC_SOURCE_REVISION = "5ecdb67327fd37bb2e042aab12ff7391903235d3"
@@ -105,7 +106,7 @@ def load_profiles(
 
     if not isinstance(payload, dict) or set(payload) != _TOP_LEVEL_FIELDS:
         raise ProfileError("profile manifest fields are invalid")
-    if payload["schema_version"] != 1:
+    if payload["schema_version"] != SCHEMA_VERSION:
         raise ProfileError("profile schema version is unsupported")
     if payload["usage_scope"] != USAGE_SCOPE:
         raise ProfileError("profile usage scope is invalid")

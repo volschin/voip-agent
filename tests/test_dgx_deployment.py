@@ -134,6 +134,7 @@ def test_tts_image_copies_clone_code_but_no_private_profile_assets() -> None:
 
 def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     dockerfile = (ROOT / "dgx/tts/Dockerfile").read_text(encoding="utf-8")
+    requirements = (ROOT / "dgx/tts/requirements-arm64.lock").read_text(encoding="utf-8")
 
     assert (
         "FROM ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3@"
@@ -148,4 +149,8 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
         "flash-attn==2.8.3",
         "av==17.0.1",
     ):
-        assert dependency in dockerfile
+        assert dependency in requirements
+    locked = [line for line in requirements.splitlines() if line and not line.startswith("#")]
+    assert all("==" in line and " --hash=sha256:" in line for line in locked)
+    assert "--require-hashes" in dockerfile
+    assert "flash-attn install failed" not in dockerfile
