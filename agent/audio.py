@@ -21,6 +21,47 @@ def resample_24k_to_8k(samples: np.ndarray) -> np.ndarray:
     return resample_poly(samples, up=1, down=3).astype(np.int16)
 
 
+class StreamingPcm16Resampler:
+    """Resample one PCM utterance while retaining state across input chunks."""
+
+    def __init__(self, input_rate: int, output_rate: int) -> None:
+        if input_rate <= 0 or output_rate <= 0:
+            raise ValueError("sample rates must be positive")
+        self._input_rate = input_rate
+        self._output_rate = output_rate
+        self._state = None
+        self._closed = False
+
+    def process(self, samples: np.ndarray) -> bytes:
+        if self._closed:
+            raise RuntimeError("resampler is closed")
+        if samples.ndim != 1 or samples.dtype != np.int16:
+            raise ValueError("PCM must be one-dimensional int16")
+        output, self._state = audioop.ratecv(
+            samples.astype("<i2", copy=False).tobytes(),
+            2,
+            1,
+            self._input_rate,
+            self._output_rate,
+            self._state,
+        )
+        return output
+
+    def close(self) -> None:
+        self._closed = True
+        self._state = None
+
+
+def resample_pcm16(samples: np.ndarray, input_rate: int, output_rate: int) -> bytes:
+    """Resample a complete mono int16 buffer to little-endian PCM bytes."""
+
+    stream = StreamingPcm16Resampler(input_rate, output_rate)
+    try:
+        return stream.process(samples)
+    finally:
+        stream.close()
+
+
 class VadBuffer:
     def __init__(
         self,
