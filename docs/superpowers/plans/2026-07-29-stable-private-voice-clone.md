@@ -524,8 +524,16 @@ pytest, Ruff, Docker Compose, Portainer, NVIDIA GB10 CUDA.
 
   Before starting an image whose loader requires schema 2, copy the private
   schema-1 manifest to the evaluation directory as a mode-0600 rollback file.
-  Create a sibling temporary manifest that changes only `schema_version` to 2,
-  preserves every provenance field, and retains the original owner and mode.
+  Create a sibling temporary manifest that sets `schema_version` to 2 and
+  preserves every existing provenance field. If the older bundle predates the
+  complete profile contract, add all five required fields explicitly:
+  `source_model`, `source_sha256`, `evaluation_score`,
+  `selected_candidate_id`, and `design_instruction`. Copy their values from the
+  private candidate metadata and final evaluation report; never infer or invent
+  them. `source_model` must be null for a licensed-human source or the exact
+  VoiceDesign model ID for a synthetic source, while `design_instruction` must
+  likewise be null or the exact recorded instruction. Retain the original owner
+  and mode.
   Mount a private test bundle read-only into the exact new image and require
   `load_profiles()` to accept precisely `shared-female-de-v1`. Only then rename
   the temporary file atomically over the live manifest and immediately update
