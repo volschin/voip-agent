@@ -16,6 +16,36 @@ def _compose() -> dict:
     return yaml.safe_load((ROOT / "dgx/docker-compose.yml").read_text(encoding="utf-8"))
 
 
+def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:
+    compose = yaml.safe_load((ROOT / "compose.yml").read_text(encoding="utf-8"))
+    hosts = set(compose["services"]["voip-agent"]["extra_hosts"])
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert hosts == {
+        "dgx-spark:${DGX_HOST_IP:-192.168.68.41}",
+        "mate.olcon.de:${DGX_HOST_IP:-192.168.68.41}",
+    }
+    assert "DGX_HOST_IP=192.168.68.41" in env_example
+
+
+def test_ci_gates_python_314_and_both_runtime_image_imports() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+
+    assert [str(version) for version in jobs["test"]["strategy"]["matrix"]["python-version"]] == [
+        "3.12",
+        "3.13",
+        "3.14",
+    ]
+    commands = "\n".join(
+        step.get("run", "") for step in jobs["container-smoke"]["steps"] if "run" in step
+    )
+    assert "docker build --file Dockerfile " in commands
+    assert "docker build --file Dockerfile.pjsip-poc " in commands
+    assert "import agent.main, pjsua2, webrtcvad" in commands
+    assert "import agent.pjsip_poc, pjsua2, webrtcvad" in commands
+
+
 def test_voice_services_keep_private_network_and_add_external_proxy_network() -> None:
     compose = _compose()
 

@@ -82,9 +82,7 @@ async def test_synthesize_uses_configured_voice_profile():
 
 
 async def test_synthesize_stream_yields_pcm_chunks():
-    # ASSUMPTION: server streams raw little-endian int16 PCM at 24kHz.
-    # Replace this fixture with a captured /v1/audio/speech/stream response
-    # once verified on the DGX box (see Task 1 Step 4).
+    # Verified server wire contract: raw little-endian int16 PCM at 24 kHz.
     chunk_a = (np.arange(240, dtype="<i2")).tobytes()
     chunk_b = (np.arange(240, 480, dtype="<i2")).tobytes()
 

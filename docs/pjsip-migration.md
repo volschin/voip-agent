@@ -36,8 +36,13 @@ docker compose up --detach --build
 docker compose logs --follow voip-agent
 ```
 
-The service uses host networking for SIP/RTP, runs as UID 10001 with all capabilities dropped,
-and mounts only a model-cache volume into its read-only filesystem.
+The service uses host networking for SIP/RTP, runs as UID 10001 with all
+capabilities dropped, and keeps its root filesystem read-only. It mounts the
+agent model-cache volume plus three read-only files:
+`shared_ai_password`, `mate_ca.crt`, and `voice_priority_token`. Password and
+token files must be regular, non-symlink files owned for UID/GID 10001 with
+mode `0400` (no group/other permissions); the CA must be a regular non-symlink
+file and must not be group/world writable.
 
 ## Acceptance Checks
 

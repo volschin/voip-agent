@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,7 +46,26 @@ jobs:
         run: pip install ruff
 
       - name: Ruff check
-        run: ruff check agent/ tests/
+        run: ruff check agent/ tests/ dgx/tts/
 
       - name: Ruff format check
-        run: ruff format --check agent/ tests/
+        run: ruff format --check agent/ tests/ dgx/tts/
+
+  container-smoke:
+    name: Build and import production images
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and import production runtime
+        run: |
+          docker build --file Dockerfile --tag voip-agent-ci:production .
+          docker run --rm --entrypoint python voip-agent-ci:production \
+            -c "import agent.main, pjsua2, webrtcvad"
+
+      - name: Build and import signalling PoC runtime
+        run: |
+          docker build --file Dockerfile.pjsip-poc --tag voip-agent-ci:pjsip-poc .
+          docker run --rm --entrypoint python voip-agent-ci:pjsip-poc \
+            -c "import agent.pjsip_poc, pjsua2, webrtcvad"

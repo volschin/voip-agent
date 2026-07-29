@@ -109,6 +109,11 @@ Expected log output:
 INFO agent.pjsip SIP registration active=True status=200 OK
 ```
 
+The three credential/trust mounts must be regular files, never symlinks.
+Password and priority-token files may have no group/other permissions. The CA
+may be group/world readable but not group/world writable. `DGX_HOST_IP`
+controls both the `dgx-spark` and `mate.olcon.de` host-gateway entries.
+
 ### 5. Test call
 
 Call the public number assigned to both the handsets and the IP telephone.

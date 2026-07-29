@@ -52,9 +52,9 @@ services:
       start_period: 180s
 
   qwen3-tts:
-    # Built locally from ./tts — faster-qwen3-tts runtime with the custom
-    # /v1/audio/speech/stream endpoint the streaming pipeline (#3) depends on.
-    # The aeon-7 upstream image cannot carry this endpoint.
+    # Built locally from ./tts for the private Base-model clone profile.
+    # Production VoIP uses stable /v1/audio/speech whole-WAV synthesis; the
+    # custom /v1/audio/speech/stream route remains diagnostic-only.
     build:
       context: .
       dockerfile: tts/Dockerfile
