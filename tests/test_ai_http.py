@@ -61,6 +61,33 @@ def test_build_ai_client_loads_secret_files_and_ca_context(
     assert "machine-secret" not in repr(client)
 
 
+def test_build_ai_client_accepts_a_reconfigured_origin(
+    tmp_path: Path,
+    ssl_context: ssl.SSLContext,
+) -> None:
+    settings = _settings(
+        tmp_path,
+        ai_origin="https://voice.example.test",
+        stt_base_url="https://voice.example.test",
+        tts_base_url="https://voice.example.test",
+        llm_base_url="https://voice.example.test",
+        voice_priority_base_url="https://voice.example.test",
+    )
+
+    assert build_ai_client(settings)._transport._pool._ssl_context is ssl_context
+
+
+def test_build_ai_client_rejects_base_url_outside_the_origin(
+    tmp_path: Path,
+    ssl_context: ssl.SSLContext,
+) -> None:
+    settings = _settings(tmp_path)
+    object.__setattr__(settings, "stt_base_url", "http://dgx-spark:8001")
+
+    with pytest.raises(ValueError, match="mate.olcon.de"):
+        build_ai_client(settings)
+
+
 @pytest.mark.parametrize(
     ("override", "value", "error"),
     [

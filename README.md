@@ -64,7 +64,8 @@ is on by default; set it to `false` for the legacy fixed 800 ms silence path.
 
 The `voice`, `companion-llm`, and `proxy` stacks remain separate owners.
 Traefik joins their neutral internal networks and publishes only exact
-authenticated routes on `https://mate.olcon.de`. Direct ASR/TTS ports 8001
+authenticated routes on the configured `AI_ORIGIN` (default
+`https://mate.olcon.de`). Direct ASR/TTS ports 8001
 and 8002 stay closed. See [`dgx/README.md`](dgx/README.md) for the voice-stack
 contract. The optional embedding service remains outside this Traefik
 cutover.
@@ -112,7 +113,9 @@ INFO agent.pjsip SIP registration active=True status=200 OK
 The three credential/trust mounts must be regular files, never symlinks.
 Password and priority-token files may have no group/other permissions. The CA
 may be group/world readable but not group/world writable. `DGX_HOST_IP`
-controls both the `dgx-spark` and `mate.olcon.de` host-gateway entries.
+controls both the `dgx-spark` and `AI_ORIGIN_HOST` host-gateway entries; set
+`AI_ORIGIN`/`AI_ORIGIN_HOST` together when moving the AI boundary to another
+hostname.
 
 ### 5. Test call
 
@@ -133,16 +136,18 @@ Expected:
 | `PJSIP_LOCAL_PORT` | `5062` | Local SIP port on the Docker host |
 | `ANSWER_DELAY_SECONDS` | `20` | Delay before accepting an unanswered call |
 | `MAX_CALL_SECONDS` | `900` | Maximum accepted-call duration |
-| `STT_BASE_URL` | `https://mate.olcon.de` | Exact authenticated Qwen3-ASR route |
-| `TTS_BASE_URL` | `https://mate.olcon.de` | Exact authenticated Qwen3-TTS routes |
+| `AI_ORIGIN` | `https://mate.olcon.de` | Authenticated Traefik origin for STT/TTS/LLM/voice priority (https, no path) |
+| `AI_ORIGIN_HOST` | `mate.olcon.de` | Hostname part of `AI_ORIGIN`, mapped to `DGX_HOST_IP` by `compose.yml` |
+| `STT_BASE_URL` | `AI_ORIGIN` | Exact authenticated Qwen3-ASR route |
+| `TTS_BASE_URL` | `AI_ORIGIN` | Exact authenticated Qwen3-TTS routes |
 | `TTS_VOICE_PROFILE` | `shared-female-de-v1` | Server-owned private voice profile ID |
-| `LLM_BASE_URL` | `https://mate.olcon.de` | Exact authenticated Gemma chat route |
+| `LLM_BASE_URL` | `AI_ORIGIN` | Exact authenticated Gemma chat route |
 | `LLM_MODEL` | `companion-gemma` | Model name passed to `/v1/chat/completions` |
 | `AI_PROXY_USERNAME` | `voip-agent` | Dedicated Traefik BasicAuth account |
 | `AI_PROXY_PASSWORD_FILE` | `/run/secrets/shared_ai_password` | Protected client-password file |
 | `AI_PROXY_CA_FILE` | `/run/secrets/mate_ca.crt` | Private-CA trust file |
 | `VOICE_PRIORITY_TOKEN_FILE` | `/run/secrets/voice_priority_token` | Protected lease-token file |
-| `VOICE_PRIORITY_BASE_URL` | `https://mate.olcon.de` | Companion voice-priority API |
+| `VOICE_PRIORITY_BASE_URL` | `AI_ORIGIN` | Companion voice-priority API |
 | `EMBEDDING_BASE_URL` | `http://dgx-spark:8003` | multilingual-e5-large |
 | `TURN_DETECTION_ENABLED` | `true` | Smart Turn v3 in-process end-of-turn gating (on by default; set `false` for the legacy 800 ms path) |
 | `TURN_COMPLETE_THRESHOLD` | `0.70` | `prob` ≥ this ⇒ turn complete (0.70 biases toward fewer cut-ins on telephony) |

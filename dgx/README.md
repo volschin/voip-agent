@@ -98,6 +98,7 @@ curl -s http://localhost:8003/health
 ```
 
 External ASR/TTS requests use the exact authenticated Traefik paths on
-`https://mate.olcon.de`; direct host access to 8001 and 8002 is intentionally
+the agent's `AI_ORIGIN` (default `https://mate.olcon.de`); direct host access
+to 8001 and 8002 is intentionally
 closed. The independently managed Gemma stack is reached through the same
 Traefik origin.
