@@ -78,15 +78,15 @@ class Settings(BaseSettings):
         return v
 
     # DGX Spark AI services
-    stt_base_url: str = "http://dgx-spark:8001"
-    tts_base_url: str = "http://dgx-spark:8002"
-    llm_base_url: str = "http://dgx-spark:8000"
-    llm_model: str = "nous-hermes"
+    stt_base_url: str = "https://mate.olcon.de"
+    tts_base_url: str = "https://mate.olcon.de"
+    llm_base_url: str = "https://mate.olcon.de"
+    llm_model: str = "companion-gemma"
     embedding_base_url: str = "http://dgx-spark:8003"
-    ai_proxy_username: str = ""
-    ai_proxy_password_file: str = ""
-    ai_proxy_ca_file: str = ""
-    voice_priority_token_file: str = ""
+    ai_proxy_username: str = "voip-agent"
+    ai_proxy_password_file: str = "/run/secrets/shared_ai_password"
+    ai_proxy_ca_file: str = "/run/secrets/mate_ca.crt"
+    voice_priority_token_file: str = "/run/secrets/voice_priority_token"
     voice_priority_base_url: str = "https://mate.olcon.de"
 
     @model_validator(mode="after")

@@ -71,6 +71,10 @@ def test_settings_load_defaults_and_overrides(monkeypatch):
         llm_base_url="http://llm",
         llm_model="hermes",
         embedding_base_url="http://emb",
+        ai_proxy_username="",
+        ai_proxy_password_file="",
+        ai_proxy_ca_file="",
+        voice_priority_token_file="",
         db_dsn="postgresql://x",
         azure_tenant_id="t",
         azure_client_id="c",
@@ -122,6 +126,20 @@ def test_shared_ai_credentials_require_exact_traefik_origins(tmp_path):
         )
     )
 
+    assert settings.voice_priority_base_url == "https://mate.olcon.de"
+
+
+def test_shared_ai_defaults_are_fail_closed_to_traefik() -> None:
+    settings = Settings(**_valid_kwargs())
+
+    assert settings.stt_base_url == "https://mate.olcon.de"
+    assert settings.tts_base_url == "https://mate.olcon.de"
+    assert settings.llm_base_url == "https://mate.olcon.de"
+    assert settings.llm_model == "companion-gemma"
+    assert settings.ai_proxy_username == "voip-agent"
+    assert settings.ai_proxy_password_file == "/run/secrets/shared_ai_password"
+    assert settings.ai_proxy_ca_file == "/run/secrets/mate_ca.crt"
+    assert settings.voice_priority_token_file == "/run/secrets/voice_priority_token"
     assert settings.voice_priority_base_url == "https://mate.olcon.de"
 
 
