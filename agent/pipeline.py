@@ -11,7 +11,6 @@ from agent.session import CallSession, SessionState
 
 log = logging.getLogger(__name__)
 
-_SILENCE_FRAME = b"\x00" * 640
 _TTS_SAMPLE_RATE = 24000
 _OUTPUT_SAMPLE_RATE = 16000
 _SENTENCE_PREFETCH_DEPTH = 2
@@ -61,7 +60,7 @@ class VoicePipeline:
             return resample_pcm16(pcm_24k, _TTS_SAMPLE_RATE, _OUTPUT_SAMPLE_RATE)
         except Exception:
             log.exception("TTS failed for text: %r", text[:50])
-            return _SILENCE_FRAME
+            return b""
 
     async def process_turn(self, session: CallSession, pcm_16k: np.ndarray) -> bytes:
         # Owns the PROCESSING state only. Returns synthesized audio and leaves

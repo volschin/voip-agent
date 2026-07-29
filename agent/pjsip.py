@@ -111,12 +111,20 @@ class PjsipAudioSink:
     async def _write_with_backpressure(self, pcm: bytes) -> None:
         if len(pcm) % self.BYTES_PER_SAMPLE:
             raise ValueError("PCM16 requires an even byte count")
-        while not self._closed and self._buffer.buffered_bytes > self.MAX_AHEAD_BYTES:
-            await asyncio.sleep(0.02)
-        if self._closed:
-            return
-        if not self._buffer.write(pcm):
-            raise RuntimeError("PJSIP playback buffer capacity exceeded")
+        offset = 0
+        while offset < len(pcm):
+            while not self._closed:
+                available = self.MAX_AHEAD_BYTES - self._buffer.buffered_bytes
+                available -= available % self.BYTES_PER_SAMPLE
+                if available >= self.BYTES_PER_SAMPLE:
+                    break
+                await asyncio.sleep(0.02)
+            if self._closed:
+                return
+            chunk = pcm[offset : offset + available]
+            if not self._buffer.write(chunk):
+                raise RuntimeError("PJSIP playback buffer capacity exceeded")
+            offset += len(chunk)
 
     async def _wait_drained(self) -> None:
         while not self._closed and self._buffer.buffered_bytes:
@@ -143,13 +151,16 @@ class PjsipAudioSink:
                 if len(pcm) % self.BYTES_PER_SAMPLE:
                     raise ValueError("PCM16 requires an even byte count")
                 if not playback_started:
-                    pending.extend(pcm)
+                    needed = self.PREBUFFER_BYTES - len(pending)
+                    pending.extend(pcm[:needed])
+                    pcm = pcm[needed:]
                     if len(pending) < self.PREBUFFER_BYTES:
                         continue
                     await self._write_with_backpressure(bytes(pending))
                     pending.clear()
                     playback_started = True
-                    continue
+                    if not pcm:
+                        continue
                 await self._write_with_backpressure(pcm)
             await self._wait_drained()
         except asyncio.CancelledError:

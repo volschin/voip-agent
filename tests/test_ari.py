@@ -224,6 +224,23 @@ async def test_ari_complete_pcm_is_adapted_to_alaw(ari):
     assert session.state == SessionState.LISTENING
 
 
+async def test_ari_complete_pcm_error_restores_listening_state(ari):
+    session = CallSession(
+        call_id="ch-1", caller_id="+49", history=[], created_at=datetime.now(timezone.utc)
+    )
+    session.state = SessionState.PROCESSING
+    ari._vad_buffers["ch-1"] = MagicMock()
+    rtp = MagicMock()
+    rtp.stream_audio = AsyncMock()
+    ari._rtp_servers["ch-1"] = rtp
+    ari._generation["ch-1"] = 3
+
+    await ari._play_audio("ch-1", b"\x00", session, gen=3)
+
+    rtp.stream_audio.assert_not_awaited()
+    assert session.state is SessionState.LISTENING
+
+
 # --- #12 RTP bind collision handling ------------------------------------
 
 
@@ -332,6 +349,51 @@ async def test_ari_stream_adapter_retains_resampler_state(ari):
     expected_pcm = resample_pcm16(source, 16_000, 8_000)
     expected = alaw_encode(np.frombuffer(expected_pcm, dtype="<i2"))
     assert b"".join(captured) == expected
+
+
+async def test_ari_full_output_queue_does_not_deadlock_stream_cancellation(ari):
+    session = CallSession(
+        call_id="ch-1",
+        caller_id="+49123",
+        history=[],
+        created_at=datetime.now(timezone.utc),
+    )
+    session.transition(SessionState.LISTENING)
+    ari._generation["ch-1"] = 1
+    closed = asyncio.Event()
+
+    async def fake_stream(_session, _pcm):
+        session.transition(SessionState.PROCESSING)
+        try:
+            for _ in range(100):
+                yield b"\x00\x00" * 160
+        finally:
+            closed.set()
+
+    async def block_chunks(_queue):
+        await asyncio.Event().wait()
+
+    rtp = MagicMock()
+    rtp.stream_audio_chunks = block_chunks
+    ari._rtp_servers["ch-1"] = rtp
+    ari._pipeline.process_turn_stream = fake_stream
+    task = asyncio.create_task(ari._play_stream("ch-1", session, gen=1, pcm=None))
+
+    for _ in range(100):
+        if ari._out_queues.get("ch-1") and ari._out_queues["ch-1"].full():
+            break
+        await asyncio.sleep(0)
+    assert ari._out_queues["ch-1"].full()
+
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=0.05)
+    completed_without_unblock = task in done
+    if not completed_without_unblock:
+        ari._out_queues["ch-1"].get_nowait()
+        await asyncio.wait({task}, timeout=0.1)
+
+    assert completed_without_unblock
+    assert closed.is_set()
 
 
 async def test_bargein_during_processing_cancels_and_starts_stream(ari):

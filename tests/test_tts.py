@@ -109,3 +109,17 @@ async def test_synthesize_stream_yields_pcm_chunks():
         "language": "german",
     }
     await client.aclose()
+
+
+async def test_synthesize_stream_rejects_trailing_odd_pcm_byte():
+    async def handler(_request):
+        return httpx.Response(200, stream=httpx.ByteStream(b"\x01\x00\x02"))
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    tts = TtsClient(base_url="http://tts:8002", client=client)
+
+    with pytest.raises(ValueError, match="incomplete PCM16 sample"):
+        _ = [chunk async for chunk in tts.synthesize_stream("Hallo")]
+
+    await client.aclose()

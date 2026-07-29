@@ -265,10 +265,15 @@ class AriClient:
             pass
 
     async def _teardown_call(self, channel_id: str) -> None:
+        current = asyncio.current_task()
+        cancelled_tasks = []
         for tasks in (self._playback_tasks, self._consumer_tasks):
             task = tasks.pop(channel_id, None)
-            if task and not task.done():
+            if task and task is not current and not task.done():
                 task.cancel()
+                cancelled_tasks.append(task)
+        if cancelled_tasks:
+            await asyncio.gather(*cancelled_tasks, return_exceptions=True)
         self._audio_queues.pop(channel_id, None)
         self._out_queues.pop(channel_id, None)
         self._turn_locks.pop(channel_id, None)
@@ -302,6 +307,11 @@ class AriClient:
                 self._reset_vad(channel_id)
         except asyncio.CancelledError:
             pass
+        except Exception:
+            log.exception("Complete playback failed for %s", channel_id)
+            if self._generation.get(channel_id) == gen and session.state == SessionState.SPEAKING:
+                session.transition(SessionState.LISTENING)
+                self._reset_vad(channel_id)
 
     async def _play_stream(self, channel_id, session, gen, pcm) -> None:
         """Adapt pipeline PCM chunks to A-law at the legacy RTP boundary."""
@@ -334,7 +344,7 @@ class AriClient:
                     await out.put(alaw)
             finally:
                 resampler.close()
-                await out.put(None)  # sentinel
+            await out.put(None)
 
         try:
             async with asyncio.TaskGroup() as tg:

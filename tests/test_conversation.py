@@ -28,6 +28,11 @@ class FakeSink:
         self.closed += 1
 
 
+class BlockingStreamSink(FakeSink):
+    async def play_pcm16_chunks(self, _queue):
+        await asyncio.Event().wait()
+
+
 def _manager(settings):
     pipeline = MagicMock()
     pipeline.synthesize_pcm16 = AsyncMock(return_value=b"greeting")
@@ -145,6 +150,65 @@ async def test_pcm_barge_in_cancels_playback_and_starts_turn(settings):
     assert manager._generation["1"] == 1
     assert sink.cleared >= 1
     await manager.stop_call("1")
+
+
+async def test_full_output_queue_does_not_deadlock_stream_cancellation(settings):
+    manager, pipeline = _manager(settings)
+    sink = BlockingStreamSink()
+    await manager.start_call("1", "+49123", sink)
+    await asyncio.sleep(0)
+    session = manager._sessions["1"]
+    closed = asyncio.Event()
+
+    async def stream(_session, _pcm):
+        _session.transition(SessionState.PROCESSING)
+        try:
+            for _ in range(100):
+                yield b"\x00\x00"
+        finally:
+            closed.set()
+
+    pipeline.process_turn_stream = stream
+    task = asyncio.create_task(
+        manager._play_stream("1", session, manager._generation["1"], np.zeros(1, dtype=np.int16))
+    )
+
+    for _ in range(100):
+        if manager._out_queues.get("1") and manager._out_queues["1"].full():
+            break
+        await asyncio.sleep(0)
+    assert manager._out_queues["1"].full()
+
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=0.05)
+    completed_without_unblock = task in done
+    if not completed_without_unblock:
+        manager._out_queues["1"].get_nowait()
+        await asyncio.wait({task}, timeout=0.1)
+
+    assert completed_without_unblock
+    assert closed.is_set()
+    await manager.stop_call("1")
+
+
+async def test_complete_playback_error_restores_listening_state(settings):
+    manager, _pipeline = _manager(settings)
+    sink = FakeSink()
+
+    async def fail(_pcm):
+        raise RuntimeError("sink failed")
+
+    sink.play_pcm16 = fail
+    session = MagicMock()
+    session.state = SessionState.PROCESSING
+    session.transition = MagicMock(side_effect=lambda state: setattr(session, "state", state))
+    manager._sinks["1"] = sink
+    manager._generation["1"] = 3
+
+    await manager._play_pcm16("1", b"\x00\x00", session, generation=3)
+
+    assert session.state is SessionState.LISTENING
+    assert sink.cleared == 1
 
 
 async def test_stop_all_closes_every_sink(settings):

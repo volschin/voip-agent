@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
@@ -10,6 +11,16 @@ from agent.pjsip import (
     PjsipClient,
     caller_id_from_uri,
 )
+
+
+class RecordingPlaybackBuffer(PcmPlaybackBuffer):
+    def __init__(self):
+        super().__init__()
+        self.writes = []
+
+    def write(self, pcm):
+        self.writes.append(pcm)
+        return super().write(pcm)
 
 
 def test_caller_id_is_extracted_without_display_name():
@@ -82,6 +93,39 @@ async def test_stream_playback_releases_short_response_at_end_of_stream():
     assert buffer.buffered_bytes == 2_000
     buffer.read(2_000)
     await asyncio.wait_for(playback, timeout=0.1)
+
+
+async def test_stream_prebuffer_splits_oversized_threshold_chunk():
+    buffer = RecordingPlaybackBuffer()
+    sink = PjsipAudioSink(buffer)
+    queue = asyncio.Queue()
+    await queue.put(b"\x01\x00" * 6_000)
+    await queue.put(None)
+    playback = asyncio.create_task(sink.play_pcm16_chunks(queue))
+
+    try:
+        await asyncio.sleep(0)
+        assert len(buffer.writes[0]) == sink.PREBUFFER_BYTES
+        assert b"".join(buffer.writes) == b"\x01\x00" * 6_000
+    finally:
+        playback.cancel()
+        with suppress(asyncio.CancelledError):
+            await playback
+
+
+async def test_audio_sink_never_buffers_beyond_maximum_ahead():
+    buffer = PcmPlaybackBuffer()
+    sink = PjsipAudioSink(buffer)
+    sink.MAX_AHEAD_BYTES = 1_000
+    playback = asyncio.create_task(sink.play_pcm16(b"\x01\x00" * 1_500))
+
+    try:
+        await asyncio.sleep(0)
+        assert buffer.buffered_bytes <= sink.MAX_AHEAD_BYTES
+    finally:
+        playback.cancel()
+        with suppress(asyncio.CancelledError):
+            await playback
 
 
 async def test_audio_sink_rejects_odd_pcm_byte_count():

@@ -185,11 +185,15 @@ class ConversationManager:
         current = asyncio.current_task()
         if heartbeat and heartbeat is not current and not heartbeat.done():
             heartbeat.cancel()
+        cancelled_tasks = []
         lease = self._priority_leases.pop(call_id, None)
         for tasks in (self._playback_tasks, self._consumer_tasks):
             task = tasks.pop(call_id, None)
-            if task and not task.done():
+            if task and task is not current and not task.done():
                 task.cancel()
+                cancelled_tasks.append(task)
+        if cancelled_tasks:
+            await asyncio.gather(*cancelled_tasks, return_exceptions=True)
         self._audio_queues.pop(call_id, None)
         self._out_queues.pop(call_id, None)
         self._turn_locks.pop(call_id, None)
@@ -236,6 +240,15 @@ class ConversationManager:
         except asyncio.CancelledError:
             sink.clear()
             raise
+        except Exception:
+            log.exception("Complete playback failed for %s", call_id)
+            sink.clear()
+            if (
+                self._generation.get(call_id) == generation
+                and session.state is SessionState.SPEAKING
+            ):
+                session.transition(SessionState.LISTENING)
+                self._reset_vad(call_id)
 
     async def _play_stream(
         self,
@@ -254,17 +267,15 @@ class ConversationManager:
 
         async def produce() -> None:
             nonlocal first_chunk_seen
-            try:
-                async for pcm_chunk in self._pipeline.process_turn_stream(session, pcm):
-                    if self._generation.get(call_id) != generation:
-                        break
-                    if not first_chunk_seen:
-                        first_chunk_seen = True
-                        if session.state is SessionState.PROCESSING:
-                            session.transition(SessionState.SPEAKING)
-                    await out.put(pcm_chunk)
-            finally:
-                await out.put(None)
+            async for pcm_chunk in self._pipeline.process_turn_stream(session, pcm):
+                if self._generation.get(call_id) != generation:
+                    break
+                if not first_chunk_seen:
+                    first_chunk_seen = True
+                    if session.state is SessionState.PROCESSING:
+                        session.transition(SessionState.SPEAKING)
+                await out.put(pcm_chunk)
+            await out.put(None)
 
         try:
             async with asyncio.TaskGroup() as group:

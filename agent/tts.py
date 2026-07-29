@@ -48,7 +48,7 @@ class TtsClient:
         custom POST /v1/audio/speech/stream subpath returning raw s16le mono
         24kHz (application/octet-stream, chunked, no RIFF header, no
         x-audio-sample-rate header) — so we read raw int16 and the 24kHz rate is
-        hardcoded downstream (resample_24k_to_8k). The server's SpeechRequest has
+        hardcoded downstream (stateful 24-to-16 kHz conversion). The server's SpeechRequest has
         no `stream`/`stream_format`/`response_format=pcm` fields; sending the
         OpenAI-canonical body (stream_format on the base endpoint, pcm format)
         would 422/break here. Migrate to stream_format once the server adopts it:
@@ -69,5 +69,4 @@ class TtsClient:
                     yield np.frombuffer(buf[:n], dtype="<i2")
                 carry = buf[n:]
             if carry:
-                # Trailing odd byte should not happen; drop with no crash.
-                pass
+                raise ValueError("TTS stream ended with incomplete PCM16 sample")

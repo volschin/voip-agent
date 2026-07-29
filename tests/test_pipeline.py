@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from agent.audio import resample_pcm16
-from agent.pipeline import _SILENCE_FRAME, VoicePipeline, _decode_wav
+from agent.pipeline import FILLER_TEXT, VoicePipeline, _decode_wav
 from agent.session import CallSession, SessionState
 
 
@@ -67,7 +67,7 @@ def test_decode_wav_strips_header():
 async def test_synthesize_pcm16_falls_back_on_non_wav():
     tts = AsyncMock(return_value=b"not a wav at all")
     p = VoicePipeline(stt=AsyncMock(), llm=AsyncMock(), tts=tts)
-    assert await p.synthesize_pcm16("x") == _SILENCE_FRAME
+    assert await p.synthesize_pcm16("x") == b""
 
 
 async def test_synthesize_pcm16_returns_direct_16k_pcm():
@@ -281,11 +281,10 @@ async def test_process_turn_stream_plays_filler_on_tool_round():
         for tok in ["Antwort", "."]:
             yield tok
 
-    seen = {"filler": 0}
+    tts_calls = []
 
     async def tts_stream(text):
-        if "Moment" in text:
-            seen["filler"] += 1
+        tts_calls.append(text)
         yield np.zeros(2400, dtype=np.int16)
 
     pipe = VoicePipeline(
@@ -298,7 +297,7 @@ async def test_process_turn_stream_plays_filler_on_tool_round():
     s = _strm_session()
     s.transition(SessionState.LISTENING)
     _ = [c async for c in pipe.process_turn_stream(s, _pcm_zero())]
-    assert seen["filler"] == 1
+    assert tts_calls == [FILLER_TEXT, "Antwort."]
 
 
 async def test_process_turn_stream_recovers_on_midstream_error():
