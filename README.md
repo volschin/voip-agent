@@ -29,9 +29,10 @@ The live turn streams LLM tokens into the German sentence segmenter. Each
 completed sentence is synthesized sequentially through the stable
 `/v1/audio/speech` whole-WAV endpoint, converted once from 24 to 16 kHz PCM,
 then fed through the 300 ms PCM prebuffer to PJSUA2. Up to two completed
-sentence segments may wait ahead; generation and playback overlap across
-sentences. The experimental `/v1/audio/speech/stream` codec path is retained
-for diagnostics but is not used for VoIP responses.
+sentence segments may wait ahead, within the existing two-second maximum-ahead
+playback bound; generation and playback overlap across sentences. The
+experimental `/v1/audio/speech/stream` codec path is retained for diagnostics
+but is not used for VoIP responses.
 
 Barge-in (caller speaks over the agent) cancels the in-flight producers and
 clears buffered PCM. A server-side full-sentence model call may finish after

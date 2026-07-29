@@ -20,9 +20,10 @@ Asterisk, ARI, and ExternalMedia are no longer in the runtime path. The former `
    pipeline PCM directly; there is no A-law round trip in production.
 
 Completed LLM sentences use a bounded two-entry prefetch queue. TTS generation
-remains sequential, and barge-in cancels the producers and clears prebuffered
-PCM. The legacy ARI/RTP rollback path alone converts pipeline PCM to 8 kHz
-G.711 A-law at its transport boundary.
+remains sequential, with the existing two-second maximum-ahead playback bound,
+and barge-in cancels the producers and clears prebuffered PCM. The legacy
+ARI/RTP rollback path alone converts pipeline PCM to 8 kHz G.711 A-law at its
+transport boundary.
 
 ## Deployment
 
