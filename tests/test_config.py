@@ -132,6 +132,7 @@ def test_shared_ai_credentials_require_exact_traefik_origins(tmp_path):
 def test_shared_ai_defaults_are_fail_closed_to_traefik() -> None:
     settings = Settings(**_valid_kwargs())
 
+    assert settings.ai_origin == "https://mate.olcon.de"
     assert settings.stt_base_url == "https://mate.olcon.de"
     assert settings.tts_base_url == "https://mate.olcon.de"
     assert settings.llm_base_url == "https://mate.olcon.de"
@@ -142,6 +143,62 @@ def test_shared_ai_defaults_are_fail_closed_to_traefik() -> None:
     assert settings.voice_priority_token_file == "/run/secrets/voice_priority_token"
     assert settings.voice_priority_base_url == "https://mate.olcon.de"
     assert settings.tts_voice_profile == "shared-female-de-v1"
+
+
+_UNSET_SERVICE_URLS = {
+    "stt_base_url": "",
+    "tts_base_url": "",
+    "llm_base_url": "",
+    "voice_priority_base_url": "",
+}
+
+
+def test_unset_service_urls_follow_configured_ai_origin() -> None:
+    settings = Settings(
+        **_valid_kwargs(ai_origin="https://voice.example.test/", **_UNSET_SERVICE_URLS)
+    )
+
+    assert settings.ai_origin == "https://voice.example.test"
+    assert settings.stt_base_url == "https://voice.example.test"
+    assert settings.tts_base_url == "https://voice.example.test"
+    assert settings.llm_base_url == "https://voice.example.test"
+    assert settings.voice_priority_base_url == "https://voice.example.test"
+
+
+def test_explicit_service_urls_must_match_configured_ai_origin(tmp_path) -> None:
+    password = tmp_path / "password"
+    ca = tmp_path / "ca.crt"
+    token = tmp_path / "priority-token"
+    password.write_text("secret", encoding="utf-8")
+    ca.write_text("ca", encoding="utf-8")
+    token.write_text("token", encoding="utf-8")
+    shared = {
+        **_UNSET_SERVICE_URLS,
+        "ai_origin": "https://voice.example.test",
+        "ai_proxy_username": "voip-agent",
+        "ai_proxy_password_file": str(password),
+        "ai_proxy_ca_file": str(ca),
+        "voice_priority_token_file": str(token),
+    }
+
+    settings = Settings(
+        **_valid_kwargs(**{**shared, "stt_base_url": "https://voice.example.test/"})
+    )
+    assert settings.stt_base_url == "https://voice.example.test/"
+
+    with pytest.raises(ValueError, match="voice.example.test"):
+        Settings(**_valid_kwargs(**{**shared, "stt_base_url": "https://mate.olcon.de"}))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", "   ", "http://mate.olcon.de", "mate.olcon.de", "https://mate.olcon.de/v1"],
+)
+def test_ai_origin_rejects_non_https_or_path_values(monkeypatch, bad: str) -> None:
+    monkeypatch.delenv("AI_ORIGIN", raising=False)
+
+    with pytest.raises(ValueError, match="ai_origin"):
+        Settings(**_valid_kwargs(ai_origin=bad))
 
 
 @pytest.mark.parametrize("value", ["", " "])

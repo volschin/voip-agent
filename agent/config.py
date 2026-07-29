@@ -78,17 +78,37 @@ class Settings(BaseSettings):
         return v
 
     # DGX Spark AI services
-    stt_base_url: str = "https://mate.olcon.de"
-    tts_base_url: str = "https://mate.olcon.de"
+    # Single authenticated Traefik origin for STT/TTS/LLM/voice-priority. Every
+    # per-service base URL must resolve to exactly this origin (fail closed —
+    # the shared-AI boundary is one host, one credential set). Change AI_ORIGIN
+    # to move the whole stack; the per-service URLs below default to it when
+    # left empty.
+    ai_origin: str = "https://mate.olcon.de"
+    stt_base_url: str = ""
+    tts_base_url: str = ""
     tts_voice_profile: str = "shared-female-de-v1"
-    llm_base_url: str = "https://mate.olcon.de"
+    llm_base_url: str = ""
     llm_model: str = "companion-gemma"
     embedding_base_url: str = "http://dgx-spark:8003"
     ai_proxy_username: str = "voip-agent"
     ai_proxy_password_file: str = "/run/secrets/shared_ai_password"
     ai_proxy_ca_file: str = "/run/secrets/mate_ca.crt"
     voice_priority_token_file: str = "/run/secrets/voice_priority_token"
-    voice_priority_base_url: str = "https://mate.olcon.de"
+    voice_priority_base_url: str = ""
+
+    @field_validator("ai_origin")
+    @classmethod
+    def _validate_ai_origin(cls, value: str) -> str:
+        origin = value.strip().rstrip("/")
+        if not origin:
+            raise ValueError("ai_origin must not be blank")
+        # https only: the shared boundary carries BasicAuth credentials.
+        if not origin.startswith("https://"):
+            raise ValueError("ai_origin must start with https://")
+        host = origin[len("https://") :]
+        if not host or "/" in host:
+            raise ValueError("ai_origin must be a scheme+host origin without a path")
+        return origin
 
     @field_validator("tts_voice_profile")
     @classmethod
@@ -99,6 +119,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_shared_ai_boundary(self) -> "Settings":
+        # Unset per-service URLs inherit the configured origin.
+        for name in (
+            "stt_base_url",
+            "tts_base_url",
+            "llm_base_url",
+            "voice_priority_base_url",
+        ):
+            if not getattr(self, name).strip():
+                object.__setattr__(self, name, self.ai_origin)
+
         credentials = (
             self.ai_proxy_username,
             self.ai_proxy_password_file,
@@ -118,8 +148,8 @@ class Settings(BaseSettings):
             ("llm_base_url", self.llm_base_url),
             ("voice_priority_base_url", self.voice_priority_base_url),
         ):
-            if url.rstrip("/") != "https://mate.olcon.de":
-                raise ValueError(f"{name} must use https://mate.olcon.de")
+            if url.rstrip("/") != self.ai_origin:
+                raise ValueError(f"{name} must use {self.ai_origin}")
         return self
 
     # pgvector RAG

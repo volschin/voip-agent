@@ -23,9 +23,11 @@ def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:
 
     assert hosts == {
         "dgx-spark:${DGX_HOST_IP:-192.168.68.41}",
-        "mate.olcon.de:${DGX_HOST_IP:-192.168.68.41}",
+        "${AI_ORIGIN_HOST:-mate.olcon.de}:${DGX_HOST_IP:-192.168.68.41}",
     }
     assert "DGX_HOST_IP=192.168.68.41" in env_example
+    assert "AI_ORIGIN=https://mate.olcon.de" in env_example
+    assert "AI_ORIGIN_HOST=mate.olcon.de" in env_example
 
 
 def test_ci_gates_python_314_and_both_runtime_image_imports() -> None:
