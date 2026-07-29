@@ -1,10 +1,11 @@
 """Fail-closed client for the Companion Core voice-priority lease."""
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from uuid import UUID
 
 import httpx
+
+from agent.private_files import validate_private_file
 
 _TOKEN_HEADER = "X-Voice-Priority-Token"
 
@@ -87,8 +88,13 @@ class PriorityLeaseClient:
 
 
 def _read_token(path: str) -> str:
+    token_file = validate_private_file(
+        path,
+        label="voice priority token",
+        forbid_group_other_read=True,
+    )
     try:
-        token = Path(path).read_text(encoding="utf-8")
+        token = token_file.read_text(encoding="utf-8")
     except OSError as error:
         raise ValueError("voice priority token file is unavailable") from error
     if token.endswith("\r\n"):

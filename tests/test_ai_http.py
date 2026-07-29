@@ -25,6 +25,9 @@ def _settings(tmp_path: Path, **overrides: str) -> Settings:
     password.write_text("machine-secret\n", encoding="utf-8")
     ca.write_text("test CA fixture", encoding="utf-8")
     token.write_text("priority-secret\n", encoding="utf-8")
+    password.chmod(0o600)
+    ca.chmod(0o644)
+    token.chmod(0o600)
     values = {
         "fritzbox_sip_username": "agent-phone",
         "fritzbox_sip_password": "strong-secret",
@@ -86,6 +89,72 @@ def test_build_ai_client_rejects_empty_password(
 
     with pytest.raises(ValueError, match="password"):
         build_ai_client(settings)
+
+
+@pytest.mark.parametrize(
+    ("field", "filename", "contents", "mode"),
+    [
+        ("ai_proxy_password_file", "password-link", "machine-secret", 0o600),
+        ("ai_proxy_ca_file", "ca-link.crt", "test CA fixture", 0o644),
+    ],
+)
+def test_build_ai_client_rejects_symlink_credentials(
+    tmp_path: Path,
+    ssl_context: ssl.SSLContext,
+    field: str,
+    filename: str,
+    contents: str,
+    mode: int,
+) -> None:
+    target = tmp_path / f"{filename}.target"
+    target.write_text(contents, encoding="utf-8")
+    target.chmod(mode)
+    link = tmp_path / filename
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError, match="unsafe") as error:
+        build_ai_client(_settings(tmp_path, **{field: str(link)}))
+
+    assert str(link) not in str(error.value)
+    assert contents not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "mode"),
+    [
+        ("ai_proxy_password_file", 0o640),
+        ("ai_proxy_password_file", 0o602),
+        ("ai_proxy_ca_file", 0o664),
+        ("ai_proxy_ca_file", 0o646),
+    ],
+)
+def test_build_ai_client_rejects_unsafe_credential_permissions(
+    tmp_path: Path,
+    ssl_context: ssl.SSLContext,
+    field: str,
+    mode: int,
+) -> None:
+    settings = _settings(tmp_path)
+    credential = Path(getattr(settings, field))
+    credential.chmod(mode)
+
+    with pytest.raises(ValueError, match="permissions") as error:
+        build_ai_client(settings)
+
+    assert str(credential) not in str(error.value)
+
+
+@pytest.mark.parametrize("field", ["ai_proxy_password_file", "ai_proxy_ca_file"])
+def test_build_ai_client_rejects_non_regular_credentials(
+    tmp_path: Path,
+    ssl_context: ssl.SSLContext,
+    field: str,
+) -> None:
+    directory = tmp_path / "credential-directory"
+    directory.mkdir()
+
+    with pytest.raises(ValueError, match="unsafe"):
+        build_ai_client(_settings(tmp_path, **{field: str(directory)}))
 
 
 @pytest.mark.asyncio

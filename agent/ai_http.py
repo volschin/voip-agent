@@ -1,11 +1,11 @@
 """Authenticated HTTPS client for the shared Traefik AI boundary."""
 
 import ssl
-from pathlib import Path
 
 import httpx
 
 from agent.config import Settings
+from agent.private_files import validate_private_file
 
 _AI_ORIGIN = "https://mate.olcon.de"
 
@@ -26,9 +26,11 @@ def build_ai_client(settings: Settings) -> httpx.AsyncClient:
             raise ValueError(f"{name} base URL must use {_AI_ORIGIN}")
 
     password = _read_password(settings.ai_proxy_password_file)
-    ca_file = Path(settings.ai_proxy_ca_file)
-    if not ca_file.is_file():
-        raise ValueError("AI proxy CA file is unavailable")
+    ca_file = validate_private_file(
+        settings.ai_proxy_ca_file,
+        label="AI proxy CA",
+        forbid_group_other_read=False,
+    )
     try:
         ssl_context = ssl.create_default_context(cafile=str(ca_file))
     except ssl.SSLError as error:
@@ -44,8 +46,13 @@ def build_ai_client(settings: Settings) -> httpx.AsyncClient:
 
 
 def _read_password(path: str) -> str:
+    password_file = validate_private_file(
+        path,
+        label="AI proxy password",
+        forbid_group_other_read=True,
+    )
     try:
-        password = Path(path).read_text(encoding="utf-8")
+        password = password_file.read_text(encoding="utf-8")
     except OSError as error:
         raise ValueError("AI proxy password file is unavailable") from error
     if password.endswith("\r\n"):

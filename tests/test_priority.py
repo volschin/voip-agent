@@ -16,6 +16,7 @@ LEASE_ID = "12345678-1234-5678-1234-567812345678"
 def _client(tmp_path: Path, http_client: httpx.AsyncClient) -> PriorityLeaseClient:
     token = tmp_path / "priority-token"
     token.write_text("priority-secret\n", encoding="utf-8")
+    token.chmod(0o600)
     return PriorityLeaseClient(
         base_url="https://mate.olcon.de",
         client=http_client,
@@ -104,6 +105,7 @@ def test_priority_client_rejects_empty_token_file(
 ) -> None:
     token = tmp_path / "priority-token"
     token.write_text(contents, encoding="utf-8")
+    token.chmod(0o600)
 
     with pytest.raises(ValueError, match="priority token"):
         PriorityLeaseClient(
@@ -119,4 +121,51 @@ def test_priority_client_rejects_missing_token_file(tmp_path: Path) -> None:
             base_url="https://mate.olcon.de",
             client=httpx.AsyncClient(),
             token_file=str(tmp_path / "missing"),
+        )
+
+
+def test_priority_client_rejects_symlink_token_file(tmp_path: Path) -> None:
+    target = tmp_path / "priority-target"
+    target.write_text("priority-secret", encoding="utf-8")
+    target.chmod(0o600)
+    link = tmp_path / "priority-token"
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError, match="unsafe") as error:
+        PriorityLeaseClient(
+            base_url="https://mate.olcon.de",
+            client=httpx.AsyncClient(),
+            token_file=str(link),
+        )
+
+    assert str(link) not in str(error.value)
+    assert "priority-secret" not in str(error.value)
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o604, 0o602])
+def test_priority_client_rejects_unsafe_token_permissions(
+    tmp_path: Path,
+    mode: int,
+) -> None:
+    token = tmp_path / "priority-token"
+    token.write_text("priority-secret", encoding="utf-8")
+    token.chmod(mode)
+
+    with pytest.raises(ValueError, match="permissions"):
+        PriorityLeaseClient(
+            base_url="https://mate.olcon.de",
+            client=httpx.AsyncClient(),
+            token_file=str(token),
+        )
+
+
+def test_priority_client_rejects_non_regular_token_file(tmp_path: Path) -> None:
+    token_directory = tmp_path / "priority-token"
+    token_directory.mkdir()
+
+    with pytest.raises(ValueError, match="unsafe"):
+        PriorityLeaseClient(
+            base_url="https://mate.olcon.de",
+            client=httpx.AsyncClient(),
+            token_file=str(token_directory),
         )
