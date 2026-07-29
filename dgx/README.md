@@ -2,29 +2,6 @@
 
 Run on the DGX Spark (GPU host).
 
-```bash
-cd dgx
-cp .env.example .env
-docker network inspect shared_ai_voice >/dev/null 2>&1 \
-  || docker network create --internal shared_ai_voice
-docker compose up -d
-```
-
-This Compose file remains the canonical owner of Qwen3-ASR and Qwen3-TTS. It
-keeps the stack-private default network and additionally attaches those two
-services to the pre-created neutral `shared_ai_voice` network consumed by
-Traefik. The stack does not publish ports 8001 or 8002 after cutover.
-
-ASR loads the already cached revision
-`5eb144179a02acc5e5ba31e748d22b0cf3e303b0` with Hugging Face and Transformers
-offline. TTS refuses to start unless PyTorch reports CUDA on `NVIDIA GB10`;
-there is no CPU fallback.
-
-`qwen3-tts` builds locally from `./tts`. Production callers use stable
-whole-WAV `/v1/audio/speech`; `/v1/audio/speech/stream` remains available only
-for diagnostics. First `up` compiles flash-attn — expect ~10–15 min on the
-Spark; later boots reuse the cached layer.
-
 ## Private TTS profile runbook
 
 The private profile bundle stays outside Git and outside the image. On the GX10,
@@ -77,6 +54,33 @@ private diagnosis, restore the recorded image digest and last-known-good bundle
 through the existing stack, and re-run health/CUDA/audio acceptance. Never
 paste a manifest, transcript, reference audio, credential, or private hash into
 the rollback report.
+
+## Start services
+
+After provisioning and validating the private TTS profile:
+
+```bash
+cd dgx
+cp .env.example .env
+docker network inspect shared_ai_voice >/dev/null 2>&1 \
+  || docker network create --internal shared_ai_voice
+docker compose up -d
+```
+
+This Compose file remains the canonical owner of Qwen3-ASR and Qwen3-TTS. It
+keeps the stack-private default network and additionally attaches those two
+services to the pre-created neutral `shared_ai_voice` network consumed by
+Traefik. The stack does not publish ports 8001 or 8002 after cutover.
+
+ASR loads the already cached revision
+`5eb144179a02acc5e5ba31e748d22b0cf3e303b0` with Hugging Face and Transformers
+offline. TTS refuses to start unless PyTorch reports CUDA on `NVIDIA GB10`;
+there is no CPU fallback.
+
+`qwen3-tts` builds locally from `./tts`. Production callers use stable
+whole-WAV `/v1/audio/speech`; `/v1/audio/speech/stream` remains available only
+for diagnostics. First `up` compiles flash-attn — expect ~10–15 min on the
+Spark; later boots reuse the cached layer.
 
 ## Health checks
 

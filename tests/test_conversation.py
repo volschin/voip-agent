@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 
+import agent.conversation as conversation_module
 from agent.conversation import ConversationManager
 from agent.pjsip import PcmPlaybackBuffer, PjsipAudioSink
 from agent.priority import PriorityUnavailable
@@ -303,10 +304,46 @@ async def test_full_output_queue_does_not_deadlock_stream_cancellation(settings)
     await manager.stop_call("1")
 
 
-async def test_blocked_pjsip_playback_never_exceeds_two_second_aggregate_backlog(settings):
+async def test_blocked_pjsip_playback_never_exceeds_two_second_aggregate_backlog(
+    settings,
+    monkeypatch,
+):
+    class ObservedPcmByteQueue(conversation_module._PcmByteQueue):
+        def __init__(self, max_bytes):
+            super().__init__(max_bytes)
+            self.producer_held_bytes = 0
+            self.producer_blocked = asyncio.Event()
+
+        async def put(self, item):
+            size = len(item) if item is not None else 0
+            if size and self.queued_bytes + size > self._max_bytes:
+                self.producer_held_bytes = size
+                self.producer_blocked.set()
+            try:
+                await super().put(item)
+            finally:
+                self.producer_held_bytes = 0
+                self.producer_blocked.clear()
+
+    class ObservedPjsipAudioSink(PjsipAudioSink):
+        def __init__(self, playback_buffer):
+            super().__init__(playback_buffer)
+            self.held_bytes = 0
+
+        async def _write_with_backpressure(self, pcm, *, max_buffer_bytes=None):
+            self.held_bytes = len(pcm)
+            try:
+                await super()._write_with_backpressure(
+                    pcm,
+                    max_buffer_bytes=max_buffer_bytes,
+                )
+            finally:
+                self.held_bytes = 0
+
+    monkeypatch.setattr(conversation_module, "_PcmByteQueue", ObservedPcmByteQueue)
     manager, pipeline = _manager(settings)
     buffer = PcmPlaybackBuffer()
-    sink = PjsipAudioSink(buffer)
+    sink = ObservedPjsipAudioSink(buffer)
     session = CallSession(
         call_id="1",
         caller_id="+49123",
@@ -329,13 +366,24 @@ async def test_blocked_pjsip_playback_never_exceeds_two_second_aggregate_backlog
     try:
         for _ in range(1_000):
             queue = manager._out_queues.get("1")
-            if queue is not None and queue.full():
+            if (
+                queue is not None
+                and queue.producer_blocked.is_set()
+                and sink.held_bytes
+                and queue.queued_bytes
+            ):
                 break
             await asyncio.sleep(0)
         queue = manager._out_queues["1"]
+        sink_held_bytes = sink.held_bytes
+        producer_held_bytes = queue.producer_held_bytes
+
+        assert sink_held_bytes == PjsipAudioSink.PCM_BLOCK_BYTES
+        assert queue.queued_bytes == PjsipAudioSink.PCM_BLOCK_BYTES
+        assert producer_held_bytes == PjsipAudioSink.PCM_BLOCK_BYTES
 
         assert (
-            buffer.buffered_bytes + queue.queued_bytes + PjsipAudioSink.PCM_BLOCK_BYTES
+            buffer.buffered_bytes + sink_held_bytes + queue.queued_bytes + producer_held_bytes
             <= PjsipAudioSink.MAX_AHEAD_BYTES
         )
     finally:
