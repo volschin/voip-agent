@@ -1,6 +1,6 @@
 """Configuration management for VoIP agent."""
 
-from pydantic import ConfigDict, field_validator, model_validator
+from pydantic import ConfigDict, Field, IPvAnyAddress, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 _INSECURE_PASSWORDS = {"", "changeme"}
@@ -10,6 +10,16 @@ class Settings(BaseSettings):
     """Agent settings loaded from environment variables."""
 
     model_config = ConfigDict(env_file=".env", case_sensitive=False)
+
+    # Compose reads this documented key from the same .env file. The agent does
+    # not consume it, but declaring and validating it preserves strict rejection
+    # of every other unknown setting.
+    dgx_host_ip: IPvAnyAddress = Field(
+        default="192.168.68.41",
+        exclude=True,
+        repr=False,
+        validate_default=True,
+    )
 
     # Direct FRITZ!Box PJSIP transport
     fritzbox_host: str = "fritz.box"

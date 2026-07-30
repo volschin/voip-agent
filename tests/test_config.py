@@ -16,6 +16,34 @@ def _valid_kwargs(**over):
     return kwargs
 
 
+@pytest.mark.parametrize("value", ["192.168.68.41", "fd00::41"])
+def test_settings_accept_documented_compose_host(tmp_path, value: str) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"DGX_HOST_IP={value}\n", encoding="utf-8")
+
+    settings = Settings(_env_file=env_file, **_valid_kwargs())
+
+    assert str(settings.dgx_host_ip) == value
+    assert "dgx_host_ip" not in repr(settings)
+    assert "dgx_host_ip" not in settings.model_dump()
+
+
+def test_settings_reject_invalid_compose_host(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("DGX_HOST_IP=not-an-ip\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dgx_host_ip"):
+        Settings(_env_file=env_file, **_valid_kwargs())
+
+
+def test_settings_still_reject_unknown_dotenv_keys(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("MISSPELLED_SETTING=value\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="extra_forbidden"):
+        Settings(_env_file=env_file, **_valid_kwargs())
+
+
 @pytest.mark.parametrize("bad", ["changeme", "CHANGEME", "", "  "])
 def test_insecure_sip_password_rejected(monkeypatch, bad):
     monkeypatch.delenv("FRITZBOX_SIP_PASSWORD", raising=False)
