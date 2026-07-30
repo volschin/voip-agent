@@ -198,6 +198,54 @@ def test_cancelled_queued_synthesis_never_starts_model_generation(tmp_path: Path
     assert model.generated_texts == ["active"]
 
 
+def test_cancelled_active_synthesis_releases_model_for_following_request(tmp_path: Path) -> None:
+    profile = _profile(tmp_path)
+    active_started = threading.Event()
+    cancel_active = threading.Event()
+
+    class CooperativeSynthesisModel(ExactCloneModel):
+        def __init__(self, selected_profile: VoiceProfile) -> None:
+            super().__init__(selected_profile)
+            self.generated_texts: list[str] = []
+
+        def generate_voice_clone(self, *, cancel_event=None, **kwargs):
+            self.generated_texts.append(kwargs["text"])
+            if kwargs["text"] != "active":
+                return self.warm_audio, self.sample_rate
+            if cancel_event is None:
+                return self.warm_audio, self.sample_rate
+            active_started.set()
+            cancel_event.wait(timeout=2)
+            raise InterruptedError("generation cancelled")
+
+    model = CooperativeSynthesisModel(profile)
+    runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        active = executor.submit(
+            runtime.synthesize,
+            "active",
+            profile.profile_id,
+            "de",
+            cancel_event=cancel_active,
+        )
+        assert active_started.wait(timeout=0.2)
+        cancel_active.set()
+        with pytest.raises(SynthesisCancelled):
+            active.result(timeout=0.2)
+
+        following = executor.submit(
+            runtime.synthesize,
+            "following",
+            profile.profile_id,
+            "de",
+            lock_timeout=0.2,
+        )
+        following.result(timeout=0.2)
+
+    assert model.generated_texts == ["active", "following"]
+
+
 def test_synthesis_admission_timeout_recovers_for_following_request(tmp_path: Path) -> None:
     profile = _profile(tmp_path)
     active_started = threading.Event()

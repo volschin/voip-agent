@@ -35,10 +35,13 @@ experimental `/v1/audio/speech/stream` codec path is retained for diagnostics
 but is not used for VoIP responses.
 
 Barge-in (caller speaks over the agent) cancels the in-flight producers and
-clears buffered PCM. A server-side full-sentence model call may finish after
-client cancellation; its late result is discarded and never reaches playback.
-The non-streaming whole-turn path is retained for the greeting and as a
-fallback.
+clears buffered PCM. The stable TTS decode loop observes cancellation between
+codec steps, releases the exclusive model lock, and lets the replacement turn
+start without waiting for the cancelled sentence to finish. The non-streaming
+whole-turn path is retained for the greeting and as a fallback.
+An interrupted assistant turn is not persisted as conversation history. The
+next LLM request receives a one-time system context that the previous response
+was not completely delivered and should not be continued unless requested.
 
 **Turn detection:** with `TURN_DETECTION_ENABLED=true` the listen path drops the VAD floor to
 ~200 ms and confirms each candidate with an **in-process** [Smart Turn v3](https://huggingface.co/pipecat-ai/smart-turn-v3)

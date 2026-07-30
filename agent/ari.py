@@ -411,6 +411,10 @@ class AriClient:
             # State may have advanced while we waited for the lock.
             if session.state not in self._INTERRUPTIBLE_STATES:
                 return
+            interrupted_response = session.state in (
+                SessionState.SPEAKING,
+                SessionState.PROCESSING,
+            )
 
             # Bump the generation: any in-flight playback for the prior
             # generation will now no-op on completion, and the turn we start
@@ -423,6 +427,8 @@ class AriClient:
             # late chunk; the cancel stops the work immediately.
             task = self._playback_tasks.pop(channel_id, None)
             if task and not task.done():
+                if interrupted_response:
+                    session.previous_response_interrupted = True
                 task.cancel()
 
             # Move back to LISTENING before the new turn enters PROCESSING.

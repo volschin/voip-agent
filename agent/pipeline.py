@@ -14,6 +14,10 @@ log = logging.getLogger(__name__)
 _TTS_SAMPLE_RATE = 24000
 _OUTPUT_SAMPLE_RATE = 16000
 _SENTENCE_PREFETCH_DEPTH = 2
+_INTERRUPTED_RESPONSE_CONTEXT = (
+    "Die vorherige Antwort wurde vom Anrufer unterbrochen und nicht vollständig übermittelt. "
+    "Setze sie nicht ungefragt fort und reagiere vorrangig auf die neueste Äußerung."
+)
 
 
 def _decode_wav(data: bytes) -> np.ndarray:
@@ -49,6 +53,16 @@ class VoicePipeline:
         self._llm_stream = llm_stream
         self._tts_stream = tts_stream
 
+    @staticmethod
+    def _messages_for_llm(session: CallSession) -> list[dict]:
+        if not session.previous_response_interrupted:
+            return session.history
+        session.previous_response_interrupted = False
+        return [
+            {"role": "system", "content": _INTERRUPTED_RESPONSE_CONTEXT},
+            *session.history,
+        ]
+
     async def synthesize_pcm16(self, text: str) -> bytes:
         try:
             wav_bytes = await self._tts(text)
@@ -77,7 +91,7 @@ class VoicePipeline:
         session.history.append({"role": "user", "content": transcript})
 
         try:
-            response_text = await self._llm(session.history, session.caller_id)
+            response_text = await self._llm(self._messages_for_llm(session), session.caller_id)
         except Exception:
             log.exception("LLM failed")
             session.history.pop()
@@ -138,7 +152,9 @@ class VoicePipeline:
             seg = SentenceSegmenter()
             try:
                 async for token in self._llm_stream(
-                    session.history, session.caller_id, on_tool_round=_on_tool_round
+                    self._messages_for_llm(session),
+                    session.caller_id,
+                    on_tool_round=_on_tool_round,
                 ):
                     if filler_task is not None and not filler_task.done():
                         await asyncio.sleep(0)

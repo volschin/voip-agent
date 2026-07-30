@@ -214,6 +214,63 @@ async def test_process_turn_stream_yields_pcm16_incrementally():
     assert s.history[-1]["content"] == "Hallo Welt."
 
 
+async def test_interrupted_turn_context_is_sent_once_without_entering_history():
+    observed_messages = []
+    transcripts = iter(("Neue Frage", "Weitere Frage"))
+
+    async def stt(_pcm):
+        return next(transcripts)
+
+    async def llm_stream(messages, _caller, on_tool_round=None):
+        observed_messages.append([dict(message) for message in messages])
+        yield "Neue Antwort." if len(observed_messages) == 1 else "Weitere Antwort."
+
+    pipe = VoicePipeline(
+        stt=stt,
+        llm=None,
+        tts=AsyncMock(return_value=_wav(240)),
+        llm_stream=llm_stream,
+        tts_stream=AsyncMock(),
+    )
+    session = _strm_session()
+    session.history.append({"role": "user", "content": "Alte Frage"})
+    session.previous_response_interrupted = True
+    session.transition(SessionState.LISTENING)
+
+    _ = [chunk async for chunk in pipe.process_turn_stream(session, _pcm_zero())]
+    session.transition(SessionState.LISTENING)
+    _ = [chunk async for chunk in pipe.process_turn_stream(session, _pcm_zero())]
+
+    assert observed_messages == [
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Die vorherige Antwort wurde vom Anrufer unterbrochen und nicht vollständig "
+                    "übermittelt. Setze sie nicht ungefragt fort und reagiere vorrangig auf die "
+                    "neueste Äußerung."
+                ),
+            },
+            {"role": "user", "content": "Alte Frage"},
+            {"role": "user", "content": "Neue Frage"},
+        ],
+        [
+            {"role": "user", "content": "Alte Frage"},
+            {"role": "user", "content": "Neue Frage"},
+            {"role": "assistant", "content": "Neue Antwort."},
+            {"role": "user", "content": "Weitere Frage"},
+        ],
+    ]
+    assert session.previous_response_interrupted is False
+    assert session.history == [
+        {"role": "user", "content": "Alte Frage"},
+        {"role": "user", "content": "Neue Frage"},
+        {"role": "assistant", "content": "Neue Antwort."},
+        {"role": "user", "content": "Weitere Frage"},
+        {"role": "assistant", "content": "Weitere Antwort."},
+    ]
+
+
 async def test_sentence_prefetch_is_bounded_and_preserves_order():
     first_tts_started = asyncio.Event()
     release_first = asyncio.Event()

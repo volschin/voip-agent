@@ -79,8 +79,11 @@ there is no CPU fallback.
 
 `qwen3-tts` builds locally from `./tts`. Production callers use stable
 whole-WAV `/v1/audio/speech`; `/v1/audio/speech/stream` remains available only
-for diagnostics. First `up` compiles flash-attn — expect ~10–15 min on the
-Spark; later boots reuse the cached layer.
+for diagnostics. The image applies a version-bound patch to
+`faster-qwen3-tts==0.2.6` so cancelled stable requests stop between codec steps
+and promptly release the single model lock. The build fails if the pinned
+source no longer matches that patch. First `up` compiles flash-attn — expect
+~10–15 min on the Spark; later boots reuse the cached layer.
 
 ## Health checks
 
