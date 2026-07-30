@@ -53,17 +53,20 @@ only for diagnostics. Numbering matches the original review.
 
 ## Models
 
-- [x] **faster-qwen3-tts (with diagnostic streaming).** TTFA on DGX Spark
-  567→280 ms (0.6B), 661→400 ms (1.7B) via CUDA graphs. The server retains
-  raw streaming chunks for diagnostics, but production VoIP uses the stable
-  whole-WAV endpoint:
-  `dgx/tts/server.py` adds `/v1/audio/speech/stream` via
-  `generate_voice_design_streaming` (same `Qwen3-TTS-12Hz-1.7B-VoiceDesign`
-  weights), alongside `/v1/audio/speech` for greeting and response sentences.
-  **On-box wire verification still pending** (DGX unreachable from dev box):
-  confirm streamed chunk sample-rate/dtype and the vLLM SSE `delta.tool_calls`
-  fragment shape, then replace the ASSUMPTION fixtures in `tests/test_tts.py`
-  and `tests/test_llm.py`. https://github.com/andimarafioti/faster-qwen3-tts
+- [x] **faster-qwen3-tts (stable named clone production path).** Production
+  uses the private `shared-female-de-v1` profile with the pinned Qwen Base
+  clone runtime. Each response sentence uses stable `/v1/audio/speech`
+  whole-WAV synthesis at 24 kHz PCM16; diagnostic
+  `/v1/audio/speech/stream` remains outside the VoIP response path.
+  Cooperative cancellation now stops active synthesis between codec steps,
+  synchronizes CUDA before releasing the exclusive model lock, and lets the
+  following request proceed without waiting for the cancelled sentence.
+  GX10 verification on 2026-07-30 covered the image-build patch verifier,
+  healthy zero-restart deployment, authenticated stable WAV synthesis,
+  cancellation/recovery, and real GPU activity.
+  Raw diagnostic-stream wire shape and vLLM streamed `delta.tool_calls`
+  fragments remain unit-fixture assumptions; verify those paths live before
+  treating them as production-proven contracts.
 - [ ] **Parakeet ASR: do NOT switch yet.** Qwen3-ASR already streams; the code
   just uses it offline/batch. Parakeet-TDT v3 is also offline per NVIDIA NIM
   docs. If NVIDIA is ever wanted, use Parakeet RNNT Multilingual (streaming) via
