@@ -1,0 +1,45 @@
+diff --git a/faster_qwen3_tts/generate.py b/faster_qwen3_tts/generate.py
+index 641306b..6137cfb 100644
+--- a/faster_qwen3_tts/generate.py
++++ b/faster_qwen3_tts/generate.py
+@@ -6 +6 @@ import time
+-from typing import Optional, Tuple
++from typing import Any, Optional, Tuple
+@@ -14,0 +15,6 @@ from .talker_graph import TalkerGraph
++def _raise_if_cancelled(cancel_event: Optional[Any]) -> None:
++    if cancel_event is not None and cancel_event.is_set():
++        torch.cuda.synchronize()
++        raise InterruptedError("generation cancelled")
++
++
+@@ -36,0 +43 @@ def fast_generate(
++    cancel_event: Optional[Any] = None,
+@@ -44,0 +52 @@ def fast_generate(
++    _raise_if_cancelled(cancel_event)
+@@ -52,0 +61 @@ def fast_generate(
++        _raise_if_cancelled(cancel_event)
+@@ -87,0 +97 @@ def fast_generate(
++        _raise_if_cancelled(cancel_event)
+@@ -142,0 +153 @@ def fast_generate(
++    _raise_if_cancelled(cancel_event)
+@@ -149,0 +161 @@ def fast_generate(
++        _raise_if_cancelled(cancel_event)
+diff --git a/faster_qwen3_tts/model.py b/faster_qwen3_tts/model.py
+index 0e2e675..45aafd0 100644
+--- a/faster_qwen3_tts/model.py
++++ b/faster_qwen3_tts/model.py
+@@ -754,0 +755 @@ class FasterQwen3TTS:
++        cancel_event: Optional[Any] = None,
+@@ -790 +791 @@ class FasterQwen3TTS:
+-        from .generate import fast_generate
++        from .generate import _raise_if_cancelled, fast_generate
+@@ -791,0 +793 @@ class FasterQwen3TTS:
++        _raise_if_cancelled(cancel_event)
+@@ -808,0 +811 @@ class FasterQwen3TTS:
++        _raise_if_cancelled(cancel_event)
+@@ -824,0 +828 @@ class FasterQwen3TTS:
++            cancel_event=cancel_event,
+@@ -826,0 +831 @@ class FasterQwen3TTS:
++        _raise_if_cancelled(cancel_event)
+@@ -840,0 +846 @@ class FasterQwen3TTS:
++        _raise_if_cancelled(cancel_event)

@@ -18,7 +18,7 @@ class SynthesisAdmissionTimeout(RuntimeError):
 
 
 class SynthesisCancelled(RuntimeError):
-    """A queued stable request was cancelled before model generation."""
+    """A stable request was cancelled before or during model generation."""
 
 
 class CloneRuntime:
@@ -64,13 +64,19 @@ class CloneRuntime:
         try:
             if deadline is not None and monotonic() >= deadline:
                 raise SynthesisAdmissionTimeout()
-            return self._model.generate_voice_clone(
-                text=text,
-                language=normalize_language(language) or profile.language,
-                ref_audio=profile.audio_path,
-                ref_text=profile.reference_text,
-                non_streaming_mode=True,
-            )
+            try:
+                return self._model.generate_voice_clone(
+                    text=text,
+                    language=normalize_language(language) or profile.language,
+                    ref_audio=profile.audio_path,
+                    ref_text=profile.reference_text,
+                    non_streaming_mode=True,
+                    cancel_event=cancel_event,
+                )
+            except InterruptedError:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise SynthesisCancelled() from None
+                raise
         finally:
             self._model_lock.release()
 

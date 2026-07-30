@@ -460,10 +460,11 @@ async def test_real_pjsip_barge_in_finalizes_old_producer_and_starts_clean(setti
     first_finalizing = asyncio.Event()
     release_first_finalizer = asyncio.Event()
     second_started = asyncio.Event()
+    second_saw_interruption = False
     generation_count = 0
 
     async def stream(session, _pcm):
-        nonlocal generation_count
+        nonlocal generation_count, second_saw_interruption
         generation_count += 1
         current = generation_count
         session.transition(SessionState.PROCESSING)
@@ -479,6 +480,7 @@ async def test_real_pjsip_barge_in_finalizes_old_producer_and_starts_clean(setti
                 first_finalized.set()
             session.history.append({"role": "assistant", "content": "late-old"})
             return
+        second_saw_interruption = getattr(session, "previous_response_interrupted", False)
         second_started.set()
         for _ in range(15):
             yield b"\x22\x00" * 320
@@ -521,6 +523,7 @@ async def test_real_pjsip_barge_in_finalizes_old_producer_and_starts_clean(setti
         {"role": "user", "content": "user-2"},
         {"role": "assistant", "content": "new"},
     ]
+    assert second_saw_interruption is True
     await manager.stop_call("1")
 
 

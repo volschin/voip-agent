@@ -23,6 +23,20 @@ ENV MAX_JOBS=4 \
 RUN pip install --no-cache-dir --break-system-packages --no-build-isolation \
       --require-hashes -r /tmp/requirements-arm64.lock
 
+# faster-qwen3-tts 0.2.6 has no cancellation hook in its stable decode loop.
+# Apply a fail-closed, version-bound patch so barge-in can stop between codec
+# steps instead of leaving the exclusive model lock held until full completion.
+COPY tts/faster-qwen3-tts-0.2.6-cooperative-cancel.patch /tmp/
+COPY tts/verify_cooperative_cancel_patch.py /tmp/
+RUN package_root="$(python3 -c \
+      'from pathlib import Path; import faster_qwen3_tts; print(Path(faster_qwen3_tts.__file__).resolve().parent.parent)')" \
+ && cd "$package_root" \
+ && patch --batch --forward --fuzz=0 -p1 \
+      < /tmp/faster-qwen3-tts-0.2.6-cooperative-cancel.patch \
+ && python3 /tmp/verify_cooperative_cancel_patch.py \
+ && rm /tmp/faster-qwen3-tts-0.2.6-cooperative-cancel.patch \
+      /tmp/verify_cooperative_cancel_patch.py
+
 WORKDIR /app
 COPY tts/server.py /app/dgx/tts/server.py
 COPY tts/runtime.py /app/dgx/tts/runtime.py

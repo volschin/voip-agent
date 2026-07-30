@@ -34,6 +34,7 @@ class CallSession:
     history: list[dict]
     created_at: datetime
     state: SessionState = SessionState.ANSWER
+    previous_response_interrupted: bool = False
 
     def transition(self, new_state: SessionState) -> None:
         if new_state == SessionState.ENDED:

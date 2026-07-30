@@ -433,11 +433,17 @@ class ConversationManager:
         async with lock:
             if session.state not in self._INTERRUPTIBLE_STATES:
                 return
+            interrupted_response = session.state in (
+                SessionState.SPEAKING,
+                SessionState.PROCESSING,
+            )
             generation = self._generation.get(call_id, 0) + 1
             self._generation[call_id] = generation
 
             task = self._playback_tasks.pop(call_id, None)
             if task and not task.done():
+                if interrupted_response:
+                    session.previous_response_interrupted = True
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             sink = self._sinks.get(call_id)

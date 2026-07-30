@@ -64,8 +64,10 @@ tests/            # pytest, asyncio_mode=auto, respx for HTTP mocking
   production responses. The legacy ARI/RTP adapter alone converts output to 8 kHz A-law.
 - **Barge-in:** Detected during `{LISTENING, SPEAKING, PROCESSING}`. Under the per-call lock,
   `ConversationManager` advances the generation, cancels the current playback task, clears the
-  sink, and dispatches the replacement turn. Late output from a cancelled stable TTS call is
-  discarded by the stale-generation guard.
+  sink, and dispatches the replacement turn. Stable TTS checks cancellation between codec steps
+  and releases its exclusive model lock; the stale-generation guard still discards any late
+  output at the agent boundary. The cancelled assistant turn is not persisted; a session flag
+  injects one transient system context into the next LLM request and is then cleared.
 - **Turn detection (Smart Turn v3, on by default):** When `turn_detection_enabled` (default **True**) and a `TurnDetector` is injected (`_turn_active()`), the LISTENING turn-end runs a lowered VAD floor (`turn_vad_silence_ms`, default 200 ms) via `VadBuffer.add_frame_candidate` (returns a candidate **without** resetting) and confirms with a classify call in `_gate_turn_end`. `complete` (or hard cap `at_cap`, or candidate < `_MIN_CLASSIFY_SAMPLES`, or a classify error → **degrade**) flushes and dispatches; `incomplete` calls `continue_speech()` and keeps listening (bounded by `max_speech_ms`). Barge-in is **unchanged**: SPEAKING/PROCESSING use a separate `_bargein_buffers` VadBuffer at the legacy 800 ms floor. Flag off → single VadBuffer at 800 ms for every state (legacy path verbatim). `classify` runs **before** the turn lock; if state leaves LISTENING during the await, the verdict is discarded. The detector is **in-process**: an 8 MB Smart Turn v3 ONNX model (Whisper-Tiny encoder) downloaded once on enable (revision-pinned), run via `onnxruntime` in `asyncio.to_thread` with `inter_op_num_threads=1` so it never starves RTP pacing; Whisper log-mel features via `transformers.WhisperFeatureExtractor`. Constructed only when enabled (else `None`).
 - **Greeting:** Playback is asynchronous after the priority lease and stable whole-WAV synthesis
   succeed, so the PJSIP event loop remains responsive.
