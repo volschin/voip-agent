@@ -35,6 +35,8 @@ agent/
   pipeline.py     # VoicePipeline: stable sentence synthesis to 16 kHz PCM
   conversation.py # Transport-neutral VAD, turn, playback, and barge-in lifecycle
   pjsip.py        # Production direct FRITZ!Box PJSUA2 transport
+  answer_policy.py # DelayedAnswerService: delayed answer, max duration, caller-ID logging
+  pjsip_poc.py    # Signalling-only PJSUA2 diagnostic (compose.pjsip-poc.yml)
   rtp.py          # Legacy ARI rollback RTP helpers
   ari.py          # Legacy Asterisk rollback adapter
   main.py         # Entry point: wire everything, asyncio.run(main())

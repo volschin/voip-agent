@@ -55,7 +55,7 @@ RUN python -m pip install --no-cache-dir /tmp/*.whl \
     && python -c "import pjsua2; print('pjsua2 import OK')"
 
 WORKDIR /app
-COPY --chown=voip-agent:voip-agent agent/__init__.py agent/pjsip_poc.py /app/agent/
+COPY --chown=voip-agent:voip-agent agent/__init__.py agent/answer_policy.py agent/pjsip_poc.py /app/agent/
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1

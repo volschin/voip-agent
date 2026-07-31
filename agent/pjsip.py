@@ -5,26 +5,18 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
-import re
 import threading
 from collections import deque
 from contextlib import suppress
 
+from agent.answer_policy import DelayedAnswerService, caller_id_from_uri
 from agent.audio import PCM16_PLAYBACK_BLOCK_BYTES
 from agent.config import Settings
 from agent.conversation import ConversationManager
-from agent.pjsip_poc import DelayedAnswerService
 
 log = logging.getLogger(__name__)
 
-_CALLER_URI = re.compile(r"sip:([^@;>]+)", re.IGNORECASE)
-
-
-def caller_id_from_uri(remote_uri: str) -> str:
-    """Extract the SIP user while keeping the raw URI out of application logs."""
-
-    match = _CALLER_URI.search(remote_uri)
-    return match.group(1) if match else ""
+__all__ = ["PcmPlaybackBuffer", "PjsipAudioSink", "PjsipClient", "caller_id_from_uri"]
 
 
 class PcmPlaybackBuffer:
@@ -385,11 +377,7 @@ class PjsipClient:
                 self.calls[parameter.callId] = call
                 try:
                     call.caller_id = caller_id_from_uri(call.getInfo().remoteUri)
-                    client._answer_policy.offer(
-                        parameter.callId,
-                        call.caller_id or "unknown",
-                        call,
-                    )
+                    client._answer_policy.offer(parameter.callId, call.caller_id, call)
                 except Exception:
                     log.exception("Failed to process incoming call %s", parameter.callId)
                     with suppress(Exception):
