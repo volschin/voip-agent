@@ -9,6 +9,32 @@ service are also complete; production response playback now uses stable
 whole-WAV sentence synthesis, while the raw codec stream remains available
 only for diagnostics. Numbering matches the original review.
 
+## Live findings (open)
+
+Observed on a real FRITZ!Box call on 2026-07-31, 18:27 UTC (caller `**613`,
+internal handset). The call itself completed normally; one response turn was
+lost silently.
+
+- [ ] **TTS 503 drops a response turn without recovery.** `/v1/audio/speech`
+  returned `503 Service Unavailable` mid-conversation; `TtsClient.synthesize`
+  raised through `raise_for_status`, `VoicePipeline.synthesize_pcm16` logged
+  `TTS failed for text: 'Das tut mir leid, das war nicht meine Absicht.'`, and
+  `process_turn_stream` aborted with `RuntimeError: TTS returned no audio`.
+  The caller heard nothing for that turn and got no spoken error. The next
+  `/v1/audio/speech` call 3 s later returned 200, so the outage was brief and
+  a bounded retry (or a pre-synthesized fallback line) would have saved the
+  turn. `agent/tts.py:37`, `agent/pipeline.py:68`, `agent/pipeline.py:189`.
+- [ ] **Root-cause the server-side 503.** Determine why the DGX
+  `/v1/audio/speech` route rejects a request under conversational load —
+  exclusive model lock contention, worker restart, or Traefik-level shedding.
+  The agent-side retry above treats the symptom; this is the cause. Decide
+  from the finding whether the retry needs a backoff longer than one turn.
+- [ ] **Confirm the caller ID format for external calls.** Lifecycle logging in
+  `agent/answer_policy.py` is live-verified only for an internal FRITZ!Box
+  extension (`**613`). Verify what a call over the public number yields — a
+  full `+49…` number or `unknown` — before relying on these logs to identify
+  callers or to cross-check `TRUSTED_CALLERS`.
+
 ## Real-time correctness (highest value for call quality)
 
 - [x] **#3 Streaming pipeline.** LLM streams tokens → German-aware
