@@ -28,6 +28,50 @@ def caller_id_from_uri(remote_uri: str) -> str:
     return match.group(1) if match else ""
 
 
+# Separators an operator may paste from a contact card. Stripped before the
+# number is classified; they carry no dialling meaning.
+_SEPARATORS = re.compile(r"[\s\-/().]")
+# German-only agent, and the trunk is a German FRITZ!Box, so the national prefix
+# `0` can only mean +49. Do not generalise this without knowing the trunk's
+# country: mapping `0` to the wrong country code would silently authorize a
+# different subscriber.
+_COUNTRY_CODE = "+49"
+
+
+def normalize_caller_id(caller: str) -> str:
+    """Map one phone number onto a single comparison key.
+
+    The FRITZ!Box delivers external callers in national format
+    (``015100000001``) while operators naturally write E.164
+    (``+4915100000001``) in ``TRUSTED_CALLERS``; an exact string match failed
+    closed with nothing to indicate why. Both sides run through this function
+    so the two spellings meet.
+
+    Only unambiguous dialling-plan transforms are applied. Anything that is not
+    a plain number after separator removal — internal extensions (``**613``),
+    a withheld CLI (``anonymous``) — is returned stripped but otherwise
+    untouched, so it stays an exact match and cannot collide with a real
+    number. This is an authorization boundary: widening it is a security bug.
+    """
+
+    stripped = _SEPARATORS.sub("", caller.strip())
+    if not stripped:
+        return ""
+    if stripped.startswith("+"):
+        rest = stripped[1:]
+        return stripped if rest.isdigit() else caller.strip()
+    if not stripped.isdigit():
+        # Extensions and non-numeric CLI: exact-match domain.
+        return caller.strip()
+    if stripped.startswith("00"):
+        return "+" + stripped[2:]
+    if stripped.startswith("0"):
+        return _COUNTRY_CODE + stripped[1:]
+    # Bare digits with no trunk or country prefix carry no country context
+    # (a short code, or an extension). Leave them alone rather than guessing.
+    return stripped
+
+
 class CallActions(Protocol):
     """Small boundary between the testable policy and native PJSUA2 calls."""
 

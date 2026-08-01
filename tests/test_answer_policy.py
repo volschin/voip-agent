@@ -1,6 +1,49 @@
 import logging
 
-from agent.answer_policy import DelayedAnswerService, caller_id_from_uri
+import pytest
+
+from agent.answer_policy import (
+    DelayedAnswerService,
+    caller_id_from_uri,
+    normalize_caller_id,
+)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # The live mismatch: the FRITZ!Box sends national format, operators
+        # write E.164 in the allowlist. Both must land on one key.
+        ("015100000001", "+4915100000001"),
+        ("+4915100000001", "+4915100000001"),
+        ("004915100000001", "+4915100000001"),
+        # Separators operators paste from a contact card.
+        ("0151 0000 0001", "+4915100000001"),
+        ("+49 151 0000-0001", "+4915100000001"),
+        ("(0151)/00000001", "+4915100000001"),
+        # Internal FRITZ!Box extensions have no E.164 form: exact match only.
+        ("**613", "**613"),
+        ("613", "613"),
+        # Non-numeric CLI (withheld number) stays as-is; it must never collide
+        # with a real entry.
+        ("anonymous", "anonymous"),
+        ("", ""),
+        ("   ", ""),
+    ],
+)
+def test_normalize_caller_id(raw, expected):
+    assert normalize_caller_id(raw) == expected
+
+
+def test_normalize_caller_id_is_idempotent():
+    once = normalize_caller_id("0151 0000 0001")
+    assert normalize_caller_id(once) == once
+
+
+def test_normalize_caller_id_keeps_distinct_numbers_distinct():
+    assert normalize_caller_id("015100000001") != normalize_caller_id("015100000002")
+    # A national number must not collide with the bare subscriber digits.
+    assert normalize_caller_id("015100000001") != normalize_caller_id("15100000001")
 
 
 class FakeCall:
