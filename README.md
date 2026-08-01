@@ -77,7 +77,7 @@ cutover.
 
 Under **Telephony → Telephony Devices**, create a **LAN/Wi-Fi (IP telephone)**. Assign the
 normal incoming number so the handsets and agent ring in parallel. Put its exact username and
-password into `.env.pjsip-poc`; this is a local registration, not an external SIP forwarding
+password into `.env`; this is a local registration, not an external SIP forwarding
 target.
 
 ### 3. NUC — pgvector schema
@@ -96,8 +96,8 @@ CREATE TABLE IF NOT EXISTS documents (
 ```bash
 git clone <repo> voip-agent && cd voip-agent
 cp .env.example .env
-cp .env.pjsip-poc.example .env.pjsip-poc
-# Fill AI/integration values in .env and FRITZ!Box credentials in .env.pjsip-poc.
+# Fill AI/integration values and FRITZ!Box credentials in .env — production
+# reads this one file. .env.pjsip-poc is only for compose.pjsip-poc.yml.
 
 install -d -m 0700 /home/volsch/voip-agent/secrets
 # Install these three files out of band, owned by UID/GID 10001 and mode 0400:

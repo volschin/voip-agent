@@ -2,7 +2,9 @@
 
 This module deliberately stops at SIP signalling. It registers as a FRITZ!Box
 IP telephone, lets the regular phones ring, and accepts an unanswered call
-after a configurable delay. Audio/OpenAI integration is the next milestone.
+after a configurable delay. It exists only as a signalling diagnostic; the
+production transport is ``agent.pjsip``. Both share the answer policy in
+``agent.answer_policy``.
 """
 
 from __future__ import annotations
@@ -11,10 +13,9 @@ import importlib
 import logging
 import os
 import signal
-import time
 from dataclasses import dataclass
-from enum import Enum
-from typing import Callable, Protocol
+
+from agent.answer_policy import DelayedAnswerService, caller_id_from_uri
 
 logger = logging.getLogger(__name__)
 
@@ -95,130 +96,6 @@ class PjsipPocSettings:
     @property
     def identity_uri(self) -> str:
         return f"sip:{self.sip_username}@{self.fritzbox_host}"
-
-
-class CallActions(Protocol):
-    """Small boundary between the testable policy and native PJSUA2 calls."""
-
-    def signal_ringing(self) -> None: ...
-
-    def accept(self) -> None: ...
-
-    def reject_busy(self) -> None: ...
-
-    def terminate(self) -> None: ...
-
-
-class PendingState(Enum):
-    WAITING = "waiting"
-    ANSWERING = "answering"
-    ACTIVE = "active"
-
-
-@dataclass(slots=True)
-class PendingCall:
-    call_id: int
-    caller: str
-    actions: CallActions
-    answer_at: float
-    state: PendingState = PendingState.WAITING
-    active_at: float | None = None
-
-
-class DelayedAnswerService:
-    """Apply delayed-answer and maximum-duration policy to incoming calls."""
-
-    def __init__(
-        self,
-        *,
-        answer_delay_seconds: float,
-        max_call_seconds: float,
-        max_concurrent_calls: int = 1,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._answer_delay = answer_delay_seconds
-        self._max_call_seconds = max_call_seconds
-        self._max_concurrent_calls = max_concurrent_calls
-        self._clock = clock
-        self._calls: dict[int, PendingCall] = {}
-
-    @property
-    def call_count(self) -> int:
-        return len(self._calls)
-
-    def offer(self, call_id: int, caller: str, actions: CallActions) -> bool:
-        if call_id in self._calls:
-            raise ValueError(f"call {call_id} is already tracked")
-        if len(self._calls) >= self._max_concurrent_calls:
-            logger.warning("Rejecting call %s: capacity reached", call_id)
-            actions.reject_busy()
-            return False
-
-        now = self._clock()
-        actions.signal_ringing()
-        self._calls[call_id] = PendingCall(
-            call_id=call_id,
-            caller=caller,
-            actions=actions,
-            answer_at=now + self._answer_delay,
-        )
-        logger.info(
-            "Call %s waiting %.1f seconds before answer",
-            call_id,
-            self._answer_delay,
-        )
-        return True
-
-    def disconnected(self, call_id: int, status_code: int, reason: str) -> None:
-        pending = self._calls.pop(call_id, None)
-        if pending is None:
-            return
-        if pending.state is PendingState.WAITING:
-            logger.info(
-                "Call %s cancelled before agent answer (status=%s %s)",
-                call_id,
-                status_code,
-                reason,
-            )
-        else:
-            logger.info("Call %s ended (status=%s %s)", call_id, status_code, reason)
-
-    def tick(self) -> None:
-        now = self._clock()
-        for call_id, pending in list(self._calls.items()):
-            if pending.state is PendingState.WAITING and now >= pending.answer_at:
-                pending.state = PendingState.ANSWERING
-                try:
-                    pending.actions.accept()
-                except Exception:
-                    self._calls.pop(call_id, None)
-                    logger.exception("Failed to answer call %s", call_id)
-                    continue
-                if self._calls.get(call_id) is pending:
-                    pending.state = PendingState.ACTIVE
-                    pending.active_at = now
-                    logger.info("Call %s answered by PoC agent", call_id)
-                continue
-
-            if (
-                pending.state is PendingState.ACTIVE
-                and pending.active_at is not None
-                and now - pending.active_at >= self._max_call_seconds
-            ):
-                logger.info("Call %s reached PoC duration limit; hanging up", call_id)
-                try:
-                    pending.actions.terminate()
-                except Exception:
-                    logger.exception("Failed to terminate expired call %s", call_id)
-                self._calls.pop(call_id, None)
-
-    def terminate_all(self) -> None:
-        for pending in list(self._calls.values()):
-            try:
-                pending.actions.terminate()
-            except Exception:
-                logger.exception("Failed to terminate call %s during shutdown", pending.call_id)
-        self._calls.clear()
 
 
 class PjsipPhone:
@@ -318,7 +195,7 @@ class PjsipPhone:
                 call = PocCall(self, prm.callId)
                 self.calls[prm.callId] = call
                 try:
-                    caller = call.getInfo().remoteUri
+                    caller = caller_id_from_uri(call.getInfo().remoteUri)
                     phone._service.offer(prm.callId, caller, call)
                 except Exception:
                     logger.exception("Failed to process incoming call %s", prm.callId)

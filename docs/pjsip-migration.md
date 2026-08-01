@@ -30,8 +30,9 @@ PCM to 8 kHz G.711 A-law at its transport boundary.
 
 ## Deployment
 
-Keep AI and integration settings in `.env` and the dedicated IP-telephone secret in
-`.env.pjsip-poc`. Both files are ignored by Git.
+Keep AI settings, integration settings, and the dedicated IP-telephone secret together in
+`.env` — the production compose file reads no other env file. `.env.pjsip-poc` is scoped to
+the signalling-only `compose.pjsip-poc.yml`. Both files are ignored by Git.
 
 ```bash
 docker compose -f compose.pjsip-poc.yml down
@@ -56,4 +57,12 @@ file and must not be group/world writable.
 - Hangup releases the conversation and accepts a subsequent call.
 
 Use `PJSIP_LOG_LEVEL=2` in normal operation. Higher levels are intended only for
-short-lived SIP diagnostics because SIP and media details can contain caller numbers.
+short-lived SIP diagnostics because raw SIP and media details can contain caller
+numbers and headers beyond the number itself.
+
+`agent.answer_policy` deliberately logs the caller number at INFO for every
+lifecycle step — offer, answer, duration limit, cancel, and hangup — so a call
+can be traced end to end. Only the SIP user extracted by `caller_id_from_uri`
+is recorded, never the raw `remoteUri`; an unavailable number logs as
+`unknown`. Application logs therefore contain caller numbers regardless of
+`PJSIP_LOG_LEVEL`; retain and ship them accordingly.
