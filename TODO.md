@@ -15,15 +15,19 @@ Observed on a real FRITZ!Box call on 2026-07-31, 18:27 UTC (caller `**613`,
 internal handset). The call itself completed normally; one response turn was
 lost silently.
 
-- [ ] **TTS 503 drops a response turn without recovery.** `/v1/audio/speech`
+- [x] **TTS 503 drops a response turn without recovery.** `/v1/audio/speech`
   returned `503 Service Unavailable` mid-conversation; `TtsClient.synthesize`
   raised through `raise_for_status`, `VoicePipeline.synthesize_pcm16` logged
   `TTS failed for text: 'Das tut mir leid, das war nicht meine Absicht.'`, and
   `process_turn_stream` aborted with `RuntimeError: TTS returned no audio`.
   The caller heard nothing for that turn and got no spoken error. The next
-  `/v1/audio/speech` call 3 s later returned 200, so the outage was brief and
-  a bounded retry (or a pre-synthesized fallback line) would have saved the
-  turn. `agent/tts.py:37`, `agent/pipeline.py:68`, `agent/pipeline.py:189`.
+  `/v1/audio/speech` call 3 s later returned 200, so the outage was brief.
+  Fixed: `TtsClient.synthesize` now retries the transient classes
+  (`RETRY_STATUS` = 502/503/504, plus `httpx.TransportError`) on the
+  `RETRY_BACKOFF_S` schedule (0.3 s, 0.9 s — 3 attempts, ≤1.2 s added worst
+  case) and logs each retry at WARNING so recovered outages stay visible. A
+  4xx or the request-body 500 is not retried. The backoff sleeps are
+  cancellation points, so barge-in still cuts a retrying turn.
 - [ ] **Root-cause the server-side 503.** Determine why the DGX
   `/v1/audio/speech` route rejects a request under conversational load —
   exclusive model lock contention, worker restart, or Traefik-level shedding.
