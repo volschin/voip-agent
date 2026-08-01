@@ -286,6 +286,63 @@ def test_synthesis_admission_timeout_recovers_for_following_request(tmp_path: Pa
     assert model.generated_texts == ["active", "following"]
 
 
+def test_synthesize_signals_admission_before_generation(tmp_path: Path) -> None:
+    # The request path stops enforcing the admission deadline once this event
+    # is set, so it must be set only after the model lock is held and never
+    # before generation starts.
+    profile = _profile(tmp_path)
+    admitted = threading.Event()
+    admitted_at_generation: bool | None = None
+
+    class SignalCheckingModel(ExactCloneModel):
+        def generate_voice_clone(self, **kwargs):
+            nonlocal admitted_at_generation
+            admitted_at_generation = admitted.is_set()
+            return self.warm_audio, self.sample_rate
+
+    model = SignalCheckingModel(profile)
+    runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+
+    runtime.synthesize("hallo", profile.profile_id, "de", admitted=admitted)
+
+    assert admitted_at_generation is True
+    assert admitted.is_set()
+
+
+def test_admission_timeout_leaves_admission_unsignalled(tmp_path: Path) -> None:
+    profile = _profile(tmp_path)
+    admitted = threading.Event()
+    active_started = threading.Event()
+    release_active = threading.Event()
+
+    class BlockingSynthesisModel(ExactCloneModel):
+        def generate_voice_clone(self, **kwargs):
+            if kwargs["text"] == "active":
+                active_started.set()
+                release_active.wait(timeout=2)
+            return self.warm_audio, self.sample_rate
+
+    model = BlockingSynthesisModel(profile)
+    runtime = CloneRuntime(model, {profile.profile_id: profile}, profile.profile_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        active = executor.submit(runtime.synthesize, "active", profile.profile_id, "de")
+        assert active_started.wait(timeout=1)
+        timed_out = executor.submit(
+            runtime.synthesize,
+            "timed-out",
+            profile.profile_id,
+            "de",
+            lock_timeout=0.05,
+            admitted=admitted,
+        )
+        with pytest.raises(SynthesisAdmissionTimeout):
+            timed_out.result(timeout=1)
+        assert not admitted.is_set()
+        release_active.set()
+        active.result(timeout=1)
+
+
 def test_clone_runtime_holds_lock_for_complete_stream_lifetime(tmp_path: Path) -> None:
     profile = _profile(tmp_path)
     first_chunk = threading.Event()

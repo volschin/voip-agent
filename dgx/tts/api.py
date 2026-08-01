@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from threading import Event, Lock
@@ -21,7 +21,25 @@ from dgx.tts.clone_runtime import SynthesisAdmissionTimeout
 from dgx.tts.profiles import ProfileError
 
 MAX_SPEECH_INPUT_CHARACTERS = 2_000
+# Budget for *admission* only — executor queue time plus the wait for the
+# exclusive model lock. Generation itself is not bounded by it; see
+# _run_stable_synthesis.
 DEFAULT_SYNTHESIS_ADMISSION_TIMEOUT_SECONDS = 5.0
+SYNTHESIS_ADMISSION_TIMEOUT_ENV = "SYNTHESIS_ADMISSION_TIMEOUT_SECONDS"
+
+
+def admission_timeout_from_env(environ: Mapping[str, str]) -> float:
+    """Read the admission budget from the environment, falling back to default.
+
+    Deliberately forgiving: a malformed or non-positive value falls back rather
+    than refusing to start, because a TTS outage takes every call down with it.
+    """
+
+    try:
+        value = float(environ.get(SYNTHESIS_ADMISSION_TIMEOUT_ENV, ""))
+    except ValueError:
+        return DEFAULT_SYNTHESIS_ADMISSION_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_SYNTHESIS_ADMISSION_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -133,6 +151,12 @@ async def _run_stable_synthesis(
 ) -> tuple[list[Any], int]:
     deadline = monotonic() + admission_timeout_seconds
     cancelled = Event()
+    # Set by the runtime once it holds the model lock. The deadline bounds
+    # admission only — time spent queued in the executor or waiting for the
+    # lock, where the caller may already be gone. Enforcing it past admission
+    # killed in-flight generation and reported it as a 503, losing a whole
+    # response turn whenever the shared GPU made a sentence run long.
+    admitted = Event()
     operation = asyncio.create_task(
         asyncio.to_thread(
             runtime.synthesize,
@@ -142,21 +166,22 @@ async def _run_stable_synthesis(
             cancel_event=cancelled,
             lock_timeout=admission_timeout_seconds,
             admission_deadline=deadline,
+            admitted=admitted,
         )
     )
     try:
         while True:
             remaining = deadline - monotonic()
-            if remaining <= 0:
+            if remaining <= 0 and not admitted.is_set():
                 await _cancel_stable_operation(operation, cancelled)
                 raise SynthesisAdmissionTimeout()
             done, _pending = await asyncio.wait(
                 {operation},
-                timeout=min(0.025, remaining),
+                timeout=0.025 if admitted.is_set() else min(0.025, remaining),
             )
             if operation in done:
                 result = operation.result()
-                if monotonic() >= deadline:
+                if monotonic() >= deadline and not admitted.is_set():
                     await _cancel_stable_operation(operation, cancelled)
                     raise SynthesisAdmissionTimeout()
                 return result

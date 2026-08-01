@@ -18,12 +18,14 @@ import numpy as np
 import pytest
 
 from dgx.tts.api import (
+    DEFAULT_SYNTHESIS_ADMISSION_TIMEOUT_SECONDS,
     MAX_SPEECH_INPUT_CHARACTERS,
     HealthMetadata,
     SpeechRequest,
     _cancel_stable_operation,
     _ClientDisconnected,
     _run_stable_synthesis,
+    admission_timeout_from_env,
     create_app,
     encode_pcm_stream,
 )
@@ -511,7 +513,122 @@ async def test_stable_absolute_deadline_prevents_late_executor_model_start() -> 
         executor.shutdown(wait=True)
 
 
-async def test_stable_absolute_deadline_rejects_late_success() -> None:
+def test_admission_timeout_from_env_defaults_when_unset_or_invalid() -> None:
+    assert admission_timeout_from_env({}) == DEFAULT_SYNTHESIS_ADMISSION_TIMEOUT_SECONDS
+    for bad in ("", "abc", "0", "-1"):
+        assert (
+            admission_timeout_from_env({"SYNTHESIS_ADMISSION_TIMEOUT_SECONDS": bad})
+            == DEFAULT_SYNTHESIS_ADMISSION_TIMEOUT_SECONDS
+        )
+
+
+def test_admission_timeout_from_env_reads_positive_override() -> None:
+    assert admission_timeout_from_env({"SYNTHESIS_ADMISSION_TIMEOUT_SECONDS": "12.5"}) == 12.5
+
+
+async def test_admitted_synthesis_outlives_the_admission_deadline() -> None:
+    """Generation slower than the admission budget must still be delivered.
+
+    The live 503 came from here: the deadline bounds *admission*, but it was
+    enforced over the whole request, so a sentence whose generation ran long
+    (a busy shared GPU) was killed mid-flight and reported as an admission
+    timeout. Once the worker holds the model lock, only client disconnect and
+    the client's own HTTP timeout may end the request.
+    """
+
+    class AdmittedSlowRuntime(_StableRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.finished = threading.Event()
+            self.cancel_event: threading.Event | None = None
+            self.completed_after_deadline: bool | None = None
+
+        def synthesize(
+            self,
+            text: str,
+            _voice: str | None,
+            _language: str | None,
+            *,
+            cancel_event: threading.Event,
+            **_admission: Any,
+        ) -> tuple[list[np.ndarray], int]:
+            deadline = _admission["admission_deadline"]
+            # The real CloneRuntime signals this once it holds the model lock.
+            _admission["admitted"].set()
+            self.calls.append(text)
+            self.cancel_event = cancel_event
+            self.started.set()
+            try:
+                self.release.wait(timeout=2)
+                self.completed_after_deadline = time.monotonic() >= deadline
+                return [np.array([0.25], dtype=np.float32)], 24_000
+            finally:
+                self.finished.set()
+
+    runtime = AdmittedSlowRuntime()
+    operation = asyncio.create_task(
+        _run_stable_synthesis(
+            runtime,
+            SpeechRequest(input="slow-but-admitted"),
+            _DisconnectRequest(),
+            0.10,
+        )
+    )
+    timer: threading.Timer | None = None
+    try:
+        await _wait_for_thread_event(runtime.started)
+        timer = threading.Timer(0.12, runtime.release.set)
+        timer.start()
+
+        audios, sample_rate = await operation
+
+        assert runtime.completed_after_deadline is True
+        assert sample_rate == 24_000
+        assert np.asarray(audios[0]).size == 1
+        assert runtime.cancel_event is not None
+        assert not runtime.cancel_event.is_set()
+    finally:
+        runtime.release.set()
+        if timer is not None:
+            timer.cancel()
+        if not operation.done():
+            operation.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await operation
+        await _wait_for_thread_event(runtime.finished)
+
+
+async def test_slow_generation_returns_audio_not_503() -> None:
+    """End-to-end counterpart: the route must not turn slow audio into a 503."""
+
+    class SlowAdmittedRuntime(FakeRuntime):
+        def synthesize(
+            self,
+            text: str,
+            voice: str | None,
+            language: str | None,
+            **admission,
+        ):
+            admission["admitted"].set()
+            time.sleep(0.15)  # generation outlasts the 0.05 s admission budget
+            return [np.array([0.0, 0.5, -0.5], dtype=np.float32)], 24_000
+
+    app = create_app(SlowAdmittedRuntime(), _health(), synthesis_admission_timeout_seconds=0.05)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post("/v1/audio/speech", json={"input": "langsam"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/wav"
+
+
+async def test_stable_absolute_deadline_rejects_never_admitted_late_success() -> None:
+    # A worker that never signals admission is still bounded by the deadline:
+    # it may be stuck in the executor queue with the caller long gone, so a
+    # result that arrives late is discarded and the model is cancelled.
     class LateSuccessRuntime(_StableRuntime):
         def __init__(self) -> None:
             super().__init__()

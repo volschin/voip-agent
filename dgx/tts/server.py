@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from dgx.tts.api import HealthMetadata, create_app
+from dgx.tts.api import HealthMetadata, admission_timeout_from_env, create_app
 from dgx.tts.clone_runtime import CloneRuntime
 from dgx.tts.profiles import load_profiles
 from dgx.tts.runtime import require_gb10_cuda
@@ -54,7 +54,8 @@ def _build_app():
     )
     return create_app(
         runtime,
-        HealthMetadata(
+        synthesis_admission_timeout_seconds=admission_timeout_from_env(os.environ),
+        health=HealthMetadata(
             model_revision=MODEL_REVISION,
             default_profile=DEFAULT_PROFILE,
             profiles_loaded=tuple(sorted(profiles)),
