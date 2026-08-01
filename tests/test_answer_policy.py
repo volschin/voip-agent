@@ -141,10 +141,9 @@ def test_cancelled_call_logs_caller_id(caplog):
         service.offer(1, "+4930123", call)
         service.disconnected(1, 487, "Request Terminated")
 
-    assert (
-        "Call 1 from +4930123 cancelled before agent answer (status=487 Request Terminated)"
-        in [record.getMessage() for record in caplog.records]
-    )
+    assert "Call 1 from +4930123 cancelled before agent answer (status=487 Request Terminated)" in [
+        record.getMessage() for record in caplog.records
+    ]
 
 
 def test_missing_caller_id_falls_back_to_unknown(caplog):
