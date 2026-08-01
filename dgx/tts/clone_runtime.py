@@ -58,12 +58,18 @@ class CloneRuntime:
         cancel_event: Event | None = None,
         lock_timeout: float | None = None,
         admission_deadline: float | None = None,
+        admitted: Event | None = None,
     ) -> tuple[list[Any], int]:
         profile = resolve_profile(voice, self._profiles, self._default_profile_id)
         deadline = self._acquire_synthesis(cancel_event, lock_timeout, admission_deadline)
         try:
             if deadline is not None and monotonic() >= deadline:
                 raise SynthesisAdmissionTimeout()
+            # Admission is complete: the model lock is held and generation is
+            # about to start. The caller stops enforcing the admission deadline
+            # from here, so this must never be signalled earlier.
+            if admitted is not None:
+                admitted.set()
             try:
                 return self._model.generate_voice_clone(
                     text=text,

@@ -28,11 +28,53 @@ lost silently.
   case) and logs each retry at WARNING so recovered outages stay visible. A
   4xx or the request-body 500 is not retried. The backoff sleeps are
   cancellation points, so barge-in still cuts a retrying turn.
-- [ ] **Root-cause the server-side 503.** Determine why the DGX
-  `/v1/audio/speech` route rejects a request under conversational load —
-  exclusive model lock contention, worker restart, or Traefik-level shedding.
-  The agent-side retry above treats the symptom; this is the cause. Decide
-  from the finding whether the retry needs a backoff longer than one turn.
+- [x] **Root-caused the server-side 503 (2026-08-01).** Not lock contention,
+  not a worker restart, not Traefik shedding — all three are ruled out by the
+  evidence below. The request path applies the *admission* budget to the
+  *whole* request, so a synthesis that generates too slowly is killed
+  mid-flight and reported as an admission timeout.
+
+  Mechanism, in `dgx/tts/api.py::_run_stable_synthesis`: `deadline` is set at
+  request entry (`monotonic() + DEFAULT_SYNTHESIS_ADMISSION_TIMEOUT_SECONDS`,
+  **5.0 s**, `api.py:24`) and then enforced over the entire request. Line 150
+  raises `SynthesisAdmissionTimeout` once the deadline passes even though the
+  worker thread already holds the model lock and is actively generating, and
+  lines 159–161 discard a *successfully completed* result if it landed after
+  the deadline. `api.py:99` maps that to `503 "synthesis admission timed out"`.
+  The name says admission; the semantics are "total request must finish in
+  5 s". `create_app` is called without the argument (`server.py:55`), so the
+  5 s is effectively hardcoded — there is no env knob to widen it.
+
+  Evidence (DGX `gx10-d624`, all timestamps UTC):
+  - `qwen3-tts` access log: `18:28:54 200`, `18:29:08 503`, `18:29:11 200`.
+    Requests are serialized ~14 s apart, so the agent had nothing else in
+    flight; no `499` was logged between them, so the model lock was free and
+    admission was instant. The 5 s therefore elapsed inside generation.
+  - The 503 was logged by uvicorn (the app), and `proxy-traefik-1` logged zero
+    503s in the hour — so it is not proxy-level shedding.
+  - No ERROR, traceback, or restart in the container log; the container has
+    been `Up (healthy)` throughout — so it is not a worker restart.
+  - Measured idle latency inside the container (bypassing Traefik):
+    `"Ja."` 0.3–0.5 s, the sentence that failed 1.5–1.7 s, a long sentence
+    2.9–3.5 s. A normal long sentence already consumes ~70 % of the budget
+    when the GPU is otherwise idle.
+  - Contention at the moment of failure: the request started ~18:29:03.8
+    (5 s before the logged 503) while the shared GPU was busy — vLLM
+    `companion-llm` reported `Running: 1` with generation throughput at
+    18:29:05, and `qwen3-asr` had transcribed at 18:29:01.7. A ~3.3x slowdown
+    on a 1.5 s sentence is enough to cross 5 s.
+
+- [ ] **Fix the TTS admission budget (server side, `dgx/tts/`).** Separate
+  admission from execution: have `clone_runtime.synthesize` set an `admitted`
+  event once `_acquire_synthesis` returns, enforce the deadline in
+  `_run_stable_synthesis` only while `not admitted.is_set()`, and delete the
+  post-completion deadline check that throws away good audio. After admission
+  the request should be bounded by client disconnect (already detected) and
+  the client's own 30 s HTTP timeout. Make the timeout env-configurable while
+  there. Needs a GPU image rebuild + redeploy on the DGX.
+  The agent-side retry (above) already masks this: the live 503 was followed
+  by a 200 three seconds later, which is exactly what the retry now does
+  automatically. Backoff does **not** need to be longer than one turn.
 - [x] **Caller ID format confirmed live.** Lifecycle logging in
   `agent/answer_policy.py` is verified for both an internal FRITZ!Box extension
   (`**613`, 18:27 UTC) and an external mobile call (`015100000001`, 18:33 UTC).
