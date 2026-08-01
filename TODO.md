@@ -35,15 +35,17 @@ lost silently.
   from the finding whether the retry needs a backoff longer than one turn.
 - [x] **Caller ID format confirmed live.** Lifecycle logging in
   `agent/answer_policy.py` is verified for both an internal FRITZ!Box extension
-  (`**613`, 18:27 UTC) and an external mobile call (`015172420641`, 18:33 UTC).
-- [ ] **`TRUSTED_CALLERS` must use the national format the FRITZ!Box sends.**
-  The external call logged `015172420641`, not E.164 `+4915172420641`.
-  `LlmClient._is_trusted` (`agent/llm.py:184`) does an exact string match
-  against the parsed allowlist (`agent/config.py:184`), so an E.164 entry
-  silently fails closed — the caller converses but gets no RAG/calendar access
-  and nothing indicates why. Either document the exact-format requirement in
-  `.env.example` next to `TRUSTED_CALLERS`, or normalize both sides before
-  comparing. Decide before the allowlist is first populated; it is empty today.
+  (`**613`, 18:27 UTC) and an external mobile call (`015100000001`, 18:33 UTC).
+- [x] **`TRUSTED_CALLERS` format mismatch.** The external call logged
+  `015100000001`, not E.164 `+4915100000001`, and `LlmClient._is_authorized`
+  did an exact string match, so an E.164 entry silently failed closed.
+  Fixed by normalizing both sides: `normalize_caller_id`
+  (`agent/answer_policy.py`) strips separators and maps `00` → `+` and a
+  leading `0` → `+49`, and `LlmClient` runs both the allowlist and the
+  incoming caller ID through it. Only unambiguous dialling-plan transforms
+  apply — internal extensions (`**613`), bare digits without a trunk prefix,
+  and a withheld CLI stay exact-match, so the allowlist is not widened.
+  `_COUNTRY_CODE` is hardcoded `+49`; a non-German trunk needs it changed.
 
 ## Real-time correctness (highest value for call quality)
 

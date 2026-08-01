@@ -96,6 +96,39 @@ async def test_unauthorized_caller_gets_no_tools(settings):
     llm._calendar.get_events.assert_not_awaited()
 
 
+def test_e164_allowlist_entry_matches_national_caller_id(settings):
+    # The FRITZ!Box sends national format (015100000001); operators write E.164
+    # in TRUSTED_CALLERS. Before normalization this failed closed silently.
+    llm = _make_llm(settings, trusted_callers={"+4915100000001"})
+    assert llm._is_authorized("015100000001")
+    assert llm._is_authorized("0151 0000 0001")
+
+
+def test_national_allowlist_entry_matches_e164_caller_id(settings):
+    llm = _make_llm(settings, trusted_callers={"015100000001"})
+    assert llm._is_authorized("+4915100000001")
+
+
+def test_internal_extension_matches_exactly(settings):
+    llm = _make_llm(settings, trusted_callers={"**613"})
+    assert llm._is_authorized("**613")
+
+
+def test_normalization_does_not_widen_the_allowlist(settings):
+    llm = _make_llm(settings, trusted_callers={"+4915100000001"})
+    assert not llm._is_authorized("015100000002")  # different subscriber
+    assert not llm._is_authorized("15100000001")  # no country context
+    assert not llm._is_authorized("anonymous")
+    assert not llm._is_authorized("")
+    assert not llm._is_authorized(None)
+
+
+def test_empty_allowlist_authorizes_nobody(settings):
+    llm = _make_llm(settings, trusted_callers=set())
+    assert not llm._is_authorized("+4915100000001")
+    assert not llm._is_authorized("015100000001")
+
+
 @respx.mock
 async def test_complete_raises_on_http_error(llm):
     respx.post("http://llm:8000/v1/chat/completions").mock(

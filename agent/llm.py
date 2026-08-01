@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from agent.answer_policy import normalize_caller_id
+
 log = logging.getLogger(__name__)
 
 # Negation markers checked first: a turn containing one is never treated as
@@ -166,7 +168,11 @@ class LlmClient:
         self._calendar = calendar
         self._calendar_write_enabled = calendar_write_enabled
         self._max_tool_rounds = max_tool_rounds
-        self._trusted_callers = frozenset(trusted_callers or ())
+        # Both sides of the comparison are normalized so an E.164 allowlist
+        # entry matches the national-format CLI the FRITZ!Box actually sends.
+        self._trusted_callers = frozenset(
+            normalize_caller_id(c) for c in (trusted_callers or ()) if c.strip()
+        )
         # Server-side pending calendar write per caller: {caller: {"sig", "turns"}}.
         # A write only commits on a *later* user turn that matches a prior
         # proposal (see _dispatch) — the `confirmed` tool arg is no longer the
@@ -181,7 +187,10 @@ class LlmClient:
             await self._client.aclose()
 
     def _is_authorized(self, caller_id: str | None) -> bool:
-        return caller_id is not None and caller_id.strip() in self._trusted_callers
+        if caller_id is None:
+            return False
+        normalized = normalize_caller_id(caller_id)
+        return bool(normalized) and normalized in self._trusted_callers
 
     @staticmethod
     def _conversation_context(messages: list[dict]) -> tuple[int, str]:
