@@ -1,7 +1,11 @@
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 
 import httpx
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 DEFAULT_VOICE_PROFILE = "shared-female-de-v1"
 # faster-qwen3-tts wants full language names, not ISO codes. Omitting it sends
@@ -9,6 +13,16 @@ DEFAULT_VOICE_PROFILE = "shared-female-de-v1"
 # pin "german" rather than relying on per-utterance auto-detect (which can
 # misfire on short outputs like "Ja", numbers, or names).
 LANGUAGE = "german"
+
+# A single 503 from /v1/audio/speech used to drop a whole response turn: the
+# caller heard nothing and got no spoken error, while the next request seconds
+# later succeeded. Retry the transient classes only — a 4xx, or the 500 the
+# server returns for a rejected request body, repeats deterministically, and
+# retrying it just adds dead air before the same failure.
+RETRY_STATUS = frozenset({502, 503, 504})
+# One entry per retry; total attempts = len + 1. Kept short so a retried turn
+# still lands inside the caller's patience.
+RETRY_BACKOFF_S: tuple[float, ...] = (0.3, 0.9)
 
 
 class TtsClient:
@@ -29,13 +43,37 @@ class TtsClient:
             await self._client.aclose()
 
     async def synthesize(self, text: str) -> bytes:
-        resp = await self._client.post(
-            f"{self._base_url}/v1/audio/speech",
-            json={"input": text, "voice": self._voice_profile, "language": LANGUAGE},
-            timeout=30.0,
-        )
-        resp.raise_for_status()
-        return resp.content
+        for attempt, backoff in enumerate((*RETRY_BACKOFF_S, None)):
+            try:
+                resp = await self._client.post(
+                    f"{self._base_url}/v1/audio/speech",
+                    json={
+                        "input": text,
+                        "voice": self._voice_profile,
+                        "language": LANGUAGE,
+                    },
+                    timeout=30.0,
+                )
+                resp.raise_for_status()
+                return resp.content
+            except httpx.HTTPStatusError as exc:
+                if backoff is None or exc.response.status_code not in RETRY_STATUS:
+                    raise
+                reason: object = exc.response.status_code
+            except httpx.TransportError as exc:
+                if backoff is None:
+                    raise
+                reason = exc
+            # Warn, not debug: recovered 503s are the signal for root-causing
+            # the server-side outage.
+            log.warning(
+                "TTS attempt %d failed (%s), retrying in %.1fs",
+                attempt + 1,
+                reason,
+                backoff,
+            )
+            await asyncio.sleep(backoff)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def synthesize_stream(self, text: str) -> AsyncIterator[np.ndarray]:
         """Yield 24kHz int16 PCM chunks as the server produces them.
