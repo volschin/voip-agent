@@ -46,12 +46,17 @@ It installs Ubuntu's Python 3.14 toolchain, creates `/opt/tts-venv`, installs a
 fully pinned and hash-locked ARM64 dependency set, and builds
 `flash-attn==2.8.3` with `MAX_JOBS=4` and `FLASH_ATTN_CUDA_ARCHS=120`.
 
-PyTorch and TorchAudio use the official ARM64 CPython 3.14 CUDA 13.2 wheels:
+PyTorch uses the official ARM64 CPython 3.14 CUDA 13.2 wheel:
 
 ```text
 torch==2.13.0+cu132
-torchaudio==2.13.0+cu132
 ```
+
+There is no matching official `torchaudio==2.13.0+cu132` ARM64 CPython 3.14
+wheel. The exercised Qwen 12 Hz runtime does not import TorchAudio, so install
+`qwen-tts` without declared dependencies and supply its exercised dependencies
+explicitly. A build-time import check and the real-model validation must fail
+if that assumption is wrong. Do not install an incompatible TorchAudio version.
 
 CUDA 13.3.1 is the container build toolchain. The PyTorch binary contract is
 CUDA 13.2, so `torch.version.cuda` must report `13.2`; this is intentional and
@@ -87,10 +92,10 @@ The existing lock relies on packages inherited from the vLLM base and cannot be
 reused unchanged. Replace it with a complete ARM64/Python-3.14 lock that covers
 all installed Python distributions, including PyTorch's CUDA dependencies.
 
-The first candidate keeps dependencies required by the declared Qwen runtime.
-Removal of optional demo dependencies such as Gradio is allowed only when an
-import test proves the production TTS modules do not require them. Do not add a
-general compatibility layer or unrelated dependency upgrades.
+The first candidate keeps dependencies required by the exercised Qwen runtime.
+Exclude TorchAudio and optional demo dependencies such as Gradio only when a
+build-time import test proves the production TTS modules do not require them.
+Do not add a general compatibility layer or unrelated dependency upgrades.
 
 Create an Ubuntu-26.04 runtime package lock from packages actually installed in
 the final stage. Package installation must use exact versions. Repository and
