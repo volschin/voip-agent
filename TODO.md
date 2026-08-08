@@ -147,6 +147,20 @@ lost silently.
   Raw diagnostic-stream wire shape and vLLM streamed `delta.tool_calls`
   fragments remain unit-fixture assumptions; verify those paths live before
   treating them as production-proven contracts.
+- [ ] **Evaluate NemotronLabs VoiceChat as a future full-duplex research
+  candidate.** Track
+  `pipecat-ai/NVIDIA-NemotronLabs-VoiceChat-11B-Spark` as a possible way to
+  replace the ASR → LLM → TTS cascade with one low-latency speech-to-speech
+  session. Do not treat this as production adoption: the current checkpoint is
+  English-only, has one fixed non-clonable voice, weak documented tool-call
+  reliability, and an immature community DGX Spark runtime. Revisit only when
+  the Spark runtime source is publicly reproducible and pin-able. Any isolated
+  evaluation must cover German 16 kHz/G.722 telephone audio, entities and
+  background speech, barge-in, the named voice-identity requirement, RAG and
+  calendar tools with the existing deterministic authorization/consent gates,
+  OpenAI-Realtime/WebSocket integration with direct PJSIP, CUDA/UMA use and
+  coexistence with the shared Companion services. Production remains unchanged
+  until a separate adoption decision and full live-call acceptance.
 - [ ] **Parakeet ASR: do NOT switch yet.** Qwen3-ASR already streams; the code
   just uses it offline/batch. Parakeet-TDT v3 is also offline per NVIDIA NIM
   docs. If NVIDIA is ever wanted, use Parakeet RNNT Multilingual (streaming) via
