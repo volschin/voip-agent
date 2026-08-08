@@ -30,3 +30,6 @@ env/
 
 # Claude worktrees
 .claude/
+
+# Git worktrees
+.worktrees/
