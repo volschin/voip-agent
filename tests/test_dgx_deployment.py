@@ -398,6 +398,20 @@ def test_asr_midpoint_build_asserts_arm64_manifest_and_label_provenance() -> Non
     assert 'test "$labels" = null' in script
 
 
+def test_asr_midpoint_build_exempts_only_exact_pytorch_stack_from_cutoff() -> None:
+    patch = (ROOT / "dgx/asr/eugr-midpoint.patch").read_text(encoding="utf-8")
+    exact_install = (
+        "env -u UV_EXCLUDE_NEWER uv pip install torch==2.11.0 torchvision==0.26.0 "
+        "torchaudio==2.11.0 triton==3.6.0 "
+        "--index-url https://download.pytorch.org/whl/cu130"
+    )
+
+    assert patch.count(exact_install) == 2, (
+        "The PyTorch index omits upload dates, so only its exact builder and runner stack "
+        "may override the historical package cutoff."
+    )
+
+
 def test_asr_midpoint_runtime_asserts_adapter_and_versions() -> None:
     dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
     assert "ARG SPARK_BASE=dgx-spark-vllm:midpoint-v023" in dockerfile
