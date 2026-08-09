@@ -1,27 +1,32 @@
-# Thin TTS sidecar — reuses the v3 vLLM image's Python/torch/audio stack
-# (aarch64-native, has librosa/soundfile already). Adds qwen-tts + FastAPI.
-FROM ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3@sha256:6506ebcb79b1bd0d48f8afca127984791f32345333be1be0fef334eaa5a9e23a
+ARG CUDA_DEVEL_IMAGE=nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:da3989b0ea8e8b4b241711edd5823bc1cc83d05a01882258bddad84d7394c37e
+ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:13.3.1-base-ubuntu26.04@sha256:f65b4f0b65bbf2e0a2520cebaec3120bf4ed110aecc3e7dcab3b11cb508a0484
 
-# Qwen audio I/O and every package added to the pinned base image are locked
-# to the exact versions verified on the GX10 ARM64 target.
-COPY tts/apt-packages-arm64.lock /tmp/apt-packages-arm64.lock
+FROM ${CUDA_DEVEL_IMAGE} AS builder
+
+COPY tts/apt-builder-packages-arm64.lock /tmp/apt-builder-packages-arm64.lock
 RUN apt-get update \
  && xargs -r apt-get install -y --no-install-recommends \
-      < /tmp/apt-packages-arm64.lock \
+      < /tmp/apt-builder-packages-arm64.lock \
  && rm -rf /var/lib/apt/lists/*
 
-COPY tts/requirements-arm64.lock /tmp/requirements-arm64.lock
-
-# flash-attn for max throughput. The qwen-asr README explicitly recommends this
-# install style ("--no-build-isolation"). ARM64 compiles the hash-pinned source
-# distribution (about 15 minutes on GX10) and failure must fail the image build.
-# Cap MAX_JOBS to keep memory pressure down on Spark's unified RAM during the
-# native build; 4 is conservative for a 20-core ARM with 128GB but keeps the
-# build stable.
-ENV MAX_JOBS=4 \
+RUN python3 -m venv /opt/tts-venv
+ENV PATH=/opt/tts-venv/bin:$PATH \
+    MAX_JOBS=4 \
     FLASH_ATTN_CUDA_ARCHS=120
-RUN pip install --no-cache-dir --break-system-packages --no-build-isolation \
-      --require-hashes -r /tmp/requirements-arm64.lock
+
+COPY tts/requirements-slim-arm64.lock /tmp/requirements-slim-arm64.lock
+RUN pip install --no-cache-dir --require-hashes \
+      -r /tmp/requirements-slim-arm64.lock
+
+COPY tts/tts-packages-arm64.lock /tmp/tts-packages-arm64.lock
+RUN pip install --no-cache-dir --require-hashes --no-deps \
+      -r /tmp/tts-packages-arm64.lock
+
+COPY tts/flash-attn-arm64.lock /tmp/flash-attn-arm64.lock
+RUN pip install --no-cache-dir --require-hashes --no-deps --no-build-isolation \
+      -r /tmp/flash-attn-arm64.lock
+
+RUN python3 -c 'import faster_qwen3_tts, qwen_tts; import qwen_tts.core; import qwen_tts.inference.qwen3_tts_model'
 
 # faster-qwen3-tts 0.2.6 has no cancellation hook in its stable decode loop.
 # Apply a fail-closed, version-bound patch so barge-in can stop between codec
@@ -37,6 +42,18 @@ RUN package_root="$(python3 -c \
  && rm /tmp/faster-qwen3-tts-0.2.6-cooperative-cancel.patch \
       /tmp/verify_cooperative_cancel_patch.py
 
+FROM ${CUDA_RUNTIME_IMAGE} AS runtime
+
+COPY tts/apt-runtime-packages-arm64.lock /tmp/apt-runtime-packages-arm64.lock
+RUN apt-get update \
+ && xargs -r apt-get install -y --no-install-recommends \
+      < /tmp/apt-runtime-packages-arm64.lock \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/tts-venv /opt/tts-venv
+ENV PATH=/opt/tts-venv/bin:$PATH \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
 COPY tts/server.py /app/dgx/tts/server.py
 COPY tts/runtime.py /app/dgx/tts/runtime.py
@@ -44,6 +61,5 @@ COPY tts/profiles.py /app/dgx/tts/profiles.py
 COPY tts/clone_runtime.py /app/dgx/tts/clone_runtime.py
 COPY tts/api.py /app/dgx/tts/api.py
 
-ENV PYTHONUNBUFFERED=1
 EXPOSE 8002
 CMD ["python3", "-m", "dgx.tts.server"]
