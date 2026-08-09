@@ -1,9 +1,6 @@
 """Deployment contract for the independently owned GX10 voice stack."""
 
-import importlib.util
 import re
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -406,77 +403,13 @@ def test_asr_spark_image_build_preserves_existing_service_contract() -> None:
     )
 
 
-def test_asr_vllm_patch_omits_usage_from_json_contract(tmp_path: Path) -> None:
-    """Keep the established ASR JSON response exactly text-only."""
-    protocol = tmp_path / "protocol.py"
-    protocol.write_text(
-        '''from pydantic import BaseModel, Field
-
-
-class TranscriptionUsageAudio(BaseModel):
-    type: str = "duration"
-    seconds: int
-
-
-class TranscriptionResponse(BaseModel):
-    text: str
-    """The transcribed text."""
-    usage: TranscriptionUsageAudio
-
-
-class TranscriptionResponseDiarized(BaseModel):
-    text: str
-    usage: TranscriptionUsageAudio
-''',
-        encoding="utf-8",
-    )
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "dgx/asr/patch_vllm_transcription_contract.py"),
-            str(protocol),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stderr
-
-    spec = importlib.util.spec_from_file_location("patched_protocol", protocol)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    response = module.TranscriptionResponse(
-        text="Hallo",
-        usage=module.TranscriptionUsageAudio(seconds=1),
-    )
-
-    assert response.model_dump() == {"text": "Hallo"}
-    diarized = module.TranscriptionResponseDiarized(
-        text="Hallo",
-        usage=module.TranscriptionUsageAudio(seconds=1),
-    )
-    assert diarized.model_dump() == {
-        "text": "Hallo",
-        "usage": {"type": "duration", "seconds": 1},
-    }
-
-
-def test_asr_spark_image_applies_text_only_response_contract() -> None:
-    """Ensure the runtime image actually applies the validated protocol patch."""
+def test_asr_spark_image_is_unpatched() -> None:
+    """Ensure the image inherits vLLM's additive transcription response unchanged."""
     dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
-    instructions = _logical_docker_instructions(dockerfile)
 
-    assert (
-        "COPY asr/patch_vllm_transcription_contract.py "
-        "/tmp/patch_vllm_transcription_contract.py" in instructions
-    )
-    assert any(
-        instruction.startswith("RUN ")
-        and "python3 /tmp/patch_vllm_transcription_contract.py" in instruction
-        for instruction in instructions
-    )
+    assert "patch_vllm_transcription_contract.py" not in dockerfile
+    assert "TranscriptionResponse" not in dockerfile
+    assert not (ROOT / "dgx/asr/patch_vllm_transcription_contract.py").exists()
 
 
 class FakeCuda:
