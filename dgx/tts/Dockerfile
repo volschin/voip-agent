@@ -33,8 +33,8 @@ RUN pip download --no-cache-dir --require-hashes --no-deps \
  && package_root="$(python3 -c \
       'from pathlib import Path; import importlib.util; print(Path(importlib.util.find_spec('\''qwen_tts'\'').origin).resolve().parent)')" \
  && kaldi_wheel="$(find /tmp/torchaudio-kaldi -name 'torchaudio-*.whl' -print -quit)" \
- && python3 -c "from pathlib import Path; from zipfile import ZipFile; import sys; wheel, root = sys.argv[1:]; source = ZipFile(wheel).read('torchaudio/compliance/kaldi.py').decode(); assert source.count('import torchaudio\\n') == 1; Path(root, 'core/tokenizer_25hz/vq/kaldi_compat.py').write_text(source.replace('import torchaudio\\n', ''), encoding='utf-8')" \
-      "$kaldi_wheel" "$package_root" \
+ && python3 -c "from pathlib import Path; from zipfile import ZipFile; import sys; wheel, root, license_root = sys.argv[1:]; archive = ZipFile(wheel); source = archive.read('torchaudio/compliance/kaldi.py').decode(); license_text = archive.read('torchaudio-2.9.1.dist-info/LICENSE'); archive.close(); assert source.count('import torchaudio\\n') == 1; provenance = '# Derived from torchaudio 2.9.1, torchaudio/compliance/kaldi.py.\\n# SPDX-License-Identifier: BSD-2-Clause; full license: /usr/share/licenses/torchaudio-kaldi-compat/LICENSE.\\n# Compatibility contract: only fbank is supported; mfcc is outside this runtime contract.\\n\\n'; Path(root, 'core/tokenizer_25hz/vq/kaldi_compat.py').write_text(provenance + source.replace('import torchaudio\\n', ''), encoding='utf-8'); license_path = Path(license_root) / 'LICENSE'; license_path.parent.mkdir(parents=True, exist_ok=True); license_path.write_bytes(license_text)" \
+      "$kaldi_wheel" "$package_root" /opt/tts-licenses/torchaudio-kaldi-compat \
  && python3 -c "from pathlib import Path; import sys; path = Path(sys.argv[1]) / 'core/tokenizer_25hz/vq/speech_vq.py'; source = path.read_text(encoding='utf-8'); updated = source.replace('import torchaudio.compliance.kaldi as kaldi', 'from . import kaldi_compat as kaldi'); assert updated != source; path.write_text(updated, encoding='utf-8')" \
       "$package_root" \
  && rm -rf /tmp/torchaudio-kaldi
@@ -64,6 +64,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/tts-venv /opt/tts-venv
+COPY --from=builder /opt/tts-licenses /usr/share/licenses
 ENV PATH=/opt/tts-venv/bin:$PATH \
     PYTHONUNBUFFERED=1
 

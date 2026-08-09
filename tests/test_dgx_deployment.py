@@ -297,10 +297,24 @@ def test_tts_image_extracts_pure_kaldi_compat_without_installing_torchaudio() ->
     )
     assert "pip download --no-cache-dir --require-hashes --no-deps" in dockerfile
     assert "torchaudio/compliance/kaldi.py" in dockerfile
+    assert "torchaudio-2.9.1.dist-info/LICENSE" in dockerfile
     assert "kaldi_compat.py" in dockerfile
+    assert "BSD-2-Clause" in dockerfile
+    assert "only fbank is supported" in dockerfile
+    assert "/usr/share/licenses/torchaudio-kaldi-compat/LICENSE" in dockerfile
+    assert "COPY --from=builder /opt/tts-licenses /usr/share/licenses" in dockerfile
     assert "importlib.util.find_spec(" in dockerfile
     assert "import qwen_tts; print" not in dockerfile
     assert "importlib.util.find_spec('torchaudio') is None" not in dockerfile
+
+    instructions = dockerfile.replace("\\\n", " ").splitlines()
+    assert any(
+        "pip download" in instruction and "torchaudio-kaldi-compat-arm64.lock" in instruction
+        for instruction in instructions
+    )
+    assert not any(
+        "pip install" in instruction and "torchaudio" in instruction for instruction in instructions
+    )
 
 
 def test_tts_lock_contract_rejects_tampered_hashes() -> None:
