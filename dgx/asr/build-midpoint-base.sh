@@ -8,7 +8,7 @@ NCCL_COMMIT=6da422082f910a8dd230f7e42e26ece4dc37bccc
 DEPENDENCY_CUTOFF=2026-06-18T23:59:59Z
 CUDA_IMAGE_DIGEST=sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6
 CUDA_ARM64_MANIFEST=sha256:450d11555d20ac8ebbbc13ebf17589c2bd42869171a90179ce7098b4a5e64c6a
-REUSABLE_BASE_IMAGE_ID=sha256:bfa7bcd7c70829e44cd919f22fc68a028816681abe8d4f3b4a2b1ba81e47c134
+REUSABLE_BASE_IMAGE_ID=sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1
 BASE_TAG=dgx-spark-vllm:midpoint-v023
 FINAL_TAG=dgx-qwen3-asr:spark-midpoint-v023-test
 
@@ -115,11 +115,19 @@ build_metadata = None
 with os.fdopen(3, "rb") as image_stream:
     with tarfile.open(fileobj=image_stream, mode="r|") as image_archive:
         for image_member in image_archive:
-            if not image_member.isfile() or not image_member.name.endswith("/layer.tar"):
+            if not image_member.isfile():
+                continue
+            is_legacy_layer = image_member.name.endswith("/layer.tar")
+            is_oci_blob = image_member.name.startswith("blobs/sha256/")
+            if not (is_legacy_layer or is_oci_blob):
                 continue
             layer_stream = image_archive.extractfile(image_member)
             assert layer_stream is not None
-            with tarfile.open(fileobj=layer_stream, mode="r|") as layer:
+            try:
+                layer = tarfile.open(fileobj=layer_stream, mode="r|*")
+            except tarfile.ReadError:
+                continue
+            with layer:
                 for member in layer:
                     if not member.isfile():
                         continue

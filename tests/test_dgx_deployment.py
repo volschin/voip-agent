@@ -19,7 +19,7 @@ MIDPOINT_DEPENDENCY_CUTOFF = "2026-06-18T23:59:59Z"
 MIDPOINT_CUDA_IMAGE_DIGEST = (
     "sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6"
 )
-MIDPOINT_BASE_IMAGE_ID = "sha256:bfa7bcd7c70829e44cd919f22fc68a028816681abe8d4f3b4a2b1ba81e47c134"
+MIDPOINT_BASE_IMAGE_ID = "sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1"
 QWEN3_ASR_ADAPTER_SHA256 = "e233961d38d0a396db34cf2f7d83c6dc1c33aa55768ba894eee6de097120342d"
 TTS_BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
 LOCK_ENTRY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\[[^]]+\])?==\S+")
@@ -411,6 +411,13 @@ def test_asr_midpoint_build_asserts_arm64_manifest_and_label_provenance() -> Non
     assert 'source_image["config"].get("Labels")' in script
     assert "image_labels == source_labels" in script
     assert 'test "$labels" = null' not in script
+
+
+def test_asr_midpoint_inventory_supports_oci_docker_save() -> None:
+    script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
+
+    assert 'image_member.name.startswith("blobs/sha256/")' in script
+    assert 'tarfile.open(fileobj=layer_stream, mode="r|*")' in script
 
 
 def test_asr_midpoint_build_normalizes_exact_vllm_distribution_version() -> None:
