@@ -41,7 +41,8 @@ source with these immutable core references:
 
 - base: `nvidia/cuda:13.0.2-devel-ubuntu24.04`, resolved to an immutable digest
   before the build;
-- NCCL: upstream tag `v2.30u1`, resolved to its exact commit before the build;
+- NCCL: upstream release tag `v2.30.3-1`, commit
+  `6da422082f910a8dd230f7e42e26ece4dc37bccc`;
 - PyTorch: `2.11.0+cu130`;
 - torchvision: `0.26.0+cu130`;
 - torchaudio: `2.11.0+cu130`;
