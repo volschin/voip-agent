@@ -25,9 +25,19 @@ def _assert_hash_locked(requirements: str) -> None:
 
     assert entry_indexes
     for index, next_index in zip(entry_indexes, [*entry_indexes[1:], len(lines)], strict=True):
-        hashes = re.findall(r"--hash=\S+", "\n".join(lines[index:next_index]))
+        hashes = re.findall(r"--hash=\S*", "\n".join(lines[index:next_index]))
         assert hashes
         assert all(LOCK_HASH.fullmatch(value) for value in hashes)
+
+
+def _normalized_lock_headers(requirements: str) -> set[str]:
+    return {
+        re.sub(r"[-_.]+", "-", match.group(0).split("==", maxsplit=1)[0]).lower()
+        + "=="
+        + match.group(0).split("==", maxsplit=1)[1]
+        for line in requirements.splitlines()
+        if (match := LOCK_ENTRY.match(line))
+    }
 
 
 def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:
@@ -197,6 +207,8 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
         "FROM ${CUDA_DEVEL_IMAGE} AS builder",
         "FROM ${CUDA_RUNTIME_IMAGE} AS runtime",
     ]
+    runtime_input_headers = _normalized_lock_headers(runtime_input)
+    runtime_lock_headers = _normalized_lock_headers(requirements)
     for input_dependency, resolved_dependency in (
         ("accelerate==1.12.0", "accelerate==1.12.0"),
         ("einops==0.8.2", "einops==0.8.2"),
@@ -211,8 +223,8 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
         ("transformers==4.57.3", "transformers==4.57.3"),
         ("uvicorn[standard]==0.44.0", "uvicorn==0.44.0"),
     ):
-        assert input_dependency in runtime_input
-        assert resolved_dependency in requirements
+        assert input_dependency in runtime_input_headers
+        assert resolved_dependency in runtime_lock_headers
 
     assert (
         "faster-qwen3-tts==0.2.6 "
@@ -229,8 +241,17 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
         "--hash=sha256:1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d"
         in flash_attn
     )
-    assert "torchaudio" not in tts_packages
-    assert "gradio" not in tts_packages
+    excluded_runtime_packages = {
+        "vllm",
+        "ray",
+        "flashinfer",
+        "gradio",
+        "hf-gradio",
+        "torchaudio",
+    }
+    assert not excluded_runtime_packages & {
+        header.split("==", maxsplit=1)[0] for header in runtime_lock_headers
+    }
     for lock in (requirements, tts_packages, flash_attn):
         _assert_hash_locked(lock)
 
@@ -264,7 +285,12 @@ def test_tts_lock_contract_rejects_tampered_hashes() -> None:
         "3881a41dc189f0a6e93fa047f376deffeb2fa84e888e7d570f79b3e2267765cc",
         "not-a-full-sha256",
     )
+    tampered_empty_runtime_hash = requirements.replace(
+        "    --hash=sha256:70988c352feb481887077d2ab845125024b2a137a5090d6d7a32b57d03a45df6",
+        "    --hash=",
+        1,
+    )
 
-    for tampered in (tampered_runtime, tampered_qwen):
+    for tampered in (tampered_runtime, tampered_qwen, tampered_empty_runtime_hash):
         with pytest.raises(AssertionError):
             _assert_hash_locked(tampered)
