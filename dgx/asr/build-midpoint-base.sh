@@ -106,7 +106,7 @@ expected_metadata = (
     "build_script_commit: b51af15a280d28c2ad9096b3ef581524eddbd0e7",
     "vllm_commit: 0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
     "flashinfer_commit: d768c14e7cf5dd5df45a8a1de78ae815879f108a",
-    "base_image: nvidia/cuda:13.0.2-devel-ubuntu24.04@sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6",
+    "base_image: ${CUDA_IMAGE}",
 )
 
 versions = {}

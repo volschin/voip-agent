@@ -418,6 +418,7 @@ def test_asr_midpoint_inventory_supports_oci_docker_save() -> None:
 
     assert 'image_member.name.startswith("blobs/sha256/")' in script
     assert 'tarfile.open(fileobj=layer_stream, mode="r|*")' in script
+    assert '"base_image: ${CUDA_IMAGE}",' in script
 
 
 def test_asr_midpoint_build_normalizes_exact_vllm_distribution_version() -> None:
