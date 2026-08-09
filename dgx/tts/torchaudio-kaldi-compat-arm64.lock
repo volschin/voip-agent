@@ -1,0 +1,5 @@
+# `qwen-tts==0.1.1` unconditionally imports `torchaudio.compliance.kaldi`,
+# but no ABI-compatible TorchAudio wheel exists for Torch 2.13.0+cu132 on
+# ARM64 CPython 3.14. The Docker build downloads this pinned wheel only to
+# extract its pure-PyTorch Kaldi fbank implementation; it never installs it.
+torchaudio==2.9.1 --hash=sha256:9c0d004f784c49078017f8217fdc901df0eb9724e50fb269b3a6c99b1d4eae75

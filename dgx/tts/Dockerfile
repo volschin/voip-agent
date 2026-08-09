@@ -26,7 +26,20 @@ COPY tts/flash-attn-arm64.lock /tmp/flash-attn-arm64.lock
 RUN pip install --no-cache-dir --require-hashes --no-deps --no-build-isolation \
       -r /tmp/flash-attn-arm64.lock
 
-RUN python3 -c 'import faster_qwen3_tts, qwen_tts; import qwen_tts.core; import qwen_tts.inference.qwen3_tts_model'
+COPY tts/torchaudio-kaldi-compat-arm64.lock /tmp/torchaudio-kaldi-compat-arm64.lock
+RUN pip download --no-cache-dir --require-hashes --no-deps \
+      -r /tmp/torchaudio-kaldi-compat-arm64.lock \
+      --dest /tmp/torchaudio-kaldi \
+ && package_root="$(python3 -c \
+      'from pathlib import Path; import qwen_tts; print(Path(qwen_tts.__file__).resolve().parent)')" \
+ && kaldi_wheel="$(find /tmp/torchaudio-kaldi -name 'torchaudio-*.whl' -print -quit)" \
+ && python3 -c "from pathlib import Path; from zipfile import ZipFile; import sys; wheel, root = sys.argv[1:]; source = ZipFile(wheel).read('torchaudio/compliance/kaldi.py').decode(); assert source.count('import torchaudio\\n') == 1; Path(root, 'core/tokenizer_25hz/vq/kaldi_compat.py').write_text(source.replace('import torchaudio\\n', ''), encoding='utf-8')" \
+      "$kaldi_wheel" "$package_root" \
+ && python3 -c "from pathlib import Path; import sys; path = Path(sys.argv[1]) / 'core/tokenizer_25hz/vq/speech_vq.py'; source = path.read_text(encoding='utf-8'); updated = source.replace('import torchaudio.compliance.kaldi as kaldi', 'from . import kaldi_compat as kaldi'); assert updated != source; path.write_text(updated, encoding='utf-8')" \
+      "$package_root" \
+ && rm -rf /tmp/torchaudio-kaldi
+
+RUN python3 -c 'import faster_qwen3_tts, qwen_tts, torch; import qwen_tts.core; import qwen_tts.inference.qwen3_tts_model; from qwen_tts.core.tokenizer_25hz.vq import kaldi_compat; features = kaldi_compat.fbank(torch.ones(1, 400), num_mel_bins=80, dither=0, sample_frequency=16000); assert features.shape == (1, 80); assert torch.isfinite(features).all()'
 
 # faster-qwen3-tts 0.2.6 has no cancellation hook in its stable decode loop.
 # Apply a fail-closed, version-bound patch so barge-in can stop between codec

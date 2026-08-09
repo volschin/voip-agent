@@ -281,6 +281,26 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     assert "flash-attn install failed" not in dockerfile
 
 
+def test_tts_image_extracts_pure_kaldi_compat_without_installing_torchaudio() -> None:
+    """Catch a CUDA 13.2 Torch image silently gaining an ABI-mismatched TorchAudio wheel."""
+    dockerfile = (ROOT / "dgx/tts/Dockerfile").read_text(encoding="utf-8")
+    compat_lock = (ROOT / "dgx/tts/torchaudio-kaldi-compat-arm64.lock").read_text(encoding="utf-8")
+
+    assert (
+        "torchaudio==2.9.1 "
+        "--hash=sha256:9c0d004f784c49078017f8217fdc901df0eb9724e50fb269b3a6c99b1d4eae75"
+        in compat_lock
+    )
+    assert (
+        "COPY tts/torchaudio-kaldi-compat-arm64.lock "
+        "/tmp/torchaudio-kaldi-compat-arm64.lock" in dockerfile
+    )
+    assert "pip download --no-cache-dir --require-hashes --no-deps" in dockerfile
+    assert "torchaudio/compliance/kaldi.py" in dockerfile
+    assert "kaldi_compat.py" in dockerfile
+    assert "importlib.util.find_spec('torchaudio') is None" not in dockerfile
+
+
 def test_tts_lock_contract_rejects_tampered_hashes() -> None:
     requirements = (ROOT / "dgx/tts/requirements-slim-arm64.lock").read_text(encoding="utf-8")
     tts_packages = (ROOT / "dgx/tts/tts-packages-arm64.lock").read_text(encoding="utf-8")
