@@ -1,5 +1,12 @@
 # Spark-vLLM ASR ModelRunnerV1 Diagnostic Implementation Plan
 
+> **Execution status: COMPLETE — discriminator failed.** The exact
+> ModelRunnerV1 candidate completed all ten frozen non-speech requests but
+> produced `14` hallucinated words, above the production maximum of `5` and
+> identical to the ModelRunnerV2 candidate. The conditional full A/B was
+> skipped, test containers were removed, images retained, and production was
+> unchanged. This candidate is not eligible for rollout.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Determine whether disabling ModelRunnerV2 makes the existing smaller Spark-vLLM image meet the production non-speech baseline, and run the full same-model qualification only if that discriminator passes.
@@ -32,7 +39,7 @@
 - Consumes: current feature branch, live container `qwen3-asr`, immutable candidate and gateway image IDs, owner-only benchmark artifact label `task2-same-model-1p7b-21case`.
 - Produces: exact production invariant, zero conflicting test-container counts, and source-backed proof that environment value `0` selects ModelRunnerV1.
 
-- [ ] **Step 1: Verify the repository and live production baseline**
+- [x] **Step 1: Verify the repository and live production baseline**
 
 Run locally:
 
@@ -53,7 +60,7 @@ docker ps -aq --filter name='^/asr-modelrunner-v1-gateway$'
 
 Expected: clean worktree; production is `running|healthy|0|unless-stopped` and serves the exact UrocyonF 1.7B model; candidate and gateway image IDs match the global constraints; both named-container queries are empty.
 
-- [ ] **Step 2: Prove the pinned image maps the environment variable to the V1 worker branch**
+- [x] **Step 2: Prove the pinned image maps the environment variable to the V1 worker branch**
 
 Run on the GX10:
 
@@ -67,13 +74,13 @@ docker run --rm --pull never \
 
 Expected: exit `0`. This binds the false environment value to the exact image source whose false branch instantiates `GPUModelRunnerV1`.
 
-- [ ] **Step 3: Validate only the owner-only benchmark artifact contract**
+- [x] **Step 3: Validate only the owner-only benchmark artifact contract**
 
 Locate the existing owner-only artifact by its exact label `task2-same-model-1p7b-21case`. Validate mode `0600`, the recorded corpus and ten-case subset hashes, runner hashes, and the fixed `language=de` request contract. Do not print or copy its absolute path or protected content.
 
 Expected: exactly one artifact matches and every recorded hash equals the corrected same-model run. A missing, duplicate, or hash-mismatched artifact stops the task.
 
-- [ ] **Step 4: Write the transcript-free preflight report**
+- [x] **Step 4: Write the transcript-free preflight report**
 
 Record only image IDs, software versions, command hash, owner-only artifact label and hashes, production invariant, named-container counts, and the ModelRunnerV1 source proof. Re-scan the report for absolute protected paths and transcript-like fields.
 
@@ -89,7 +96,7 @@ Expected: the report contains no raw text/audio and is not tracked by Git.
 - Consumes: Task 1 preflight, exact candidate image, exact model snapshot, network `voice_default`.
 - Produces: ready loopback candidate and gateway, exact runtime environment proof, real API response, and candidate-correlated CUDA evidence.
 
-- [ ] **Step 1: Start exactly one candidate with the single experimental variable**
+- [x] **Step 1: Start exactly one candidate with the single experimental variable**
 
 Run on the GX10:
 
@@ -123,13 +130,13 @@ docker run -d \
 
 Expected: one running container, restart count `0`, restart policy `no`, exact image ID and command.
 
-- [ ] **Step 2: Prove runtime selection and bounded readiness**
+- [x] **Step 2: Prove runtime selection and bounded readiness**
 
 Poll `http://127.0.0.1:18001/v1/models` for at most 300 seconds. Require HTTP `200` with exactly one model ID `qwen3-asr`. Then inspect the container environment and require exactly one `VLLM_USE_V2_MODEL_RUNNER=0` entry. Reject logs containing `Using V2 Model Runner`.
 
 Expected: model readiness and the V1 source/env proof agree. Container exit, timeout, restart, a V2 log marker, or an unsupported-runner error rejects the candidate without changing any other variable.
 
-- [ ] **Step 3: Start the immutable normalized gateway**
+- [x] **Step 3: Start the immutable normalized gateway**
 
 Run on the GX10:
 
@@ -146,13 +153,13 @@ docker run -d \
 
 Expected: gateway is ready, has the exact image ID and backend environment, and exposes no non-loopback host port.
 
-- [ ] **Step 4: Run one authorized smoke request with CUDA correlation**
+- [x] **Step 4: Run one authorized smoke request with CUDA correlation**
 
 Use one owner-only German WAV from the frozen benchmark through the gateway with `language=de`. Correlate the candidate container PID with `nvidia-smi` compute PIDs and require nonzero SM during the request. Validate HTTP `200` and a JSON object containing only the normalized string `text` field at the gateway boundary; do not print the value.
 
 Expected: real request, gateway normalization, candidate PID correlation, and nonzero CUDA activity all pass.
 
-- [ ] **Step 5: Write the transcript-free live report and recheck production**
+- [x] **Step 5: Write the transcript-free live report and recheck production**
 
 Record readiness duration, response shape only, runtime env/source proof, CUDA boolean/maximum aggregate SM, and current production invariant. Do not record PIDs, raw GPU rows, paths, audio, or text.
 
@@ -168,13 +175,13 @@ Expected: production still matches Task 1 exactly.
 - Consumes: ready Task 2 candidate/gateway, exact owner-only runner and ten-case subset, corrected same-model production baseline of `5` hallucinated words.
 - Produces: transcript-free discriminator result and, only on pass, a complete same-model eligibility result.
 
-- [ ] **Step 1: Run the exact ten non-speech probes once**
+- [x] **Step 1: Run the exact ten non-speech probes once**
 
 Use the owner-only runner and the same fixed ten case IDs, bytes, ordering, `language=de`, gateway contract, timeout, and scorer hashes from `task2-same-model-1p7b-21case`. Send all ten requests once to `http://127.0.0.1:18002/v1/audio/transcriptions`.
 
 Expected: `10/10` successful responses and a transcript-free safe-result artifact. Do not retry individual cases or inspect text before the aggregate decision.
 
-- [ ] **Step 2: Apply the fixed discriminator**
+- [x] **Step 2: Apply the fixed discriminator**
 
 Validate the safe-result schema, hashes, finite numeric values, exact ten-case map shape, and forbidden transcript-bearing shapes. Require:
 
@@ -190,13 +197,13 @@ candidate_cuda == true
 
 Expected: one unambiguous PASS or FAIL. On FAIL, skip Steps 3 and 4 and continue directly to Task 4 cleanup.
 
-- [ ] **Step 3: On discriminator PASS only, prepare the unchanged full A/B**
+- [x] **Step 3: Skip the unchanged full A/B preparation on discriminator FAIL**
 
 Revalidate production image/model/command and candidate image/model/command. Start an identical second gateway for production using the same immutable gateway image and only a different `ASR_BACKEND_URL`. Assert both gateway configurations are byte-equivalent except backend URL.
 
 Expected: production and candidate identities match the corrected same-model design, and both gateways use the same image and request normalization.
 
-- [ ] **Step 4: On discriminator PASS only, execute the full fixed series once**
+- [x] **Step 4: Skip the full fixed series on discriminator FAIL**
 
 Run exactly in this order:
 
@@ -211,7 +218,7 @@ Use the existing protected runner, frozen corpus/subset hashes, request ordering
 
 Expected: an eligibility result based on all existing gates. No tuning, selective rerun, outlier deletion, or gate change is allowed.
 
-- [ ] **Step 5: Write the transcript-free performance report**
+- [x] **Step 5: Write the transcript-free performance report**
 
 Record exact identities, request counts, aggregate quality map, per-case non-speech word counts, latency aggregates/ratios, CUDA booleans and aggregate maxima, gate map, conditional-step decision, and protected artifact hashes. Omit paths and raw content.
 
@@ -226,23 +233,23 @@ Record exact identities, request counts, aggregate quality map, per-case non-spe
 - Consumes: Task 3 discriminator/full-gate decision.
 - Produces: zero test containers, unchanged production, tracked historical outcome, green repository, one focused documentation commit.
 
-- [ ] **Step 1: Remove only the named benchmark containers**
+- [x] **Step 1: Remove only the named benchmark containers**
 
 Remove `asr-modelrunner-v1-gateway`, `qwen3-asr-spark-mrv1-test`, and the production gateway only if Task 3 Step 3 created it. Require zero containers with those exact names afterward. Retain both immutable images.
 
 Expected: no test container remains; no image is pruned.
 
-- [ ] **Step 2: Prove the final production invariant**
+- [x] **Step 2: Prove the final production invariant**
 
 Run the same `docker inspect` command from Task 1 and compare the complete output byte-for-byte with the preflight value.
 
 Expected: same image and UrocyonF 1.7B command, `running|healthy|0|unless-stopped`.
 
-- [ ] **Step 3: Append the exact execution outcome**
+- [x] **Step 3: Append the exact execution outcome**
 
 Update the design and this plan with the immutable candidate/gateway IDs, discriminator counts, whether the full gate ran, final eligibility, cleanup counts, and production invariant. Mark rollout prohibited unless every complete gate passed; even a complete pass still requires separate user rollout authorization.
 
-- [ ] **Step 4: Run fresh repository verification**
+- [x] **Step 4: Run fresh repository verification**
 
 Run:
 
@@ -257,7 +264,7 @@ git status --short
 
 Expected: all tests pass, Ruff and formatting are clean, Compose renders, diff check passes, and only the two intended documentation files are modified.
 
-- [ ] **Step 5: Commit the evidenced outcome**
+- [x] **Step 5: Commit the evidenced outcome**
 
 ```bash
 git add \

@@ -79,3 +79,27 @@ The candidate and benchmark gateway are removed after the run. The retained
 candidate image is not tagged for production. Production must finish on the
 same current image and command, `running|healthy`, with zero restarts and its
 existing restart policy.
+
+## Execution Outcome
+
+The diagnostic ran on 2026-08-09 with the exact candidate, model, gateway, and
+request contract above. Runtime evidence bound `VLLM_USE_V2_MODEL_RUNNER=0` to
+the installed false branch that instantiates `GPUModelRunnerV1`; the candidate
+started successfully, served the exact model, returned a valid normalized API
+response, and performed candidate-correlated CUDA work.
+
+All ten frozen non-speech requests succeeded. The candidate produced `14`
+hallucinated words with this exact transcript-free distribution:
+
+```text
+5, 1, 4, 0, 0, 1, 1, 1, 0, 1
+```
+
+That is identical to the prior ModelRunnerV2 candidate and exceeds the
+production maximum of `5`. The discriminator therefore failed. ModelRunnerV2
+is not the cause of the remaining non-speech regression, the conditional full
+A/B was correctly skipped, and this candidate is prohibited from rollout.
+
+Both named test containers were removed, both immutable images retained, and
+production finished on its original image and UrocyonF 1.7B command as
+`running|healthy|0|unless-stopped`.
