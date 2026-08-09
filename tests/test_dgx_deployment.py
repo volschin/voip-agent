@@ -58,6 +58,72 @@ def _has_forbidden_torchaudio_pip_install(dockerfile: str) -> bool:
     )
 
 
+_ASR_FORBIDDEN_RUNTIME_PACKAGES = (
+    "torch",
+    "vllm",
+    "triton",
+    "flashinfer",
+    "flash-attn",
+    "flash_attn",
+    "cffi",
+)
+_ASR_AUDIO_LOCK_PATH = "/tmp/requirements-audio-arm64.lock"
+_PIP_INSTALL_COMMAND = re.compile(
+    r"\b(?:python(?:3(?:\.\d+)?)?\s+-m\s+)?(?:\S*/)?pip(?:3)?\b"
+    r"(?:\s+(?!install\b)\S+)*\s+install\b",
+    flags=re.IGNORECASE,
+)
+_REQUIREMENTS_FILE = re.compile(r"(?:^|\s)(?:-r|--requirement)(?:\s+|=)(\S+)")
+_ASR_FORBIDDEN_COMPILER_ADDITION = re.compile(
+    r"(?<![A-Za-z0-9_.+-])(?:gcc(?:-\d+)?|g\+\+(?:-\d+)?|make|build-essential|cmake|"
+    r"ninja(?:-build)?|nvcc|(?:nvidia-)?cuda-toolkit(?:-[A-Za-z0-9.]+)*)(?![A-Za-z0-9_.+-])",
+    flags=re.IGNORECASE,
+)
+
+
+def _asr_python_package_install_commands(dockerfile: str) -> list[str]:
+    commands = []
+    for instruction in _logical_docker_instructions(dockerfile):
+        if not re.match(r"RUN\s+", instruction, flags=re.IGNORECASE):
+            continue
+        for match in _PIP_INSTALL_COMMAND.finditer(instruction):
+            command_end = re.search(r"\s+(?:&&|\|\||;)\s+", instruction[match.end() :])
+            end = match.end() + command_end.start() if command_end else len(instruction)
+            commands.append(instruction[match.start() : end])
+    return commands
+
+
+def _has_asr_invalid_python_package_install(dockerfile: str) -> bool:
+    """Return whether ASR has another Python-package path or replaces inherited runtime packages."""
+    installs = _asr_python_package_install_commands(dockerfile)
+    if len(installs) != 1:
+        return True
+
+    install = installs[0]
+    if _REQUIREMENTS_FILE.findall(install) != [_ASR_AUDIO_LOCK_PATH]:
+        return True
+    if "--require-hashes" not in install or "--no-deps" not in install:
+        return True
+
+    return any(
+        re.search(
+            rf"(?<![A-Za-z0-9_.-]){re.escape(package)}"
+            r"(?![A-Za-z0-9_.-])",
+            install,
+        )
+        for package in _ASR_FORBIDDEN_RUNTIME_PACKAGES
+    )
+
+
+def _has_asr_forbidden_compiler_addition(dockerfile: str) -> bool:
+    """Return whether a Dockerfile adds a compiler or CUDA build toolkit."""
+    return any(
+        _ASR_FORBIDDEN_COMPILER_ADDITION.search(instruction)
+        for instruction in _logical_docker_instructions(dockerfile)
+        if re.match(r"RUN\s+", instruction, flags=re.IGNORECASE)
+    )
+
+
 def _runtime_stage_instructions(dockerfile: str) -> list[str]:
     instructions = _logical_docker_instructions(dockerfile)
     runtime_start = next(
@@ -203,13 +269,69 @@ def test_asr_audio_lock_rejects_decoder_drift_and_implicit_dependency_resolution
     entry_indexes = [index for index, line in enumerate(lines) if LOCK_ENTRY.match(line)]
     for index, next_index in zip(entry_indexes, [*entry_indexes[1:], len(lines)], strict=True):
         header = lines[index].split(maxsplit=1)[0]
-        package_block = "\n".join(lines[index:next_index])
+        package_block = "\n".join(
+            line.split("#", maxsplit=1)[0] for line in lines[index:next_index]
+        )
         hashes = re.findall(r"--hash=\S+", package_block)
 
         assert hashes, f"{header} must have a hash so a future build cannot resolve a new wheel."
         assert all(LOCK_HASH.fullmatch(value) for value in hashes), (
             f"{header} must use complete SHA-256 hashes so the selected wheel is reproducible."
         )
+
+
+@pytest.mark.parametrize(
+    "dockerfile",
+    (
+        "RUN pip3 \\\n    install vllm==0.26.1rc1",
+        "RUN python3 -m pip \\\n    --quiet install triton==3.6.0",
+        "RUN pip install --require-hashes -r /tmp/runtime-replacement.lock",
+    ),
+)
+def test_asr_spark_image_install_guard_rejects_alternate_python_package_paths(
+    dockerfile: str,
+) -> None:
+    """Catch an alternate pip path that can replace the inherited runtime."""
+    assert _has_asr_invalid_python_package_install(dockerfile), (
+        "Every non-audio Python package installation path must be rejected."
+    )
+
+
+def test_asr_spark_image_install_guard_allows_runtime_metadata_validation() -> None:
+    """Allow validating inherited packages after the sole locked audio installation."""
+    dockerfile = """RUN python3 -m pip install --no-cache-dir --require-hashes --no-deps \\
+    -r /tmp/requirements-audio-arm64.lock \\
+ && python3 -c "import cffi, vllm; print(cffi.__version__, vllm.__version__)"
+"""
+
+    assert not _has_asr_invalid_python_package_install(dockerfile), (
+        "Metadata checks after the locked audio install must not be mistaken for "
+        "package replacement."
+    )
+
+
+@pytest.mark.parametrize(
+    "dockerfile",
+    (
+        "RUN apt-get update && apt-get install -y gcc g++ make build-essential cmake ninja",
+        "RUN apt-get install -y cuda-toolkit-13-0",
+        "RUN apt-get install -y \\\n    nvidia-cuda-toolkit && /usr/local/cuda/bin/nvcc --version",
+    ),
+)
+def test_asr_spark_image_rejects_compiler_and_cuda_toolkit_additions(dockerfile: str) -> None:
+    """Catch build tooling that invalidates the fixed no-compiler Spark image contract."""
+    assert _has_asr_forbidden_compiler_addition(dockerfile), (
+        "The minimal ASR derivative must reject compiler and CUDA-toolkit additions."
+    )
+
+
+def test_asr_spark_image_has_no_compiler_or_cuda_toolkit_additions() -> None:
+    """Catch the real ASR recipe gaining build tooling after its fixed base image is adopted."""
+    dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
+
+    assert not _has_asr_forbidden_compiler_addition(dockerfile), (
+        "The ASR Dockerfile must not add a compiler or CUDA toolkit to the fixed Spark base."
+    )
 
 
 def test_asr_spark_image_rejects_core_stack_reinstallation() -> None:
@@ -220,38 +342,18 @@ def test_asr_spark_image_rejects_core_stack_reinstallation() -> None:
         "FROM eugr/spark-vllm@"
         "sha256:1d861bef8a6c0851140cec2575ebd32342d55bc0fd28ad4c6ca178269e9d1cff"
     )
-    audio_lock_installs = [
-        instruction
-        for instruction in logical_instructions
-        if "requirements-audio-arm64.lock" in instruction
-        and re.search(r"\bpip\s+install\b", instruction)
-    ]
-
     assert [
         instruction for instruction in logical_instructions if re.match(r"FROM\s+", instruction)
     ] == [expected_base], (
         "The ASR derivative must inherit the immutable validated Spark-vLLM image."
     )
-    assert len(audio_lock_installs) == 1, (
-        "The ASR image must install its audio extension from the repository-owned "
-        "lock exactly once."
+    assert not _has_asr_invalid_python_package_install(dockerfile), (
+        "The ASR image may install only the direct audio lock and must not replace "
+        "inherited runtime dependencies."
     )
-    assert "--require-hashes" in audio_lock_installs[0], (
-        "The ASR audio install must reject an unverified replacement wheel."
+    assert not _has_asr_forbidden_compiler_addition(dockerfile), (
+        "The ASR derivative must not add a compiler or CUDA build toolkit."
     )
-    assert "--no-deps" in audio_lock_installs[0], (
-        "The ASR audio install must not ask pip to re-resolve inherited runtime dependencies."
-    )
-
-    for package in ("torch", "vllm", "triton", "flashinfer", "flash-attn", "flash_attn", "cffi"):
-        assert not any(
-            re.search(
-                rf"\bpip\s+install\b.*(?<![A-Za-z0-9_.-]){re.escape(package)}"
-                r"(?![A-Za-z0-9_.-])",
-                instruction,
-            )
-            for instruction in logical_instructions
-        ), f"Installing {package} would replace an inherited Spark-vLLM runtime dependency."
 
 
 def test_asr_spark_image_build_preserves_existing_service_contract() -> None:
