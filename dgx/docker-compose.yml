@@ -1,6 +1,8 @@
 services:
   qwen3-asr:
-    image: ghcr.io/aeon-7/qwen3-asr-server:latest
+    build:
+      context: .
+      dockerfile: asr/Dockerfile
     container_name: qwen3-asr
     deploy:
       resources:
