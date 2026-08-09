@@ -6,7 +6,7 @@
 
 **Architecture:** `dgx/asr/Dockerfile` inherits the already validated ARM64 Spark-vLLM image and adds only the two missing audio decoder distributions from a direct-only hash lock. Repository Compose builds that derivative but keeps the existing model path, command, healthcheck, networks, and GPU settings. A separately named loopback-only candidate is built and tested on the GX10 while production stays healthy; the existing common ASR gateway and protected `asr-companion-de-v1` corpus decide quality and latency eligibility before a narrowly scoped Portainer update.
 
-**Tech Stack:** Docker/Compose, ARM64 NVIDIA GB10, CUDA 13.0, PyTorch 2.11, Spark-vLLM, Qwen3-ASR-0.6B, uv, pytest, Ruff, Portainer, the existing ASR benchmark gateway and protected German corpus.
+**Tech Stack:** Docker/Compose, ARM64 NVIDIA GB10, CUDA 13.0, PyTorch 2.11, Spark-vLLM, UrocyonF/Qwen3-ASR-1.7B-NVFP4, uv, pytest, Ruff, Portainer, the existing ASR benchmark gateway and protected German corpus.
 
 ## Global Constraints
 
@@ -14,7 +14,7 @@
 - Expected inherited runtime: Python `3.12.3`, Torch `2.11.0+cu130`, `torch.version.cuda == "13.0"`, vLLM `0.26.1rc1.dev468+g6b5bec7be.d20260807`, Triton `3.6.0`, and FlashInfer `0.6.18`.
 - Added distributions: only `soundfile==0.13.1` and `av==17.0.1`, installed with `--require-hashes --no-deps`. Inherited `cffi==2.1.1` is reused.
 - Do not install or rebuild Torch, vLLM, Triton, FlashInfer, Flash-Attention, CUDA, CFFI, or a compiler, and do not patch inherited vLLM source.
-- Model snapshot: `/root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-0.6B/snapshots/5eb144179a02acc5e5ba31e748d22b0cf3e303b0`.
+- Model snapshot: `/root/.cache/huggingface/hub/models--UrocyonF--Qwen3-ASR-1.7B-NVFP4/snapshots/61ad4d533c64e033a750b66c44aad6f18634997e`.
 - API: multipart WAV plus `language=de` to `POST /v1/audio/transcriptions`; the response must be a JSON object with a string `text` field and may contain additive fields such as `usage`.
 - Candidate: image `dgx-qwen3-asr:spark-vllm-test`, container `qwen3-asr-spark-test`, host bind `127.0.0.1:18001:8001`.
 - Current production invariant: image `sha256:38f255cd9c0b6bac1e9b1aaa72904c25f7d3e3958ef56cefee9531ff65f2cbe3`, size `33,294,535,748`, `running|healthy|0|unless-stopped`.
@@ -308,7 +308,7 @@ Commit each evidenced correction separately using `fix(asr): ...`. Leave product
 - [ ] **Step 1: Start exactly one isolated candidate**
 
 ```bash
-ssh volsch@192.168.68.41 'docker rm -f qwen3-asr-spark-test >/dev/null 2>&1 || true; docker run -d --name qwen3-asr-spark-test --pull never --gpus all --shm-size 4g --restart no --label com.docker.compose.project=asr-benchmark --label com.docker.compose.service=asr-worker --network voice_default -p 127.0.0.1:18001:8001 -e NVIDIA_VISIBLE_DEVICES=all -e ENABLE_NVFP4_SM100=0 -e VLLM_TEST_FORCE_FP8_MARLIN=1 -e VLLM_USE_FLASHINFER_SAMPLER=1 -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -v /home/volsch/.cache/huggingface:/root/.cache/huggingface:ro dgx-qwen3-asr:spark-vllm-test vllm serve /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-0.6B/snapshots/5eb144179a02acc5e5ba31e748d22b0cf3e303b0 --served-model-name qwen3-asr --host 0.0.0.0 --port 8001 --gpu-memory-utilization 0.08 --max-model-len 8192 --max-num-seqs 4 --trust-remote-code'
+ssh volsch@192.168.68.41 'docker rm -f qwen3-asr-spark-test >/dev/null 2>&1 || true; docker run -d --name qwen3-asr-spark-test --pull never --gpus all --shm-size 4g --restart no --label com.docker.compose.project=asr-benchmark --label com.docker.compose.service=asr-worker --network voice_default -p 127.0.0.1:18001:8001 -e NVIDIA_VISIBLE_DEVICES=all -e ENABLE_NVFP4_SM100=0 -e VLLM_TEST_FORCE_FP8_MARLIN=1 -e VLLM_USE_FLASHINFER_SAMPLER=1 -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -v /home/volsch/.cache/huggingface:/root/.cache/huggingface:ro dgx-qwen3-asr:spark-vllm-test vllm serve /root/.cache/huggingface/hub/models--UrocyonF--Qwen3-ASR-1.7B-NVFP4/snapshots/61ad4d533c64e033a750b66c44aad6f18634997e --served-model-name qwen3-asr --host 0.0.0.0 --port 8001 --gpu-memory-utilization 0.08 --max-model-len 8192 --max-num-seqs 4 --trust-remote-code'
 ```
 
 Expected: only the named candidate is created; production remains untouched.
@@ -607,12 +607,10 @@ Remove only the candidate and the two named gateways. Recheck production `runnin
 
 ### Task 8: Apply the guarded audio-encoder correction and revalidate
 
-**Execution status: COMPLETE — correction rejected and reverted.** The initial
-21-case evidence used the wrong model (`UrocyonF/Qwen3-ASR-1.7B-NVFP4`) and was
-not a valid Same-Model comparison. With the correct pinned Qwen3-ASR-0.6B
-snapshot, the full `70/70` quality and `12/12` load series passed request,
-latency, and CUDA gates but reproduced the unpatched candidate's failed entity,
-number, and time metrics exactly. The implementation commit was reverted; no
+**Execution status: INVALIDATED — correction rejected and reverted.** The
+candidate used Qwen3-ASR-0.6B while live production used
+`UrocyonF/Qwen3-ASR-1.7B-NVFP4`, so neither the 21-case nor full series was a
+valid image-only comparison. The implementation commit was reverted; no
 patch image or test container remains, and production was unchanged.
 
 **Files:**

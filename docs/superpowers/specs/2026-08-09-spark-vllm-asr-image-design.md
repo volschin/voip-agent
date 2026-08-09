@@ -24,8 +24,8 @@ Production currently runs:
 - Ubuntu 24.04, Python 3.12.3;
 - PyTorch `2.12.0.dev20260408+cu130`, CUDA 13.0;
 - vLLM `0.20.1.dev0+g88d34c640.d20260428`;
-- Qwen3-ASR-0.6B revision
-  `5eb144179a02acc5e5ba31e748d22b0cf3e303b0`;
+- UrocyonF/Qwen3-ASR-1.7B-NVFP4 snapshot
+  `61ad4d533c64e033a750b66c44aad6f18634997e`;
 - `running|healthy`, zero restarts, and `unless-stopped` restart policy.
 
 The candidate baseline already present on the GX10 is:
@@ -75,8 +75,8 @@ rebuild and repeat the real model/API/CUDA gate before benchmarking.
 
 The following are invariant:
 
-- model: Qwen3-ASR-0.6B;
-- revision: `5eb144179a02acc5e5ba31e748d22b0cf3e303b0`;
+- model: UrocyonF/Qwen3-ASR-1.7B-NVFP4;
+- snapshot: `61ad4d533c64e033a750b66c44aad6f18634997e`;
 - served model name: `qwen3-asr`;
 - endpoint: `POST /v1/audio/transcriptions`;
 - request: multipart WAV plus fixed `language=de` from the production client;
@@ -171,56 +171,18 @@ combined result.
 
 ### Execution outcome
 
-The corrected protected A/B on 2026-08-09 used the same Qwen3-ASR-0.6B model
-revision, identical corpus bytes, `language=de`, request order, concurrency,
-and one normalized gateway image for both backends. Production and candidate
-each completed `70/70` quality and `12/12` load requests with observed CUDA
-activity. The Spark-vLLM candidate reduced load latency and aggregate error:
+The protected 2026-08-09 A/B and language-hint series used the Qwen3-ASR-0.6B
+candidate snapshot while live production served
+`UrocyonF/Qwen3-ASR-1.7B-NVFP4`. Although the series used identical corpus
+bytes, `language=de`, request order, concurrency, and a normalized gateway,
+it changed both image and model identity. Its quality, latency, and
+audio-encoder patch results are therefore invalid for image eligibility and
+must not support an image-ineligible conclusion or a compatibility-patch root
+cause. No production mutation was made; production remained healthy with zero
+restarts.
 
-- p50 latency ratio: `0.6723` candidate/production;
-- nearest-rank p90 latency ratio: `0.7243`;
-- WER: `0.03346` candidate versus `0.04528` production;
-- CER: `0.01004` candidate versus `0.03824` production;
-- non-speech hallucinated words: `2` candidate versus `5` production.
-
-It nevertheless failed the mandatory non-degradation gates. Entity recall was
-`0.5909` instead of `0.6364`, and number and time accuracy were both `0.0`
-instead of `0.1667`. The candidate is therefore not eligible for production
-rollout.
-
-A follow-up language-hint diagnostic ran four complete 70-case series directly
-against the two backends, with and without `language=de`, followed by a repeated
-candidate pair. Production returned identical transcripts and scores in both
-modes, confirming that its older Qwen3-ASR adapter ignores the transcription
-language parameter. Spark-vLLM changed `9` raw and `5` normalized transcripts
-between the first German-forced and automatic-language runs, but WER, entity
-recall, and number/time accuracy were unchanged. Repetition preserved those
-core scores. German forcing reduced non-speech hallucinated words from `3` to
-`1`-`2`, while one normalized non-speech result varied between its two runs.
-
-Consequently, `language=de` remains the correct production contract and is
-beneficial for non-speech behavior, but it does not explain or repair the
-entity/number/time gate failures. The remaining difference is in the newer
-Qwen3-ASR adapter and Spark-vLLM inference stack and requires a separate,
-case-focused investigation before adoption. No production mutation was made;
-the original ASR image remained healthy with zero restarts.
-
-A preliminary case-focused experiment appeared to isolate the regression to the
-`async_tensor_h2d` construction of audio `cu_seqlens` in
-`Qwen3OmniMoeAudioEncoder.forward`. Audit of the actual container command found
-that this experiment had loaded `UrocyonF/Qwen3-ASR-1.7B-NVFP4`, not the pinned
-production model. Its apparent restoration is invalid Same-Model evidence and
-must not support a compatibility patch.
-
-A fail-closed one-operation patch was nevertheless built and then tested with
-the correct Qwen3-ASR-0.6B snapshot, revision, environment, gateway, corpus, and
-ordering. Production and patched candidate each completed `70/70` quality and
-`12/12` load requests with CUDA activity. The patched candidate reproduced the
-unpatched candidate's quality map exactly: entity recall remained `0.5909`
-versus production `0.6364`; number and time accuracy remained `0.0` versus
-`0.1667`. Latency passed. The patch therefore has no corrective effect for the
-production model and was removed. The candidate remains ineligible, and the
-audio-encoder transfer operation is not an established root cause.
+The original digest-pinned Spark-vLLM candidate must instead be qualified with
+the exact cached Urocyon 1.7B-NVFP4 snapshot before any eligibility decision.
 
 ## Rollout and Rollback
 

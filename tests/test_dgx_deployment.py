@@ -9,7 +9,7 @@ import yaml
 from dgx.tts.runtime import normalize_language, require_gb10_cuda
 
 ROOT = Path(__file__).resolve().parents[1]
-ASR_REVISION = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
+ASR_REVISION = "61ad4d533c64e033a750b66c44aad6f18634997e"
 TTS_BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
 LOCK_ENTRY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\[[^]]+\])?==\S+")
 LOCK_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
@@ -244,6 +244,15 @@ def test_asr_is_offline_pinned_and_health_checks_loaded_model() -> None:
     assert command[command.index("--served-model-name") + 1] == "qwen3-asr"
     assert "/v1/models" in health_command
     assert "qwen3-asr" in health_command
+
+
+def test_asr_uses_exact_production_urocyon_1p7b_snapshot() -> None:
+    command = [str(value) for value in _compose()["services"]["qwen3-asr"]["command"]]
+
+    assert command[command.index("serve") + 1] == (
+        "/root/.cache/huggingface/hub/models--UrocyonF--Qwen3-ASR-1.7B-NVFP4/"
+        "snapshots/61ad4d533c64e033a750b66c44aad6f18634997e"
+    )
 
 
 def test_asr_audio_lock_rejects_decoder_drift_and_implicit_dependency_resolution() -> None:

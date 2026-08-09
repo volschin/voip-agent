@@ -72,8 +72,8 @@ keeps the stack-private default network and additionally attaches those two
 services to the pre-created neutral `shared_ai_voice` network consumed by
 Traefik. The stack does not publish ports 8001 or 8002 after cutover.
 
-ASR loads the already cached revision
-`5eb144179a02acc5e5ba31e748d22b0cf3e303b0` with Hugging Face and Transformers
+ASR loads the already cached `UrocyonF/Qwen3-ASR-1.7B-NVFP4` snapshot
+`61ad4d533c64e033a750b66c44aad6f18634997e` with Hugging Face and Transformers
 offline. TTS refuses to start unless PyTorch reports CUDA on `NVIDIA GB10`;
 there is no CPU fallback.
 

@@ -32,7 +32,7 @@ services:
     command:
       - vllm
       - serve
-      - /root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-0.6B/snapshots/5eb144179a02acc5e5ba31e748d22b0cf3e303b0
+      - /root/.cache/huggingface/hub/models--UrocyonF--Qwen3-ASR-1.7B-NVFP4/snapshots/61ad4d533c64e033a750b66c44aad6f18634997e
       - --served-model-name
       - qwen3-asr
       - --host
