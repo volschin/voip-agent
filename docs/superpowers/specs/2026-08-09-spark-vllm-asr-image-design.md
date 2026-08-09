@@ -53,7 +53,7 @@ hashes. New APT packages, if any, use exact versions. Inherited files are bound
 by the base-image digest and are not redundantly re-resolved.
 
 Do not install a vLLM meta-extra, upgrade Torch, rebuild Flash-Attention, apply
-vLLM source patches, or add multi-node launch machinery. Add runtime packages
+broad vLLM source patches, or add multi-node launch machinery. Add runtime packages
 only when a failing acceptance gate proves that exact addition necessary. If
 the digest-pinned base cannot natively register Qwen3-ASR and serve its
 transcription endpoint, this approach fails closed instead of growing into a
@@ -204,6 +204,24 @@ entity/number/time gate failures. The remaining difference is in the newer
 Qwen3-ASR adapter and Spark-vLLM inference stack and requires a separate,
 case-focused investigation before adoption. No production mutation was made;
 the original ASR image remained healthy with zero restarts.
+
+The follow-up case-focused investigation isolated the regression to one
+operation in `Qwen3OmniMoeAudioEncoder.forward`. Production constructs audio
+`cu_seqlens` directly on the GPU with `torch.tensor(..., device=...)`; the
+Spark-vLLM base replaces that operation with pinned-memory
+`async_tensor_h2d(...).cumsum(...)`. All surrounding audio-attention, layer,
+encoder initialization, and weight-loading code was held constant. An exact
+production-`forward` overlay restored entity `14/22`, number `1/6`, and time
+`1/6` hits in two byte-identical 21-case runs; every selected speech result was
+normalization-equivalent to historical production.
+
+The accepted correction is therefore one guarded build-time source replacement
+of that operation only. The build must fail if the digest-pinned base no longer
+contains the exact expected source block, and must verify that exactly one
+replacement occurred. No module fork, adapter change, loader change, dependency
+change, or runtime monkey patch is permitted. The corrected image must repeat
+the complete 70-case quality and 12-case load gate before it can become rollout
+eligible.
 
 ## Rollout and Rollback
 

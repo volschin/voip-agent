@@ -605,7 +605,84 @@ Remove only the candidate and the two named gateways. Recheck production `runnin
 
 ---
 
-### Task 8: Roll out the accepted image with exact rollback protection
+### Task 8: Apply the guarded audio-encoder correction and revalidate
+
+**Files:**
+- Create: `dgx/asr/patch_qwen3_omni_audio_encoder.py`
+- Modify: `dgx/asr/Dockerfile`
+- Modify: `tests/test_dgx_deployment.py`
+
+**Interfaces:**
+- Consumes: digest-pinned Spark-vLLM module with the exact validated
+  `async_tensor_h2d` source block.
+- Produces: an image that changes only the construction of audio `cu_seqlens`
+  back to the production `torch.tensor(..., device=...)` operation.
+
+- [ ] **Step 1: Add a failing executable patch-contract test**
+
+Create a temporary module fixture containing the exact candidate operation and
+run the patch script as a subprocess. Require exit zero, exactly one replacement,
+the production operation in the output, and no remaining candidate operation.
+Add negative fixtures for a missing source block and a duplicate source block;
+both must exit nonzero without changing the file.
+
+Run:
+
+```bash
+.venv/bin/pytest -q tests/test_dgx_deployment.py -k qwen3_omni_audio_encoder_patch
+```
+
+Expected Red: the patch script does not exist.
+
+- [ ] **Step 2: Implement the minimal fail-closed patch script**
+
+The script accepts exactly one module path, reads it as UTF-8, requires exactly
+one occurrence of the validated candidate block, replaces it with the production
+block, parses and compiles the result, and atomically writes the changed module.
+It must not import vLLM or modify any other method or file.
+
+Run the focused test again. Expected: PASS.
+
+- [ ] **Step 3: Invoke and verify the correction during image build**
+
+Copy the patch script into the image, apply it to
+`vllm/model_executor/models/qwen3_omni_moe_thinker.py`, delete the script, and
+extend the existing Python build assertion to verify the production block is
+present and the candidate block is absent. Do not add packages or build tools.
+
+Run:
+
+```bash
+.venv/bin/pytest -q tests/test_dgx_deployment.py
+.venv/bin/ruff check agent tests dgx
+.venv/bin/ruff format --check agent tests dgx
+docker compose --env-file dgx/.env.example -f dgx/docker-compose.yml config --quiet
+git diff --check
+```
+
+- [ ] **Step 4: Build and run the corrected isolated candidate**
+
+Build a new immutable candidate on GX10, verify module provenance and inherited
+Torch/vLLM identities, load the pinned model offline, and require `/v1/models`,
+one real German request, candidate-correlated CUDA activity, and zero restarts.
+Production remains unchanged.
+
+- [ ] **Step 5: Repeat the complete protected A/B gate**
+
+Using the same normalized gateway, frozen corpus, order, `language=de`, and
+concurrency, run production and corrected candidate through all `70/70` quality
+and `12/12` load requests. Require every original quality, safety, latency, and
+CUDA gate. Preserve only transcript-free aggregate evidence in the repository.
+
+- [ ] **Step 6: Clean diagnostic containers and report eligibility**
+
+Remove only the corrected candidate and gateways. Retain the accepted image by
+immutable ID, verify production remains `running|healthy|0|unless-stopped`, and
+report whether all rollout gates are now green.
+
+---
+
+### Task 9: Roll out the accepted image with exact rollback protection
 
 **Execution status: NOT RUN.** The corrected Task 7 A/B failed the mandatory
 entity-recall and number/time non-degradation gates. A follow-up full-corpus
@@ -658,7 +735,7 @@ Upsert the exact backup Compose and environment, then require the old image ID, 
 
 ---
 
-### Task 9: Run final verification and whole-branch review
+### Task 10: Run final verification and whole-branch review
 
 **Files:**
 - Modify only if evidence invalidated it: `docs/superpowers/specs/2026-08-09-spark-vllm-asr-image-design.md`
