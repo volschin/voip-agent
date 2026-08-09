@@ -25,7 +25,9 @@ def _assert_hash_locked(requirements: str) -> None:
 
     assert entry_indexes
     for index, next_index in zip(entry_indexes, [*entry_indexes[1:], len(lines)], strict=True):
-        hashes = re.findall(r"--hash=\S*", "\n".join(lines[index:next_index]))
+        package_lines = lines[index:next_index]
+        package_block = "\n".join(line.split("#", maxsplit=1)[0] for line in package_lines)
+        hashes = re.findall(r"--hash=\S*", package_block)
         assert hashes
         assert all(LOCK_HASH.fullmatch(value) for value in hashes)
 
@@ -295,8 +297,16 @@ def test_tts_lock_contract_rejects_tampered_hashes() -> None:
         "    --hash=",
         1,
     )
+    comment_only_multiline_hash = "demo==1.0\n # --hash=sha256:" + "0" * 64
+    comment_only_inline_hash = "demo==1.0 # --hash=sha256:" + "0" * 64
 
-    for tampered in (tampered_runtime, tampered_qwen, tampered_empty_runtime_hash):
+    for tampered in (
+        tampered_runtime,
+        tampered_qwen,
+        tampered_empty_runtime_hash,
+        comment_only_multiline_hash,
+        comment_only_inline_hash,
+    ):
         with pytest.raises(AssertionError):
             _assert_hash_locked(tampered)
 
