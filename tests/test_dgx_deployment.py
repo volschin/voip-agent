@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ASR_REVISION = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
 TTS_BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
 LOCK_ENTRY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\[[^]]+\])?==\S+")
-LOCK_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}(?:\s|$)")
+LOCK_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
 
 
 def _compose() -> dict:
@@ -25,7 +25,9 @@ def _assert_hash_locked(requirements: str) -> None:
 
     assert entry_indexes
     for index, next_index in zip(entry_indexes, [*entry_indexes[1:], len(lines)], strict=True):
-        assert LOCK_HASH.search("\n".join(lines[index:next_index]))
+        hashes = re.findall(r"--hash=\S+", "\n".join(lines[index:next_index]))
+        assert hashes
+        assert all(LOCK_HASH.fullmatch(value) for value in hashes)
 
 
 def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:
@@ -191,8 +193,10 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
         "ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:13.3.1-base-ubuntu26.04@"
         "sha256:f65b4f0b65bbf2e0a2520cebaec3120bf4ed110aecc3e7dcab3b11cb508a0484" in dockerfile
     )
-    assert dockerfile.count("FROM ${CUDA_DEVEL_IMAGE} AS builder") == 1
-    assert dockerfile.count("FROM ${CUDA_RUNTIME_IMAGE} AS runtime") == 1
+    assert [line for line in dockerfile.splitlines() if line.startswith("FROM ")] == [
+        "FROM ${CUDA_DEVEL_IMAGE} AS builder",
+        "FROM ${CUDA_RUNTIME_IMAGE} AS runtime",
+    ]
     for input_dependency, resolved_dependency in (
         ("accelerate==1.12.0", "accelerate==1.12.0"),
         ("einops==0.8.2", "einops==0.8.2"),
@@ -230,8 +234,11 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     for lock in (requirements, tts_packages, flash_attn):
         _assert_hash_locked(lock)
 
-    assert "COPY tts/requirements-slim-arm64.lock /tmp/requirements-slim-arm64.lock" in dockerfile
-    assert "-r /tmp/requirements-slim-arm64.lock" in dockerfile
+    assert (
+        "COPY tts/requirements-slim-arm64.lock /tmp/requirements-slim-arm64.lock\n"
+        "RUN pip install --no-cache-dir --require-hashes \\\n"
+        "      -r /tmp/requirements-slim-arm64.lock" in dockerfile
+    )
     assert (
         "COPY tts/tts-packages-arm64.lock /tmp/tts-packages-arm64.lock\n"
         "RUN pip install --no-cache-dir --require-hashes --no-deps \\\n"
@@ -246,12 +253,18 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     assert "flash-attn install failed" not in dockerfile
 
 
-def test_tts_lock_contract_rejects_tampered_qwen_hash() -> None:
+def test_tts_lock_contract_rejects_tampered_hashes() -> None:
+    requirements = (ROOT / "dgx/tts/requirements-slim-arm64.lock").read_text(encoding="utf-8")
     tts_packages = (ROOT / "dgx/tts/tts-packages-arm64.lock").read_text(encoding="utf-8")
-    tampered = tts_packages.replace(
+    tampered_runtime = requirements.replace(
+        "3e2091cd341423207e2f084a6654b1efcd250dc326f2a37d6dde446e07cabb11",
+        "not-a-full-sha256",
+    )
+    tampered_qwen = tts_packages.replace(
         "3881a41dc189f0a6e93fa047f376deffeb2fa84e888e7d570f79b3e2267765cc",
         "not-a-full-sha256",
     )
 
-    with pytest.raises(AssertionError):
-        _assert_hash_locked(tampered)
+    for tampered in (tampered_runtime, tampered_qwen):
+        with pytest.raises(AssertionError):
+            _assert_hash_locked(tampered)
