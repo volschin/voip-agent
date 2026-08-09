@@ -179,6 +179,123 @@ def test_asr_is_offline_pinned_and_health_checks_loaded_model() -> None:
     assert "qwen3-asr" in health_command
 
 
+def test_asr_audio_lock_rejects_decoder_drift_and_implicit_dependency_resolution() -> None:
+    """Catch an audio decoder update or resolver expansion that changes the validated base image."""
+    requirements_input = (ROOT / "dgx/asr/requirements-audio-arm64.in").read_text(encoding="utf-8")
+    requirements_lock = (ROOT / "dgx/asr/requirements-audio-arm64.lock").read_text(encoding="utf-8")
+    expected_headers = {"soundfile==0.13.1", "av==17.0.1"}
+
+    assert requirements_input.splitlines() == ["soundfile==0.13.1", "av==17.0.1"], (
+        "The ASR audio input must remain the two validated direct decoder distributions."
+    )
+    lock_headers = [
+        re.sub(r"[-_.]+", "-", match.group(0).split("==", maxsplit=1)[0]).lower()
+        + "=="
+        + match.group(0).split("==", maxsplit=1)[1]
+        for line in requirements_lock.splitlines()
+        if (match := LOCK_ENTRY.match(line))
+    ]
+    assert len(lock_headers) == 2 and set(lock_headers) == expected_headers, (
+        "The generated ASR audio lock must not introduce a transitive or replacement package."
+    )
+
+    lines = requirements_lock.splitlines()
+    entry_indexes = [index for index, line in enumerate(lines) if LOCK_ENTRY.match(line)]
+    for index, next_index in zip(entry_indexes, [*entry_indexes[1:], len(lines)], strict=True):
+        header = lines[index].split(maxsplit=1)[0]
+        package_block = "\n".join(lines[index:next_index])
+        hashes = re.findall(r"--hash=\S+", package_block)
+
+        assert hashes, f"{header} must have a hash so a future build cannot resolve a new wheel."
+        assert all(LOCK_HASH.fullmatch(value) for value in hashes), (
+            f"{header} must use complete SHA-256 hashes so the selected wheel is reproducible."
+        )
+
+
+def test_asr_spark_image_rejects_core_stack_reinstallation() -> None:
+    """Catch a pip install that replaces the Torch/vLLM runtime proven on the Spark base image."""
+    dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
+    logical_instructions = _logical_docker_instructions(dockerfile)
+    expected_base = (
+        "FROM eugr/spark-vllm@"
+        "sha256:1d861bef8a6c0851140cec2575ebd32342d55bc0fd28ad4c6ca178269e9d1cff"
+    )
+    audio_lock_installs = [
+        instruction
+        for instruction in logical_instructions
+        if "requirements-audio-arm64.lock" in instruction
+        and re.search(r"\bpip\s+install\b", instruction)
+    ]
+
+    assert [
+        instruction for instruction in logical_instructions if re.match(r"FROM\s+", instruction)
+    ] == [expected_base], (
+        "The ASR derivative must inherit the immutable validated Spark-vLLM image."
+    )
+    assert len(audio_lock_installs) == 1, (
+        "The ASR image must install its audio extension from the repository-owned "
+        "lock exactly once."
+    )
+    assert "--require-hashes" in audio_lock_installs[0], (
+        "The ASR audio install must reject an unverified replacement wheel."
+    )
+    assert "--no-deps" in audio_lock_installs[0], (
+        "The ASR audio install must not ask pip to re-resolve inherited runtime dependencies."
+    )
+
+    for package in ("torch", "vllm", "triton", "flashinfer", "flash-attn", "flash_attn", "cffi"):
+        assert not any(
+            re.search(
+                rf"\bpip\s+install\b.*(?<![A-Za-z0-9_.-]){re.escape(package)}"
+                r"(?![A-Za-z0-9_.-])",
+                instruction,
+            )
+            for instruction in logical_instructions
+        ), f"Installing {package} would replace an inherited Spark-vLLM runtime dependency."
+
+
+def test_asr_spark_image_build_preserves_existing_service_contract() -> None:
+    """Catch a mutable Compose image or changed running ASR service."""
+    service = _compose()["services"]["qwen3-asr"]
+    environment = set(service["environment"])
+    command = [str(value) for value in service["command"]]
+    health_command = " ".join(service["healthcheck"]["test"])
+
+    assert service["build"] == {"context": ".", "dockerfile": "asr/Dockerfile"}, (
+        "Compose must build the repository-owned ASR derivative rather than "
+        "pulling an external image."
+    )
+    assert "image" not in service, (
+        "A mutable external ASR image tag would bypass the locked derivative."
+    )
+    assert service["container_name"] == "qwen3-asr", (
+        "The stable ASR service identity must not change."
+    )
+    assert service["deploy"]["resources"]["reservations"]["devices"] == [
+        {"driver": "nvidia", "count": 1, "capabilities": ["gpu"]}
+    ], "The ASR service must retain its GPU reservation."
+    assert service["networks"] == ["default", "shared_ai_voice"], (
+        "The ASR service must retain both its internal and proxy networks."
+    )
+    assert service["shm_size"] == "4gb", "The ASR image must retain its shared-memory allocation."
+    assert service["restart"] == "unless-stopped", (
+        "The ASR service must retain its recovery policy."
+    )
+    assert service["labels"] == ["autoheal=true"], (
+        "The ASR service must remain eligible for autoheal."
+    )
+    assert {"HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1"} <= environment, (
+        "The ASR service must continue using the preloaded model cache offline."
+    )
+    assert ASR_REVISION in " ".join(command), "The ASR model snapshot revision must remain pinned."
+    assert command[command.index("--served-model-name") + 1] == "qwen3-asr", (
+        "The ASR OpenAI model identifier must stay stable."
+    )
+    assert "/v1/models" in health_command and "qwen3-asr" in health_command, (
+        "The ASR health check must continue validating the loaded served model."
+    )
+
+
 class FakeCuda:
     def __init__(self, *, available: bool, name: str = "NVIDIA GB10") -> None:
         self._available = available
