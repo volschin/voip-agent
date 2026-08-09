@@ -166,23 +166,38 @@ def test_tts_image_copies_clone_code_but_no_private_profile_assets() -> None:
 
 def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     dockerfile = (ROOT / "dgx/tts/Dockerfile").read_text(encoding="utf-8")
-    requirements = (ROOT / "dgx/tts/requirements-arm64.lock").read_text(encoding="utf-8")
+    requirements = (ROOT / "dgx/tts/requirements-slim-arm64.lock").read_text(encoding="utf-8")
 
     assert (
-        "FROM ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3@"
-        "sha256:6506ebcb79b1bd0d48f8afca127984791f32345333be1be0fef334eaa5a9e23a" in dockerfile
+        "ARG CUDA_DEVEL_IMAGE=nvidia/cuda:13.3.1-devel-ubuntu26.04@"
+        "sha256:da3989b0ea8e8b4b241711edd5823bc1cc83d05a01882258bddad84d7394c37e" in dockerfile
+    )
+    assert (
+        "ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:13.3.1-base-ubuntu26.04@"
+        "sha256:f65b4f0b65bbf2e0a2520cebaec3120bf4ed110aecc3e7dcab3b11cb508a0484" in dockerfile
     )
     for dependency in (
-        "faster-qwen3-tts==0.2.6",
-        "qwen-tts==0.1.1",
+        "accelerate==1.12.0",
         "fastapi==0.135.3",
-        "uvicorn[standard]==0.44.0",
+        "onnxruntime==1.28.0",
+        "uvicorn==0.44.0",
         "pydantic==2.12.5",
-        "flash-attn==2.8.3",
-        "av==17.0.1",
+        "torch==2.13.0+cu132",
+        "transformers==4.57.3",
     ):
         assert dependency in requirements
-    locked = [line for line in requirements.splitlines() if line and not line.startswith("#")]
-    assert all("==" in line and " --hash=sha256:" in line for line in locked)
+    lines = requirements.splitlines()
+    package_headers = [
+        index
+        for index, line in enumerate(lines)
+        if line and not line.startswith(("#", "--", " ")) and "==" in line
+    ]
+    assert package_headers
+    assert all(
+        lines[index].endswith(" \\") and lines[index + 1].startswith("    --hash=sha256:")
+        for index in package_headers
+    )
+    assert "COPY tts/requirements-slim-arm64.lock /tmp/requirements-slim-arm64.lock" in dockerfile
+    assert "-r /tmp/requirements-slim-arm64.lock" in dockerfile
     assert "--require-hashes" in dockerfile
     assert "flash-attn install failed" not in dockerfile
