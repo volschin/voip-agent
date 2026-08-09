@@ -1,5 +1,14 @@
 # Spark-vLLM ASR Image Implementation Plan
 
+> **Historical execution record (2026-08-09):** Do not execute the commands in
+> this plan as a current rollout procedure. Some steps retain the original
+> `qwen3-asr-spark-test` namespace and intermediate 0.6B experiment history.
+> The final image-only qualification instead used the exact Urocyon 1.7B
+> revision on both sides and rejected the candidate because non-speech
+> hallucinated words increased from `5` to `14`. Production was not changed.
+> Any new candidate or rollout requires a new plan, a complete fresh gate, and
+> separate explicit authorization.
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the current 33.29 GB Qwen3-ASR production image with a smaller digest-pinned `eugr/spark-vllm` derivative while preserving the exact model revision, OpenAI transcription contract, German quality, CUDA execution, and production latency.
@@ -690,13 +699,15 @@ report whether all rollout gates are now green.
 
 ### Task 9: Roll out the accepted image with exact rollback protection
 
-**Execution status: NOT RUN.** The corrected Task 7 A/B failed the mandatory
-entity-recall and number/time non-degradation gates. A follow-up full-corpus
-language-hint diagnostic confirmed that `language=de` changes some candidate
-outputs and improves non-speech behavior, but does not change the failed
-quality metrics. The all-green prerequisite below is therefore false, and no
-Portainer mutation, release tag, rollback tag, or production replacement is
-authorized by this plan execution.
+**Execution status: NOT RUN.** The earlier Task 7 result changed both image and
+model identity and is invalid for eligibility. The final exact-model comparison
+served Urocyon Qwen3-ASR-1.7B-NVFP4 revision
+`61ad4d533c64e033a750b66c44aad6f18634997e` on both sides. It passed request,
+WER/CER, entity, number/time/date, latency, and CUDA gates but failed the
+mandatory non-speech safety gate because hallucinated words increased from `5`
+to `14`. The all-green prerequisite below is therefore false, and no Portainer
+mutation, release tag, rollback tag, or production replacement is authorized
+by this plan execution.
 
 **Files:**
 - No planned repository changes.
