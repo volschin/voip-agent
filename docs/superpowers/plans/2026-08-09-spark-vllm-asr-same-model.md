@@ -1,5 +1,15 @@
 # Spark-vLLM ASR Same-Model Correction Implementation Plan
 
+> **COMPLETED HISTORICAL RECORD — DO NOT EXECUTE.** This plan finished on
+> 2026-08-09. Production and candidate each completed exact-model `70/70`
+> quality plus `12/12` load series with container-correlated CUDA. The
+> candidate failed the mandatory non-speech safety gate because hallucinated
+> words increased from production `5` to candidate `14`; it is not eligible for
+> rollout, and production was not changed. Every unchecked box and live command
+> below records the historical procedure rather than pending work. Do not rerun
+> or continue any step from this document. A future experiment requires a new
+> plan, fresh authorization, and new exclusive evidence paths.
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Requalify the unchanged first Spark-vLLM image against production with the exact same Urocyon Qwen3-ASR-1.7B-NVFP4 model snapshot.

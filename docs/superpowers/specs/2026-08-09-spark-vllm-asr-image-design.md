@@ -201,13 +201,24 @@ with zero restarts, and no rollout occurred.
 
 ## Rollout and Rollback
 
-Before rollout, tag the exact current production image ID as
+> **Historical/future-only procedure — not current rollout authorization.** The
+> measured candidate
+> `sha256:ccbee8c22f1619e35ff5f56244d371c663d22628ee919e016a3fec9b535b0fb0`
+> is explicitly prohibited from rollout by the current evidence because its
+> mandatory non-speech safety gate failed. The steps below become applicable
+> only to a new eligible candidate after a fresh complete quality/load/CUDA
+> gate passes and the user separately authorizes rollout. Re-read current live
+> production state before any such future action.
+
+For such a separately authorized future rollout, tag the exact current
+production image ID as
 `dgx-qwen3-asr:rollback-38f255cd`. Tag the accepted candidate with an immutable
 release tag containing the Git commit.
 
-Update only the `qwen3-asr` image line in Portainer stack `voice` (ID 16), with
-pull and prune disabled. Preserve all environment, mounts, networks, command,
-healthcheck, and other services byte-for-byte.
+Only in that future authorized rollout, update the `qwen3-asr` image line in
+Portainer stack `voice` (ID 16), with pull and prune disabled. Preserve all
+environment, mounts, networks, command, healthcheck, and other services
+byte-for-byte.
 
 Post-rollout acceptance requires:
 
