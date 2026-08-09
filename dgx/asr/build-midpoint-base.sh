@@ -36,7 +36,7 @@ assert len(matches) == 1, matches
 
 assert_image_inventory() {
   local image_tag=$1
-  local image_id architecture labels environment source_layers image_layers
+  local image_id architecture labels environment source_image image_layers
 
   image_id=$(docker image inspect --format '{{.Id}}' "$image_tag")
   architecture=$(docker image inspect --format '{{.Architecture}}' "$image_tag")
@@ -44,17 +44,20 @@ assert_image_inventory() {
   environment=$(docker image inspect --format '{{json .Config.Env}}' "$image_tag")
   test -n "$image_id"
   test "$architecture" = arm64
-  test "$labels" = null
   assert_cuda_arm64_manifest
-  source_layers=$(docker image inspect --format '{{json .RootFS.Layers}}' \
+  source_image=$(docker buildx imagetools inspect --format '{{json .Image}}' \
     "nvidia/cuda:13.0.2-devel-ubuntu24.04@$CUDA_ARM64_MANIFEST")
   image_layers=$(docker image inspect --format '{{json .RootFS.Layers}}' "$image_tag")
-  python3 - "$image_tag" "$source_layers" "$image_layers" <<'PY'
+  python3 - "$image_tag" "$source_image" "$labels" "$image_layers" <<'PY'
 import json
 import sys
 
-image_tag, source_layers_json, image_layers_json = sys.argv[1:]
-source_layers = json.loads(source_layers_json)
+image_tag, source_image_json, image_labels_json, image_layers_json = sys.argv[1:]
+source_image = json.loads(source_image_json)
+source_labels = source_image["config"].get("Labels")
+image_labels = json.loads(image_labels_json)
+assert image_labels == source_labels, (image_tag, image_labels, source_labels)
+source_layers = source_image["rootfs"]["diff_ids"]
 image_layers = json.loads(image_layers_json)
 assert source_layers
 assert image_layers[: len(source_layers)] == source_layers, image_tag

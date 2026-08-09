@@ -392,10 +392,21 @@ def test_asr_midpoint_build_asserts_arm64_manifest_and_label_provenance() -> Non
     script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
 
     assert "docker buildx imagetools inspect --raw" in script
+    assert "docker buildx imagetools inspect --format '{{json .Image}}'" in script
     assert "CUDA_ARM64_MANIFEST" in script
     assert "RootFS.Layers" in script
     assert "source_layers" in script
-    assert 'test "$labels" = null' in script
+    assert 'source_image["config"].get("Labels")' in script
+    assert "image_labels == source_labels" in script
+    assert 'test "$labels" = null' not in script
+
+
+def test_asr_midpoint_build_normalizes_exact_vllm_distribution_version() -> None:
+    patch = (ROOT / "dgx/asr/eugr-midpoint.patch").read_text(encoding="utf-8")
+
+    assert "VLLM_VERSION_OVERRIDE=0.23.0 uv build" in patch, (
+        "The pinned post-release vLLM commit otherwise creates a date-dependent dev wheel."
+    )
 
 
 def test_asr_midpoint_build_exempts_only_exact_pytorch_stack_from_cutoff() -> None:
