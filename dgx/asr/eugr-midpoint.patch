@@ -25,3 +25,13 @@ index fa56986..439ccde 100644
 @@ -407 +410 @@ RUN --mount=type=bind,source=wheels,target=/workspace/wheels \
 -        echo "transformers>=5.0.0" >> /tmp/wheel-override.txt; \
 +        echo "transformers==5.12.1" >> /tmp/wheel-override.txt; \
+diff --git a/build-and-copy.sh b/build-and-copy.sh
+index 516eec1..01a32cc 100755
+--- a/build-and-copy.sh
++++ b/build-and-copy.sh
+@@ -653 +653 @@ if [ "$NO_BUILD" = false ]; then
+-                FI_CMD+=("--build-arg" "CACHEBUST_FLASHINFER=$(date +%s)")
++                FI_CMD+=("--build-arg" "CACHEBUST_FLASHINFER=$FLASHINFER_REF")
+@@ -720 +720 @@ if [ "$NO_BUILD" = false ]; then
+-                VLLM_CMD+=("--build-arg" "CACHEBUST_VLLM=$(date +%s)")
++                VLLM_CMD+=("--build-arg" "CACHEBUST_VLLM=$VLLM_REF")

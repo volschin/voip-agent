@@ -154,7 +154,8 @@ git clone --filter=blob:none https://github.com/eugr/spark-vllm-docker.git "$sou
 git -C "$source_root/eugr" checkout --detach "$EUGR_COMMIT"
 git -C "$source_root/eugr" apply --check --unidiff-zero "$script_dir/eugr-midpoint.patch"
 git -C "$source_root/eugr" apply --unidiff-zero "$script_dir/eugr-midpoint.patch"
-test "$(git -C "$source_root/eugr" diff --name-only)" = Dockerfile
+expected_upstream_changes=$'Dockerfile\nbuild-and-copy.sh'
+test "$(git -C "$source_root/eugr" diff --name-only)" = "$expected_upstream_changes"
 
 (
   cd "$source_root/eugr"

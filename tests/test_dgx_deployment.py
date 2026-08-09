@@ -409,6 +409,21 @@ def test_asr_midpoint_build_normalizes_exact_vllm_distribution_version() -> None
     )
 
 
+def test_asr_midpoint_build_uses_exact_refs_as_deterministic_cache_keys() -> None:
+    script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
+    patch = (ROOT / "dgx/asr/eugr-midpoint.patch").read_text(encoding="utf-8")
+    added_lines = {
+        line[1:].strip()
+        for line in patch.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    }
+
+    assert 'FI_CMD+=("--build-arg" "CACHEBUST_FLASHINFER=$FLASHINFER_REF")' in added_lines
+    assert 'VLLM_CMD+=("--build-arg" "CACHEBUST_VLLM=$VLLM_REF")' in added_lines
+    assert not any("CACHEBUST_" in line and "date +%s" in line for line in added_lines)
+    assert "expected_upstream_changes=$'Dockerfile\\nbuild-and-copy.sh'" in script
+
+
 def test_asr_midpoint_build_exempts_only_exact_pytorch_stack_from_cutoff() -> None:
     patch = (ROOT / "dgx/asr/eugr-midpoint.patch").read_text(encoding="utf-8")
     exact_install = (
