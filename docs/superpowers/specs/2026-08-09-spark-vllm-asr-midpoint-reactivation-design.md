@@ -11,7 +11,18 @@ The corrected vLLM `0.23.0` candidate passed the frozen 1.7B non-speech gate
 at the exact production limit: `10/10` requests, `5` hallucinated words, no
 structural or safety failures, and candidate-correlated CUDA activity. It is
 retained as the next candidate. The conditional complete 70/12 A/B and rollout
-were **NOT EXECUTED**.
+were **NOT EXECUTED** within this bounded plan.
+
+## Post-plan complete A/B addendum
+
+After this plan completed, the user separately authorized the existing
+complete same-model workflow. Production and candidate each completed exact
+`70/70` quality and `12/12` load series through one immutable normalized
+gateway. Quality aggregates were identical, including non-speech `5 → 5`;
+candidate/production load ratios were `1.018343` at p50 and `1.043967` at p90.
+Both CUDA gates and every predeclared acceptance gate passed. The candidate is
+eligible for rollout. Rollout remains **NOT EXECUTED** pending separate
+authorization.
 
 ## Goal
 

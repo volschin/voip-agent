@@ -2,7 +2,8 @@
 
 > **COMPLETED HISTORICAL RECORD — DO NOT EXECUTE.** Every command below is
 > historical evidence. The conditional complete A/B and rollout were **NOT
-> EXECUTED**.
+> EXECUTED** within this plan. A separately authorized post-plan A/B later
+> completed successfully; rollout remains **NOT EXECUTED**.
 
 **Outcome:** The recovered `bfa7bcd7...` intermediate was rejected because it
 contained `vllm==0.23.1.dev0`; a corrected base
@@ -12,6 +13,12 @@ and derivative
 were built. The derivative passed the frozen gate with `10/10` valid requests,
 exactly `5` hallucinated words, no safety failures, and real candidate CUDA.
 It is retained as the next candidate; no rollout occurred.
+
+**Post-plan addendum:** The later exact same-model A/B completed production and
+candidate `70/70` quality plus `12/12` load series. Quality was identical,
+non-speech remained `5 → 5`, load p50/p90 ratios were `1.018343`/`1.043967`,
+both CUDA gates passed, and every acceptance gate was true. The candidate is
+eligible for rollout; no rollout, push, PR, or merge occurred.
 
 **Goal:** Recover or rebuild the exact vLLM `0.23.0` midpoint base, finish its ASR derivative, and qualify it once against the frozen ten-case non-speech gate with the production UrocyonF 1.7B model.
 
