@@ -226,11 +226,12 @@ is committed.
 
 Read production image, command, state, health, restart count, and policy. Require
 no container named `qwen3-asr-midpoint-v023-test` or
-`asr-midpoint-v023-gateway`. Inspect the base tag and require its exact ID before
+`asr-midpoint-v023-gateway`. Inspect and record the recovered base tag before
 transferring any build input.
 
 Expected: production is `running|healthy|0|unless-stopped`; both names are empty;
-base ID is exactly the global constraint.
+the recovered base is
+`sha256:bfa7bcd7c70829e44cd919f22fc68a028816681abe8d4f3b4a2b1ba81e47c134`.
 
 - [x] **Step 2: Transfer only committed build inputs**
 
@@ -256,15 +257,23 @@ SHA-256 values against the local committed files without printing the directory.
 
 - [x] **Step 3: Reject the recovered intermediate, rebuild the base, then build the derivative**
 
-Run the transferred script with:
+The first invocation tested reuse and failed closed:
 
 ```bash
 ssh volsch@192.168.68.41 \
   "$remote_build_root/dgx/asr/build-midpoint-base.sh --reuse-base"
 ```
 
-Observed: reuse rejected the recovered intermediate because its vLLM version
-was not exact. The full pinned source path then built corrected base
+Reuse rejected the recovered intermediate because its vLLM version was not
+exact. A separate invocation without `--reuse-base` then ran the full pinned
+source path:
+
+```bash
+ssh volsch@192.168.68.41 \
+  "$remote_build_root/dgx/asr/build-midpoint-base.sh"
+```
+
+That invocation built corrected base
 `sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1`,
 built the derivative, and passed its complete final-image inventory.
 
@@ -292,9 +301,10 @@ distribution. Record the final image ID and byte size.
 - [x] **Step 5: Write the transcript-free build report**
 
 Record exact committed input hashes, base/final identities, version inventory,
-adapter/build-metadata proof, whether the native base path ran (`false`), build
-duration, and unchanged production invariant. Omit remote paths and raw Docker
-archive content.
+adapter/build-metadata proof, the native base execution (`true` for the
+corrected full build and `false` for the final reuse cycle), build duration,
+and unchanged production invariant. Omit remote paths and raw Docker archive
+content.
 
 ### Task 3: Prove the 1.7B runtime and run the ten non-speech cases once
 
