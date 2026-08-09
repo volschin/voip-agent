@@ -607,6 +607,14 @@ Remove only the candidate and the two named gateways. Recheck production `runnin
 
 ### Task 8: Roll out the accepted image with exact rollback protection
 
+**Execution status: NOT RUN.** The corrected Task 7 A/B failed the mandatory
+entity-recall and number/time non-degradation gates. A follow-up full-corpus
+language-hint diagnostic confirmed that `language=de` changes some candidate
+outputs and improves non-speech behavior, but does not change the failed
+quality metrics. The all-green prerequisite below is therefore false, and no
+Portainer mutation, release tag, rollback tag, or production replacement is
+authorized by this plan execution.
+
 **Files:**
 - No planned repository changes.
 - Protected backups and environments remain in a mode-`0700` local run directory.

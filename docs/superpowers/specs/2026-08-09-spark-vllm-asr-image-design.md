@@ -169,6 +169,42 @@ Do not delete outliers. If an isolated shared-host anomaly affects both images,
 one predeclared complete replication may be used; report both series and the
 combined result.
 
+### Execution outcome
+
+The corrected protected A/B on 2026-08-09 used the same Qwen3-ASR-0.6B model
+revision, identical corpus bytes, `language=de`, request order, concurrency,
+and one normalized gateway image for both backends. Production and candidate
+each completed `70/70` quality and `12/12` load requests with observed CUDA
+activity. The Spark-vLLM candidate reduced load latency and aggregate error:
+
+- p50 latency ratio: `0.6723` candidate/production;
+- nearest-rank p90 latency ratio: `0.7243`;
+- WER: `0.03346` candidate versus `0.04528` production;
+- CER: `0.01004` candidate versus `0.03824` production;
+- non-speech hallucinated words: `2` candidate versus `5` production.
+
+It nevertheless failed the mandatory non-degradation gates. Entity recall was
+`0.5909` instead of `0.6364`, and number and time accuracy were both `0.0`
+instead of `0.1667`. The candidate is therefore not eligible for production
+rollout.
+
+A follow-up language-hint diagnostic ran four complete 70-case series directly
+against the two backends, with and without `language=de`, followed by a repeated
+candidate pair. Production returned identical transcripts and scores in both
+modes, confirming that its older Qwen3-ASR adapter ignores the transcription
+language parameter. Spark-vLLM changed `9` raw and `5` normalized transcripts
+between the first German-forced and automatic-language runs, but WER, entity
+recall, and number/time accuracy were unchanged. Repetition preserved those
+core scores. German forcing reduced non-speech hallucinated words from `3` to
+`1`-`2`, while one normalized non-speech result varied between its two runs.
+
+Consequently, `language=de` remains the correct production contract and is
+beneficial for non-speech behavior, but it does not explain or repair the
+entity/number/time gate failures. The remaining difference is in the newer
+Qwen3-ASR adapter and Spark-vLLM inference stack and requires a separate,
+case-focused investigation before adoption. No production mutation was made;
+the original ASR image remained healthy with zero restarts.
+
 ## Rollout and Rollback
 
 Before rollout, tag the exact current production image ID as
