@@ -1,5 +1,6 @@
 """Deployment contract for the independently owned GX10 voice stack."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,21 @@ from dgx.tts.runtime import normalize_language, require_gb10_cuda
 ROOT = Path(__file__).resolve().parents[1]
 ASR_REVISION = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
 TTS_BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
+LOCK_ENTRY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\[[^]]+\])?==\S+")
+LOCK_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}(?:\s|$)")
 
 
 def _compose() -> dict:
     return yaml.safe_load((ROOT / "dgx/docker-compose.yml").read_text(encoding="utf-8"))
+
+
+def _assert_hash_locked(requirements: str) -> None:
+    lines = requirements.splitlines()
+    entry_indexes = [index for index, line in enumerate(lines) if LOCK_ENTRY.match(line)]
+
+    assert entry_indexes
+    for index, next_index in zip(entry_indexes, [*entry_indexes[1:], len(lines)], strict=True):
+        assert LOCK_HASH.search("\n".join(lines[index:next_index]))
 
 
 def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:
@@ -166,7 +178,10 @@ def test_tts_image_copies_clone_code_but_no_private_profile_assets() -> None:
 
 def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     dockerfile = (ROOT / "dgx/tts/Dockerfile").read_text(encoding="utf-8")
+    runtime_input = (ROOT / "dgx/tts/requirements-slim-arm64.in").read_text(encoding="utf-8")
     requirements = (ROOT / "dgx/tts/requirements-slim-arm64.lock").read_text(encoding="utf-8")
+    tts_packages = (ROOT / "dgx/tts/tts-packages-arm64.lock").read_text(encoding="utf-8")
+    flash_attn = (ROOT / "dgx/tts/flash-attn-arm64.lock").read_text(encoding="utf-8")
 
     assert (
         "ARG CUDA_DEVEL_IMAGE=nvidia/cuda:13.3.1-devel-ubuntu26.04@"
@@ -176,28 +191,67 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
         "ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:13.3.1-base-ubuntu26.04@"
         "sha256:f65b4f0b65bbf2e0a2520cebaec3120bf4ed110aecc3e7dcab3b11cb508a0484" in dockerfile
     )
-    for dependency in (
-        "accelerate==1.12.0",
-        "fastapi==0.135.3",
-        "onnxruntime==1.28.0",
-        "uvicorn==0.44.0",
-        "pydantic==2.12.5",
-        "torch==2.13.0+cu132",
-        "transformers==4.57.3",
+    assert dockerfile.count("FROM ${CUDA_DEVEL_IMAGE} AS builder") == 1
+    assert dockerfile.count("FROM ${CUDA_RUNTIME_IMAGE} AS runtime") == 1
+    for input_dependency, resolved_dependency in (
+        ("accelerate==1.12.0", "accelerate==1.12.0"),
+        ("einops==0.8.2", "einops==0.8.2"),
+        ("fastapi==0.135.3", "fastapi==0.135.3"),
+        ("huggingface-hub==0.36.2", "huggingface-hub==0.36.2"),
+        ("librosa==0.11.0", "librosa==0.11.0"),
+        ("onnxruntime==1.28.0", "onnxruntime==1.28.0"),
+        ("pydantic==2.12.5", "pydantic==2.12.5"),
+        ("soundfile==0.14.0", "soundfile==0.14.0"),
+        ("sox==1.5.0", "sox==1.5.0"),
+        ("torch==2.13.0+cu132", "torch==2.13.0+cu132"),
+        ("transformers==4.57.3", "transformers==4.57.3"),
+        ("uvicorn[standard]==0.44.0", "uvicorn==0.44.0"),
     ):
-        assert dependency in requirements
-    lines = requirements.splitlines()
-    package_headers = [
-        index
-        for index, line in enumerate(lines)
-        if line and not line.startswith(("#", "--", " ")) and "==" in line
-    ]
-    assert package_headers
-    assert all(
-        lines[index].endswith(" \\") and lines[index + 1].startswith("    --hash=sha256:")
-        for index in package_headers
+        assert input_dependency in runtime_input
+        assert resolved_dependency in requirements
+
+    assert (
+        "faster-qwen3-tts==0.2.6 "
+        "--hash=sha256:3881a41dc189f0a6e93fa047f376deffeb2fa84e888e7d570f79b3e2267765cc"
+        in tts_packages
     )
+    assert (
+        "qwen-tts==0.1.1 "
+        "--hash=sha256:11a290d8dabc7ef91a90c54478c8ab19b3edb1d85c0882313721892bdc4af15d"
+        in tts_packages
+    )
+    assert (
+        "flash-attn==2.8.3 "
+        "--hash=sha256:1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d"
+        in flash_attn
+    )
+    assert "torchaudio" not in tts_packages
+    assert "gradio" not in tts_packages
+    for lock in (requirements, tts_packages, flash_attn):
+        _assert_hash_locked(lock)
+
     assert "COPY tts/requirements-slim-arm64.lock /tmp/requirements-slim-arm64.lock" in dockerfile
     assert "-r /tmp/requirements-slim-arm64.lock" in dockerfile
+    assert (
+        "COPY tts/tts-packages-arm64.lock /tmp/tts-packages-arm64.lock\n"
+        "RUN pip install --no-cache-dir --require-hashes --no-deps \\\n"
+        "      -r /tmp/tts-packages-arm64.lock" in dockerfile
+    )
+    assert (
+        "COPY tts/flash-attn-arm64.lock /tmp/flash-attn-arm64.lock\n"
+        "RUN pip install --no-cache-dir --require-hashes --no-deps --no-build-isolation \\\n"
+        "      -r /tmp/flash-attn-arm64.lock" in dockerfile
+    )
     assert "--require-hashes" in dockerfile
     assert "flash-attn install failed" not in dockerfile
+
+
+def test_tts_lock_contract_rejects_tampered_qwen_hash() -> None:
+    tts_packages = (ROOT / "dgx/tts/tts-packages-arm64.lock").read_text(encoding="utf-8")
+    tampered = tts_packages.replace(
+        "3881a41dc189f0a6e93fa047f376deffeb2fa84e888e7d570f79b3e2267765cc",
+        "not-a-full-sha256",
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_hash_locked(tampered)
