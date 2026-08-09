@@ -53,16 +53,23 @@ hashes. New APT packages, if any, use exact versions. Inherited files are bound
 by the base-image digest and are not redundantly re-resolved.
 
 Do not install a vLLM meta-extra, upgrade Torch, rebuild Flash-Attention, apply
-vLLM source patches, or add multi-node launch machinery unless a failing
-acceptance gate proves that exact addition necessary. If the digest-pinned base
-cannot natively register Qwen3-ASR and serve its transcription endpoint, this
-approach fails closed instead of growing into a custom vLLM fork.
+vLLM source patches, or add multi-node launch machinery. Add runtime packages
+only when a failing acceptance gate proves that exact addition necessary. If
+the digest-pinned base cannot natively register Qwen3-ASR and serve its
+transcription endpoint, this approach fails closed instead of growing into a
+custom vLLM fork.
 
 The image entrypoint remains `vllm serve`. Compose continues to own the exact
 command so the model path, served name, memory limit, sequence limits, and API
 port remain visible and reviewable in one place. Repository Compose builds the
 service from `dgx/asr/Dockerfile`; the live Portainer stack uses the accepted
 immutable local release tag.
+
+The first live candidate added a local patch that suppressed vLLM's `usage`
+field. Live production and client-code inspection proved that patch unnecessary:
+production already returns `text+usage`, and `agent/stt.py` reads only `text`.
+Remove the patch script, Docker invocation, and patch-specific tests, then
+rebuild and repeat the real model/API/CUDA gate before benchmarking.
 
 ## Preserved Runtime Contract
 
@@ -73,7 +80,10 @@ The following are invariant:
 - served model name: `qwen3-asr`;
 - endpoint: `POST /v1/audio/transcriptions`;
 - request: multipart WAV plus fixed `language=de` from the production client;
-- response: JSON containing a string `text` field;
+- response: a JSON object containing a string `text` field; additive response
+  fields are permitted because the production `SttClient` consumes
+  `response.json()["text"]` and the running production image already emits a
+  `usage` field;
 - model and Transformers operate offline from the cached snapshot;
 - health checks `/v1/models` and require the served model entry;
 - GPU reservation, 4 GiB shared memory, restart policy, autoheal label, and
@@ -123,7 +133,7 @@ the named test container; the test image remains available for inspection.
 - the pinned local snapshot loads with networking disabled;
 - `/v1/models` reports `qwen3-asr`;
 - a real 16 kHz German WAV sent through `/v1/audio/transcriptions` returns HTTP
-  200 and the expected JSON shape;
+  200 and a JSON object with a string `text` field;
 - the candidate process is observed as a CUDA compute process during a real
   transcription and aggregate SM utilization exceeds zero;
 - model-start or request failure is fatal; there is no CPU fallback.
@@ -131,9 +141,20 @@ the named test container; the test image remains available for inspection.
 ### Quality and performance A/B
 
 Use the existing common ASR gateway and the versioned `asr-companion-de-v1`
-German/Companion/VoIP corpus. Production and candidate receive identical bytes,
-language, ordering, and concurrency. Repository-safe evidence contains no raw
-transcripts or private audio.
+German/Companion/VoIP corpus. A benchmark-only, hash-recorded gateway overlay
+must apply the actual consumer contract to both backends: accept a JSON object
+when `text` is a string, ignore additive response fields, and return only the
+normalized text to the benchmark runner. The same built gateway image is used
+for production and candidate. Production and candidate receive identical
+bytes, language, ordering, and concurrency. Repository-safe evidence contains
+no raw transcripts or private audio.
+
+The initial unchanged-gateway attempt is invalid comparison evidence: its
+strict exact-key check rejected production's valid `text+usage` response and
+therefore produced zero successful production samples. Preserve that failed
+attempt in protected evidence, but do not mix it into latency or quality
+aggregates. Rerun both sides completely after the normalization overlay is
+validated fail-closed.
 
 The candidate is eligible only when:
 
