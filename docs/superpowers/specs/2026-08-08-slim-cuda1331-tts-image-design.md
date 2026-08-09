@@ -81,7 +81,8 @@ It contains only:
 - the exact `gcc-15` and `libc6-dev` runtime closure plus the Python 3.14
   headers copied from the builder. Triton compiles its small CUDA driver helper
   on the first real CUDA invocation; this needs a host-independent C compiler
-  and headers, but not `nvcc`, CUDA headers, `make`, or `build-essential`;
+  and headers, but not `nvcc`, separately installed CUDA toolkit headers,
+  `make`, or `build-essential`;
 - `/opt/tts-venv` copied from the builder;
 - the five repository-owned TTS server modules;
 - NVIDIA container runtime metadata inherited from the CUDA base.

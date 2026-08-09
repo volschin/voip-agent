@@ -58,6 +58,29 @@ def _has_forbidden_torchaudio_pip_install(dockerfile: str) -> bool:
     )
 
 
+def _runtime_stage_instructions(dockerfile: str) -> list[str]:
+    instructions = _logical_docker_instructions(dockerfile)
+    runtime_start = next(
+        index
+        for index, instruction in enumerate(instructions)
+        if re.fullmatch(r"FROM\s+.+\s+AS\s+runtime", instruction, flags=re.IGNORECASE)
+    )
+    return [
+        instruction
+        for instruction in instructions[runtime_start + 1 :]
+        if not re.match(r"FROM\s+", instruction, flags=re.IGNORECASE)
+        and re.match(r"(?:RUN|COPY|ADD|ENV|CMD|ENTRYPOINT)\s+", instruction, flags=re.IGNORECASE)
+    ]
+
+
+def _runtime_stage_uses_forbidden_tool(dockerfile: str) -> bool:
+    return any(
+        re.search(rf"(?<![A-Za-z0-9_.-]){tool}(?![A-Za-z0-9_.-])", instruction)
+        for instruction in _runtime_stage_instructions(dockerfile)
+        for tool in ("nvcc", "make", "build-essential")
+    )
+
+
 def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:
     compose = yaml.safe_load((ROOT / "compose.yml").read_text(encoding="utf-8"))
     hosts = set(compose["services"]["voip-agent"]["extra_hosts"])
@@ -293,13 +316,46 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     )
     assert "--require-hashes" in dockerfile
     assert "flash-attn install failed" not in dockerfile
-    assert "gcc-15=15.2.0-16ubuntu1" in runtime_apt_packages
-    assert "libc6-dev=2.43-2ubuntu2.3" in runtime_apt_packages
+    assert runtime_apt_packages.splitlines() == [
+        "python3=3.14.3-0ubuntu2",
+        "gcc-15=15.2.0-16ubuntu1",
+        "libc6-dev=2.43-2ubuntu2.3",
+        "libsndfile1=1.2.2-4",
+        "libgomp1=16-20260322-1ubuntu1",
+        "sox=14.7.0.9+ds1-1",
+        "libsox-fmt-base=14.7.0.9+ds1-1",
+    ]
     assert "COPY --from=builder /usr/include/python3.14 /usr/include/python3.14" in dockerfile
     assert "COPY --from=builder /usr/include/aarch64-linux-gnu/python3.14" in dockerfile
     assert "CC=gcc-15" in dockerfile
-    assert "command -v nvcc" not in dockerfile
-    assert "build-essential" not in runtime_apt_packages
+    assert not _runtime_stage_uses_forbidden_tool(dockerfile)
+
+
+def test_tts_runtime_stage_rejects_forbidden_tooling_instructions() -> None:
+    builder_only = """FROM base AS builder
+RUN apt-get install -y build-essential make
+FROM base AS runtime
+RUN echo runtime-ready
+"""
+    assert not _runtime_stage_uses_forbidden_tool(builder_only)
+
+    forbidden_runtime_fixtures = (
+        """FROM base AS builder
+FROM base AS runtime
+RUN apt-get install -y build-essential
+""",
+        """FROM base AS builder
+FROM base AS runtime
+RUN /usr/bin/make all
+""",
+        """FROM base AS builder
+FROM base AS runtime
+COPY --from=builder /usr/local/cuda/bin/nvcc /usr/local/bin/nvcc
+""",
+    )
+    assert all(
+        _runtime_stage_uses_forbidden_tool(fixture) for fixture in forbidden_runtime_fixtures
+    )
 
 
 def test_tts_image_extracts_pure_kaldi_compat_without_installing_torchaudio() -> None:
