@@ -69,14 +69,15 @@ _ASR_FORBIDDEN_RUNTIME_PACKAGES = (
 )
 _ASR_AUDIO_LOCK_PATH = "/tmp/requirements-audio-arm64.lock"
 _PIP_INSTALL_COMMAND = re.compile(
-    r"\b(?:python(?:3(?:\.\d+)?)?\s+-m\s+)?(?:\S*/)?pip(?:3)?\b"
+    r"\b(?:python(?:3(?:\.\d+)?)?\s+-m\s+)?(?:\S*/)?pip(?:3(?:\.\d+)?)?\b"
     r"(?:\s+(?!install\b)\S+)*\s+install\b",
     flags=re.IGNORECASE,
 )
 _REQUIREMENTS_FILE = re.compile(r"(?:^|\s)(?:-r|--requirement)(?:\s+|=)(\S+)")
 _ASR_FORBIDDEN_COMPILER_ADDITION = re.compile(
     r"(?<![A-Za-z0-9_.+-])(?:gcc(?:-\d+)?|g\+\+(?:-\d+)?|make|build-essential|cmake|"
-    r"ninja(?:-build)?|nvcc|(?:nvidia-)?cuda-toolkit(?:-[A-Za-z0-9.]+)*)(?![A-Za-z0-9_.+-])",
+    r"ninja(?:-build)?|nvcc|(?:nvidia-)?cuda-toolkit(?:-[A-Za-z0-9.]+)*|"
+    r"cuda-(?:nvcc|compiler)(?:-[A-Za-z0-9.]+)*)(?![A-Za-z0-9_.+-])",
     flags=re.IGNORECASE,
 )
 
@@ -285,6 +286,8 @@ def test_asr_audio_lock_rejects_decoder_drift_and_implicit_dependency_resolution
     (
         "RUN pip3 \\\n    install vllm==0.26.1rc1",
         "RUN python3 -m pip \\\n    --quiet install triton==3.6.0",
+        "RUN pip install --require-hashes --no-deps -r /tmp/requirements-audio-arm64.lock "
+        "&& pip3.12 install vllm==0.26.1rc1",
         "RUN pip install --require-hashes -r /tmp/runtime-replacement.lock",
     ),
 )
@@ -315,6 +318,8 @@ def test_asr_spark_image_install_guard_allows_runtime_metadata_validation() -> N
     (
         "RUN apt-get update && apt-get install -y gcc g++ make build-essential cmake ninja",
         "RUN apt-get install -y cuda-toolkit-13-0",
+        "RUN apt-get install -y cuda-nvcc-13-0",
+        "RUN apt-get install -y cuda-compiler-13-0",
         "RUN apt-get install -y \\\n    nvidia-cuda-toolkit && /usr/local/cuda/bin/nvcc --version",
     ),
 )
