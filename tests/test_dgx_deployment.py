@@ -40,6 +40,11 @@ def _normalized_lock_headers(requirements: str) -> set[str]:
     }
 
 
+def _normalized_package_name(header: str) -> str:
+    package_name = header.split("==", maxsplit=1)[0].split("[", maxsplit=1)[0]
+    return re.sub(r"[-_.]+", "-", package_name).lower()
+
+
 def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:
     compose = yaml.safe_load((ROOT / "compose.yml").read_text(encoding="utf-8"))
     hosts = set(compose["services"]["voip-agent"]["extra_hosts"])
@@ -250,7 +255,7 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
         "torchaudio",
     }
     assert not excluded_runtime_packages & {
-        header.split("==", maxsplit=1)[0] for header in runtime_lock_headers
+        _normalized_package_name(header) for header in runtime_lock_headers
     }
     for lock in (requirements, tts_packages, flash_attn):
         _assert_hash_locked(lock)
@@ -294,3 +299,5 @@ def test_tts_lock_contract_rejects_tampered_hashes() -> None:
     for tampered in (tampered_runtime, tampered_qwen, tampered_empty_runtime_hash):
         with pytest.raises(AssertionError):
             _assert_hash_locked(tampered)
+
+    assert _normalized_package_name("vllm[foo]==1.0") == "vllm"
