@@ -607,6 +607,14 @@ Remove only the candidate and the two named gateways. Recheck production `runnin
 
 ### Task 8: Apply the guarded audio-encoder correction and revalidate
 
+**Execution status: COMPLETE — correction rejected and reverted.** The initial
+21-case evidence used the wrong model (`UrocyonF/Qwen3-ASR-1.7B-NVFP4`) and was
+not a valid Same-Model comparison. With the correct pinned Qwen3-ASR-0.6B
+snapshot, the full `70/70` quality and `12/12` load series passed request,
+latency, and CUDA gates but reproduced the unpatched candidate's failed entity,
+number, and time metrics exactly. The implementation commit was reverted; no
+patch image or test container remains, and production was unchanged.
+
 **Files:**
 - Create: `dgx/asr/patch_qwen3_omni_audio_encoder.py`
 - Modify: `dgx/asr/Dockerfile`

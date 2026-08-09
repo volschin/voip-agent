@@ -205,23 +205,22 @@ Qwen3-ASR adapter and Spark-vLLM inference stack and requires a separate,
 case-focused investigation before adoption. No production mutation was made;
 the original ASR image remained healthy with zero restarts.
 
-The follow-up case-focused investigation isolated the regression to one
-operation in `Qwen3OmniMoeAudioEncoder.forward`. Production constructs audio
-`cu_seqlens` directly on the GPU with `torch.tensor(..., device=...)`; the
-Spark-vLLM base replaces that operation with pinned-memory
-`async_tensor_h2d(...).cumsum(...)`. All surrounding audio-attention, layer,
-encoder initialization, and weight-loading code was held constant. An exact
-production-`forward` overlay restored entity `14/22`, number `1/6`, and time
-`1/6` hits in two byte-identical 21-case runs; every selected speech result was
-normalization-equivalent to historical production.
+A preliminary case-focused experiment appeared to isolate the regression to the
+`async_tensor_h2d` construction of audio `cu_seqlens` in
+`Qwen3OmniMoeAudioEncoder.forward`. Audit of the actual container command found
+that this experiment had loaded `UrocyonF/Qwen3-ASR-1.7B-NVFP4`, not the pinned
+production model. Its apparent restoration is invalid Same-Model evidence and
+must not support a compatibility patch.
 
-The accepted correction is therefore one guarded build-time source replacement
-of that operation only. The build must fail if the digest-pinned base no longer
-contains the exact expected source block, and must verify that exactly one
-replacement occurred. No module fork, adapter change, loader change, dependency
-change, or runtime monkey patch is permitted. The corrected image must repeat
-the complete 70-case quality and 12-case load gate before it can become rollout
-eligible.
+A fail-closed one-operation patch was nevertheless built and then tested with
+the correct Qwen3-ASR-0.6B snapshot, revision, environment, gateway, corpus, and
+ordering. Production and patched candidate each completed `70/70` quality and
+`12/12` load requests with CUDA activity. The patched candidate reproduced the
+unpatched candidate's quality map exactly: entity recall remained `0.5909`
+versus production `0.6364`; number and time accuracy remained `0.0` versus
+`0.1667`. Latency passed. The patch therefore has no corrective effect for the
+production model and was removed. The candidate remains ineligible, and the
+audio-encoder transfer operation is not an established root cause.
 
 ## Rollout and Rollback
 
