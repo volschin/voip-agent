@@ -77,6 +77,19 @@ ASR loads the already cached revision
 offline. TTS refuses to start unless PyTorch reports CUDA on `NVIDIA GB10`;
 there is no CPU fallback.
 
+## Build the midpoint ASR candidate
+
+To build the reproducible local midpoint candidate, run:
+
+```bash
+cd dgx
+./asr/build-midpoint-base.sh
+```
+
+This produces only the local test tags `dgx-spark-vllm:midpoint-v023` and
+`dgx-qwen3-asr:spark-midpoint-v023-test`. It uses the June 2026 dependency
+cutoff, does not deploy either image, and takes a source-build amount of time.
+
 `qwen3-tts` builds locally from `./tts`. Production callers use stable
 whole-WAV `/v1/audio/speech`; `/v1/audio/speech/stream` remains available only
 for diagnostics. The image applies a version-bound patch to

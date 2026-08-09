@@ -10,6 +10,15 @@ from dgx.tts.runtime import normalize_language, require_gb10_cuda
 
 ROOT = Path(__file__).resolve().parents[1]
 ASR_REVISION = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
+EUGR_MIDPOINT_COMMIT = "b51af15a280d28c2ad9096b3ef581524eddbd0e7"
+VLLM_MIDPOINT_COMMIT = "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665"
+FLASHINFER_MIDPOINT_COMMIT = "d768c14e7cf5dd5df45a8a1de78ae815879f108a"
+NCCL_MIDPOINT_COMMIT = "6da422082f910a8dd230f7e42e26ece4dc37bccc"
+MIDPOINT_DEPENDENCY_CUTOFF = "2026-06-18T23:59:59Z"
+MIDPOINT_CUDA_IMAGE_DIGEST = (
+    "sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6"
+)
+QWEN3_ASR_ADAPTER_SHA256 = "e233961d38d0a396db34cf2f7d83c6dc1c33aa55768ba894eee6de097120342d"
 TTS_BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
 LOCK_ENTRY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\[[^]]+\])?==\S+")
 LOCK_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
@@ -343,15 +352,14 @@ def test_asr_spark_image_rejects_core_stack_reinstallation() -> None:
     """Catch a pip install that replaces the Torch/vLLM runtime proven on the Spark base image."""
     dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
     logical_instructions = _logical_docker_instructions(dockerfile)
-    expected_base = (
-        "FROM eugr/spark-vllm@"
-        "sha256:1d861bef8a6c0851140cec2575ebd32342d55bc0fd28ad4c6ca178269e9d1cff"
-    )
     assert [
-        instruction for instruction in logical_instructions if re.match(r"FROM\s+", instruction)
-    ] == [expected_base], (
-        "The ASR derivative must inherit the immutable validated Spark-vLLM image."
-    )
+        instruction
+        for instruction in logical_instructions
+        if re.match(r"(?:ARG|FROM)\s+", instruction)
+    ] == [
+        "ARG SPARK_BASE=dgx-spark-vllm:midpoint-v023",
+        "FROM ${SPARK_BASE}",
+    ], "The ASR derivative must inherit exactly the repository-built midpoint Spark-vLLM base."
     assert not _has_asr_invalid_python_package_install(dockerfile), (
         "The ASR image may install only the direct audio lock and must not replace "
         "inherited runtime dependencies."
@@ -359,6 +367,34 @@ def test_asr_spark_image_rejects_core_stack_reinstallation() -> None:
     assert not _has_asr_forbidden_compiler_addition(dockerfile), (
         "The ASR derivative must not add a compiler or CUDA build toolkit."
     )
+
+
+def test_asr_midpoint_build_pins_complete_historical_stack() -> None:
+    script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
+    patch = (ROOT / "dgx/asr/eugr-midpoint.patch").read_text(encoding="utf-8")
+
+    for value in (
+        "b51af15a280d28c2ad9096b3ef581524eddbd0e7",
+        "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
+        "d768c14e7cf5dd5df45a8a1de78ae815879f108a",
+        "6da422082f910a8dd230f7e42e26ece4dc37bccc",
+        "2026-06-18T23:59:59Z",
+        "sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6",
+    ):
+        assert value in script or value in patch
+    assert "transformers==5.12.1" in patch
+    assert "VLLM_PRS" not in script
+    assert "FLASHINFER_PRS" not in script
+
+
+def test_asr_midpoint_runtime_asserts_adapter_and_versions() -> None:
+    dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
+    assert "ARG SPARK_BASE=dgx-spark-vllm:midpoint-v023" in dockerfile
+    assert "0.23.0" in dockerfile
+    assert "2.11.0+cu130" in dockerfile
+    assert "5.12.1" in dockerfile
+    assert "0.6.12" in dockerfile
+    assert "e233961d38d0a396db34cf2f7d83c6dc1c33aa55768ba894eee6de097120342d" in dockerfile
 
 
 def test_asr_spark_image_build_preserves_existing_service_contract() -> None:
