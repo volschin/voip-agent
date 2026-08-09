@@ -298,6 +298,8 @@ def test_tts_image_extracts_pure_kaldi_compat_without_installing_torchaudio() ->
     assert "pip download --no-cache-dir --require-hashes --no-deps" in dockerfile
     assert "torchaudio/compliance/kaldi.py" in dockerfile
     assert "kaldi_compat.py" in dockerfile
+    assert "importlib.util.find_spec(" in dockerfile
+    assert "import qwen_tts; print" not in dockerfile
     assert "importlib.util.find_spec('torchaudio') is None" not in dockerfile
 
 

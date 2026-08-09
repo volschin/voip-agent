@@ -31,7 +31,7 @@ RUN pip download --no-cache-dir --require-hashes --no-deps \
       -r /tmp/torchaudio-kaldi-compat-arm64.lock \
       --dest /tmp/torchaudio-kaldi \
  && package_root="$(python3 -c \
-      'from pathlib import Path; import qwen_tts; print(Path(qwen_tts.__file__).resolve().parent)')" \
+      'from pathlib import Path; import importlib.util; print(Path(importlib.util.find_spec('\''qwen_tts'\'').origin).resolve().parent)')" \
  && kaldi_wheel="$(find /tmp/torchaudio-kaldi -name 'torchaudio-*.whl' -print -quit)" \
  && python3 -c "from pathlib import Path; from zipfile import ZipFile; import sys; wheel, root = sys.argv[1:]; source = ZipFile(wheel).read('torchaudio/compliance/kaldi.py').decode(); assert source.count('import torchaudio\\n') == 1; Path(root, 'core/tokenizer_25hz/vq/kaldi_compat.py').write_text(source.replace('import torchaudio\\n', ''), encoding='utf-8')" \
       "$kaldi_wheel" "$package_root" \
