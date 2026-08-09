@@ -1,10 +1,5 @@
 FROM eugr/spark-vllm@sha256:1d861bef8a6c0851140cec2575ebd32342d55bc0fd28ad4c6ca178269e9d1cff
 
-COPY asr/patch_qwen3_omni_audio_encoder.py /tmp/patch_qwen3_omni_audio_encoder.py
-RUN python3 /tmp/patch_qwen3_omni_audio_encoder.py \
-      /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3_omni_moe_thinker.py \
- && rm /tmp/patch_qwen3_omni_audio_encoder.py
-
 COPY asr/requirements-audio-arm64.lock /tmp/requirements-audio-arm64.lock
 RUN python3 -m pip install --no-cache-dir --require-hashes --no-deps \
       -r /tmp/requirements-audio-arm64.lock \
