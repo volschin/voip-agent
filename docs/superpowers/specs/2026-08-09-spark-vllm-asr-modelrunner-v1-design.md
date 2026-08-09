@@ -96,9 +96,10 @@ hallucinated words with this exact transcript-free distribution:
 ```
 
 That is identical to the prior ModelRunnerV2 candidate and exceeds the
-production maximum of `5`. The discriminator therefore failed. ModelRunnerV2
-is not the cause of the remaining non-speech regression, the conditional full
-A/B was correctly skipped, and this candidate is prohibited from rollout.
+production maximum of `5`. The discriminator therefore failed. Disabling
+ModelRunnerV2 did not improve this frozen ten-case non-speech result; the
+conditional full A/B was correctly skipped, and this candidate is prohibited
+from rollout.
 
 Both named test containers were removed, both immutable images retained, and
 production finished on its original image and UrocyonF 1.7B command as

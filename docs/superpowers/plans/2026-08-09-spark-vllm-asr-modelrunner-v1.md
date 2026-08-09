@@ -1,13 +1,13 @@
 # Spark-vLLM ASR ModelRunnerV1 Diagnostic Implementation Plan
 
-> **Execution status: COMPLETE — discriminator failed.** The exact
+> **COMPLETED HISTORICAL RECORD — DO NOT EXECUTE.** The exact
 > ModelRunnerV1 candidate completed all ten frozen non-speech requests but
 > produced `14` hallucinated words, above the production maximum of `5` and
 > identical to the ModelRunnerV2 candidate. The conditional full A/B was
 > skipped, test containers were removed, images retained, and production was
-> unchanged. This candidate is not eligible for rollout.
-
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> unchanged. This candidate is not eligible for rollout. Every command and
+> checked step below records the completed 2026-08-09 procedure only and grants
+> no authority for a rerun, new candidate, or production mutation.
 
 **Goal:** Determine whether disabling ModelRunnerV2 makes the existing smaller Spark-vLLM image meet the production non-speech baseline, and run the full same-model qualification only if that discriminator passes.
 
@@ -197,15 +197,15 @@ candidate_cuda == true
 
 Expected: one unambiguous PASS or FAIL. On FAIL, skip Steps 3 and 4 and continue directly to Task 4 cleanup.
 
-- [x] **Step 3: Skip the unchanged full A/B preparation on discriminator FAIL**
+- [x] **Step 3: NOT EXECUTED — full A/B preparation skipped on discriminator FAIL**
 
-Revalidate production image/model/command and candidate image/model/command. Start an identical second gateway for production using the same immutable gateway image and only a different `ASR_BACKEND_URL`. Assert both gateway configurations are byte-equivalent except backend URL.
+The second production gateway was not created. The planned production and
+candidate identity revalidation and gateway-equality assertion were conditional
+on a discriminator pass and therefore did not run.
 
-Expected: production and candidate identities match the corrected same-model design, and both gateways use the same image and request normalization.
+- [x] **Step 4: NOT EXECUTED — full fixed series skipped on discriminator FAIL**
 
-- [x] **Step 4: Skip the full fixed series on discriminator FAIL**
-
-Run exactly in this order:
+The conditional series order would have been:
 
 ```text
 production quality: 70
@@ -214,9 +214,8 @@ production load: 12
 candidate load: 12
 ```
 
-Use the existing protected runner, frozen corpus/subset hashes, request ordering, concurrency, `language=de`, timeout, scoring, CUDA correlation, and safe-result validation unchanged. Apply the existing gates: no quality or non-speech regression; p50 ratio at most `1.05`; nearest-rank p90 ratio at most `1.10`; all requests successful; CUDA true for both.
-
-Expected: an eligibility result based on all existing gates. No tuning, selective rerun, outlier deletion, or gate change is allowed.
+It did not run because the mandatory short gate failed. No tuning, selective
+rerun, outlier deletion, or gate change occurred.
 
 - [x] **Step 5: Write the transcript-free performance report**
 
