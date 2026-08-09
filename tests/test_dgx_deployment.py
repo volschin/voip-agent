@@ -47,6 +47,17 @@ def _normalized_package_name(header: str) -> str:
     return re.sub(r"[-_.]+", "-", package_name).lower()
 
 
+def _logical_docker_instructions(dockerfile: str) -> list[str]:
+    return re.sub(r"\\[ \t]*\n", " ", dockerfile).splitlines()
+
+
+def _has_forbidden_torchaudio_pip_install(dockerfile: str) -> bool:
+    return any(
+        re.search(r"\bpip\s+install\b.*\btorchaudio\b", instruction)
+        for instruction in _logical_docker_instructions(dockerfile)
+    )
+
+
 def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:
     compose = yaml.safe_load((ROOT / "compose.yml").read_text(encoding="utf-8"))
     hosts = set(compose["services"]["voip-agent"]["extra_hosts"])
@@ -308,22 +319,23 @@ def test_tts_image_extracts_pure_kaldi_compat_without_installing_torchaudio() ->
     assert "import qwen_tts; print" not in dockerfile
     assert "importlib.util.find_spec('torchaudio') is None" not in dockerfile
 
-    normalized_dockerfile = re.sub(r"\\[ \t]*\n", " ", dockerfile)
+    logical_dockerfile = "\n".join(_logical_docker_instructions(dockerfile))
     assert re.search(
         r"\bpip\s+download\b.*torchaudio-kaldi-compat-arm64\.lock",
-        normalized_dockerfile,
+        logical_dockerfile,
     )
-    assert not re.search(
-        r"\bpip\s+install\b.*\btorchaudio\b",
-        normalized_dockerfile,
-    )
+    assert not _has_forbidden_torchaudio_pip_install(dockerfile)
 
-    multiline_torchaudio_install = "RUN pip \\" + "\n    install torchaudio==2.9.1"
-    normalized_multiline_install = re.sub(r"\\[ \t]*\n", " ", multiline_torchaudio_install)
-    assert re.search(
-        r"\bpip\s+install\b.*\btorchaudio\b",
-        normalized_multiline_install,
+    forbidden_install_fixtures = (
+        "RUN pip install torchaudio==2.9.1",
+        "RUN pip \\" + "\n    install torchaudio==2.9.1",
+        "RUN pip \\  " + "\n    install torchaudio==2.9.1",
+        "RUN pip \\\t" + "\n    install torchaudio==2.9.1",
     )
+    assert all(
+        _has_forbidden_torchaudio_pip_install(fixture) for fixture in forbidden_install_fixtures
+    )
+    assert not _has_forbidden_torchaudio_pip_install("RUN pip download torchaudio==2.9.1")
 
 
 def test_tts_lock_contract_rejects_tampered_hashes() -> None:
