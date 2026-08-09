@@ -413,11 +413,14 @@ def test_asr_midpoint_build_asserts_arm64_manifest_and_label_provenance() -> Non
     assert 'test "$labels" = null' not in script
 
 
-def test_asr_midpoint_inventory_supports_oci_docker_save() -> None:
+def test_asr_midpoint_inventory_checks_effective_runtime_once_per_distribution() -> None:
     script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
 
-    assert 'image_member.name.startswith("blobs/sha256/")' in script
-    assert 'tarfile.open(fileobj=layer_stream, mode="r|*")' in script
+    assert "importlib.metadata.distributions()" in script
+    assert "assert len(matches) == 1, (image_tag, name, matches)" in script
+    assert "docker run --rm -i --network none" in script
+    assert "docker image save" not in script
+    assert "layer.tar" not in script
     assert '"base_image: ${CUDA_IMAGE}",' in script
 
 

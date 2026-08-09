@@ -86,10 +86,11 @@ assert_historical_inventory() {
   local image_tag=$1
 
   assert_image_inventory "$image_tag"
-  python3 - "$image_tag" 3< <(docker image save "$image_tag") <<'PY'
+  docker run --rm -i --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges --entrypoint python3 "$image_tag" - "$image_tag" <<'PY'
 import hashlib
-import os
-import tarfile
+import importlib.metadata
+from pathlib import Path
 import sys
 
 image_tag = sys.argv[1]
@@ -109,53 +110,30 @@ expected_metadata = (
     "base_image: ${CUDA_IMAGE}",
 )
 
+installed = tuple(importlib.metadata.distributions())
+selected = {}
 versions = {}
-adapter_sha256 = None
-build_metadata = None
-with os.fdopen(3, "rb") as image_stream:
-    with tarfile.open(fileobj=image_stream, mode="r|") as image_archive:
-        for image_member in image_archive:
-            if not image_member.isfile():
-                continue
-            is_legacy_layer = image_member.name.endswith("/layer.tar")
-            is_oci_blob = image_member.name.startswith("blobs/sha256/")
-            if not (is_legacy_layer or is_oci_blob):
-                continue
-            layer_stream = image_archive.extractfile(image_member)
-            assert layer_stream is not None
-            try:
-                layer = tarfile.open(fileobj=layer_stream, mode="r|*")
-            except tarfile.ReadError:
-                continue
-            with layer:
-                for member in layer:
-                    if not member.isfile():
-                        continue
-                    path = member.name.lstrip("./")
-                    if path.endswith("vllm/model_executor/models/qwen3_asr.py"):
-                        content = layer.extractfile(member)
-                        assert content is not None
-                        adapter_sha256 = hashlib.file_digest(content, "sha256").hexdigest()
-                    elif path.endswith(".dist-info/METADATA"):
-                        content = layer.extractfile(member)
-                        assert content is not None
-                        headers = {}
-                        for line in content.read().decode("utf-8").splitlines():
-                            if ": " in line:
-                                key, value = line.split(": ", 1)
-                                if key in {"Name", "Version"}:
-                                    headers[key] = value
-                        name = headers.get("Name", "").lower()
-                        if name in expected_versions:
-                            versions[name] = headers.get("Version")
-                    elif path == "workspace/build-metadata.yaml":
-                        content = layer.extractfile(member)
-                        assert content is not None
-                        build_metadata = content.read().decode("utf-8")
+for name in expected_versions:
+    matches = [
+        distribution
+        for distribution in installed
+        if distribution.metadata.get("Name", "").lower().replace("_", "-") == name
+    ]
+    assert len(matches) == 1, (image_tag, name, matches)
+    selected[name] = matches[0]
+    versions[name] = matches[0].version
+
+adapter = Path(
+    selected["vllm"].locate_file("vllm/model_executor/models/qwen3_asr.py")
+)
+assert adapter.is_file(), (image_tag, adapter)
+adapter_sha256 = hashlib.sha256(adapter.read_bytes()).hexdigest()
+metadata_path = Path("/workspace/build-metadata.yaml")
+assert metadata_path.is_file(), (image_tag, "missing build metadata")
+build_metadata = metadata_path.read_text(encoding="utf-8")
 
 assert adapter_sha256 == expected_adapter_sha256, (image_tag, adapter_sha256)
 assert versions == expected_versions, (image_tag, versions)
-assert build_metadata is not None, (image_tag, "missing build metadata")
 assert all(value in build_metadata for value in expected_metadata), (image_tag, build_metadata)
 print(f"{image_tag} runtime: " + " ".join(f"{name}={version}" for name, version in sorted(versions.items())))
 print(f"{image_tag} adapter: vllm/model_executor/models/qwen3_asr.py sha256={adapter_sha256}")
