@@ -63,6 +63,10 @@ RUN apt-get update \
       < /tmp/apt-runtime-packages-arm64.lock \
  && rm -rf /var/lib/apt/lists/*
 
+RUN ! command -v nvcc \
+ && ! command -v make \
+ && ! dpkg-query -W -f='${db:Status-Status}' build-essential 2>/dev/null | grep -qx installed
+
 COPY --from=builder /opt/tts-venv /opt/tts-venv
 COPY --from=builder /opt/tts-licenses /usr/share/licenses
 COPY --from=builder /usr/include/python3.14 /usr/include/python3.14

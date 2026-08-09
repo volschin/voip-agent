@@ -65,18 +65,42 @@ def _runtime_stage_instructions(dockerfile: str) -> list[str]:
         for index, instruction in enumerate(instructions)
         if re.fullmatch(r"FROM\s+.+\s+AS\s+runtime", instruction, flags=re.IGNORECASE)
     )
+    runtime_end = next(
+        (
+            index
+            for index, instruction in enumerate(
+                instructions[runtime_start + 1 :], runtime_start + 1
+            )
+            if re.match(r"FROM\s+", instruction, flags=re.IGNORECASE)
+        ),
+        len(instructions),
+    )
     return [
         instruction
-        for instruction in instructions[runtime_start + 1 :]
-        if not re.match(r"FROM\s+", instruction, flags=re.IGNORECASE)
-        and re.match(r"(?:RUN|COPY|ADD|ENV|CMD|ENTRYPOINT)\s+", instruction, flags=re.IGNORECASE)
+        for instruction in instructions[runtime_start + 1 : runtime_end]
+        if re.match(r"(?:RUN|COPY|ADD|ENV|CMD|ENTRYPOINT)\s+", instruction, flags=re.IGNORECASE)
     ]
+
+
+_RUNTIME_TOOLING_ABSENCE_GATE = re.compile(
+    r"^RUN\s+!\s+command\s+-v\s+nvcc\s+&&\s+!\s+command\s+-v\s+make\s+&&\s+!\s+"
+    r"dpkg-query\s+-W\s+-f='\$\{db:Status-Status\}'\s+build-essential\s+2>/dev/null\s+"
+    r"\|\s+grep\s+-qx\s+installed$"
+)
+
+
+def _runtime_stage_has_tooling_absence_gate(dockerfile: str) -> bool:
+    return any(
+        _RUNTIME_TOOLING_ABSENCE_GATE.fullmatch(instruction)
+        for instruction in _runtime_stage_instructions(dockerfile)
+    )
 
 
 def _runtime_stage_uses_forbidden_tool(dockerfile: str) -> bool:
     return any(
         re.search(rf"(?<![A-Za-z0-9_.-]){tool}(?![A-Za-z0-9_.-])", instruction)
         for instruction in _runtime_stage_instructions(dockerfile)
+        if not _RUNTIME_TOOLING_ABSENCE_GATE.fullmatch(instruction)
         for tool in ("nvcc", "make", "build-essential")
     )
 
@@ -329,6 +353,7 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     assert "COPY --from=builder /usr/include/aarch64-linux-gnu/python3.14" in dockerfile
     assert "CC=gcc-15" in dockerfile
     assert not _runtime_stage_uses_forbidden_tool(dockerfile)
+    assert _runtime_stage_has_tooling_absence_gate(dockerfile)
 
 
 def test_tts_runtime_stage_rejects_forbidden_tooling_instructions() -> None:
@@ -338,6 +363,14 @@ FROM base AS runtime
 RUN echo runtime-ready
 """
     assert not _runtime_stage_uses_forbidden_tool(builder_only)
+
+    later_debug_stage = """FROM base AS builder
+FROM base AS runtime
+RUN echo runtime-ready
+FROM base AS debug
+RUN make docs
+"""
+    assert not _runtime_stage_uses_forbidden_tool(later_debug_stage)
 
     forbidden_runtime_fixtures = (
         """FROM base AS builder
