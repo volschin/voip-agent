@@ -1,17 +1,30 @@
 # Spark-vLLM ASR v0.23.0 Midpoint Reactivation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **COMPLETED HISTORICAL RECORD — DO NOT EXECUTE.** Every command below is
+> historical evidence. The conditional complete A/B and rollout were **NOT
+> EXECUTED**.
 
-**Goal:** Reuse the exact completed vLLM `0.23.0` midpoint base, finish its ASR derivative, and qualify it once against the frozen ten-case non-speech gate with the production UrocyonF 1.7B model.
+**Outcome:** The recovered `bfa7bcd7...` intermediate was rejected because it
+contained `vllm==0.23.1.dev0`; a corrected base
+`sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1`
+and derivative
+`sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930`
+were built. The derivative passed the frozen gate with `10/10` valid requests,
+exactly `5` hallucinated words, no safety failures, and real candidate CUDA.
+It is retained as the next candidate; no rollout occurred.
 
-**Architecture:** Restore only the previously reviewed midpoint recipe hunks, add an explicit fail-closed `--reuse-base` path bound to the recovered image ID, and build the lightweight audio derivative without repeating the native base build. Run that immutable final image behind the existing normalized gateway, prove real CUDA, and stop after the ten-case gate regardless of pass or fail.
+**Goal:** Recover or rebuild the exact vLLM `0.23.0` midpoint base, finish its ASR derivative, and qualify it once against the frozen ten-case non-speech gate with the production UrocyonF 1.7B model.
+
+**Architecture:** Restore only the previously reviewed midpoint recipe hunks, add an explicit fail-closed `--reuse-base` path, and build the lightweight audio derivative. The recovered artifact failed the contract, so the accepted base was rebuilt from the pinned source recipe. Run that immutable final image behind the existing normalized gateway, prove real CUDA, and stop after the ten-case gate regardless of pass or fail.
 
 **Tech Stack:** Bash, Docker BuildKit, ARM64 NVIDIA GB10, CUDA 13.0, PyTorch 2.11, vLLM 0.23.0, FlashInfer 0.6.12, Transformers 5.12.1, UrocyonF/Qwen3-ASR-1.7B-NVFP4, pytest, Ruff.
 
 ## Global Constraints
 
 - Reusable base tag: `dgx-spark-vllm:midpoint-v023`.
-- Reusable base image ID: `sha256:bfa7bcd7c70829e44cd919f22fc68a028816681abe8d4f3b4a2b1ba81e47c134`.
+- Reusable base image ID: `sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1`.
+- Rejected intermediate: `sha256:bfa7bcd7c70829e44cd919f22fc68a028816681abe8d4f3b4a2b1ba81e47c134`
+  (`vllm==0.23.1.dev0`, therefore never used for the final derivative).
 - Final candidate tag: `dgx-qwen3-asr:spark-midpoint-v023-test`.
 - eugr source: `b51af15a280d28c2ad9096b3ef581524eddbd0e7`.
 - NCCL source: `6da422082f910a8dd230f7e42e26ece4dc37bccc`.
@@ -42,9 +55,9 @@
 
 **Interfaces:**
 - Consumes: exact pre-removal recipe blobs from `cf6f716^`, current audio lock, and recovered base ID.
-- Produces: executable `dgx/asr/build-midpoint-base.sh --reuse-base` that rejects every non-exact base and builds `dgx-qwen3-asr:spark-midpoint-v023-test` without a native base rebuild.
+- Produces: executable `dgx/asr/build-midpoint-base.sh --reuse-base` that rejects every non-exact base and builds `dgx-qwen3-asr:spark-midpoint-v023-test` from the accepted corrected base.
 
-- [ ] **Step 1: Write the failing reactivation tests**
+- [x] **Step 1: Write the failing reactivation tests**
 
 Restore the midpoint deployment-contract tests from `cf6f716^` by applying only
 their deleted midpoint hunks to the current `tests/test_dgx_deployment.py`.
@@ -56,7 +69,7 @@ def test_asr_midpoint_reuse_is_bound_to_recovered_base() -> None:
     script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
     assert "--reuse-base" in script
     assert (
-        "sha256:bfa7bcd7c70829e44cd919f22fc68a028816681abe8d4f3b4a2b1ba81e47c134"
+        "sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1"
         in script
     )
     assert 'test "$base_id" = "$REUSABLE_BASE_IMAGE_ID"' in script
@@ -93,7 +106,7 @@ Run:
 
 Expected: FAIL because the recipe files and reuse interface do not yet exist.
 
-- [ ] **Step 2: Restore only the reviewed midpoint recipe hunks**
+- [x] **Step 2: Restore only the reviewed midpoint recipe hunks**
 
 Use `git show cf6f716^:<path>` as the exact source and `apply_patch` for the
 filesystem edits. Restore the full deleted blobs:
@@ -108,13 +121,13 @@ assertion hunk in `dgx/asr/Dockerfile`. Restore only the focused midpoint build
 paragraph in `dgx/README.md`. Do not restore the obsolete 0.6B design/plan,
 overwrite the current 1.7B Compose contract, or reverse later unrelated tests.
 
-- [ ] **Step 3: Add the exact fail-closed reuse interface**
+- [x] **Step 3: Add the exact fail-closed reuse interface**
 
 Place argument parsing before every Docker, Git, network, and temporary-directory
 operation:
 
 ```bash
-REUSABLE_BASE_IMAGE_ID=sha256:bfa7bcd7c70829e44cd919f22fc68a028816681abe8d4f3b4a2b1ba81e47c134
+REUSABLE_BASE_IMAGE_ID=sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1
 reuse_base=false
 
 usage() {
@@ -170,7 +183,7 @@ The reuse branch must validate the complete saved-image inventory, adapter hash,
 build metadata, platform, inherited CUDA rootfs prefix, labels, and dependency
 cutoff before the derivative build. It must not fall through to a base rebuild.
 
-- [ ] **Step 4: Make the recipe contract green**
+- [x] **Step 4: Make the recipe contract green**
 
 Run:
 
@@ -188,7 +201,7 @@ output is empty. Review the script/Dockerfile/README/test diff separately to
 confirm only the reuse interface and preservation of later changes differ from
 `cf6f716^`.
 
-- [ ] **Step 5: Commit the reactivated recipe**
+- [x] **Step 5: Commit the reactivated recipe**
 
 ```bash
 git add dgx/asr/build-midpoint-base.sh dgx/asr/eugr-midpoint.patch \
@@ -209,7 +222,7 @@ is committed.
 - Consumes: Task 1 committed recipe and recovered base ID.
 - Produces: immutable final candidate image with complete static inventory.
 
-- [ ] **Step 1: Capture the pre-build invariant and namespaces**
+- [x] **Step 1: Capture the pre-build invariant and namespaces**
 
 Read production image, command, state, health, restart count, and policy. Require
 no container named `qwen3-asr-midpoint-v023-test` or
@@ -219,7 +232,7 @@ transferring any build input.
 Expected: production is `running|healthy|0|unless-stopped`; both names are empty;
 base ID is exactly the global constraint.
 
-- [ ] **Step 2: Transfer only committed build inputs**
+- [x] **Step 2: Transfer only committed build inputs**
 
 Create a clean archive from the Task 1 commit:
 
@@ -241,7 +254,7 @@ Do not transfer `.env`, Compose, models, benchmark artifacts, worktree metadata,
 or unrelated files. Verify the remote script, patch, Dockerfile, and audio-lock
 SHA-256 values against the local committed files without printing the directory.
 
-- [ ] **Step 3: Build only the derivative**
+- [x] **Step 3: Reject the recovered intermediate, rebuild the base, then build the derivative**
 
 Run the transferred script with:
 
@@ -250,12 +263,12 @@ ssh volsch@192.168.68.41 \
   "$remote_build_root/dgx/asr/build-midpoint-base.sh --reuse-base"
 ```
 
-Expected: the script first validates base
-`sha256:bfa7bcd7c70829e44cd919f22fc68a028816681abe8d4f3b4a2b1ba81e47c134`,
-does not clone or compile eugr/vLLM/FlashInfer, builds the derivative, and passes
-its complete final-image inventory.
+Observed: reuse rejected the recovered intermediate because its vLLM version
+was not exact. The full pinned source path then built corrected base
+`sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1`,
+built the derivative, and passed its complete final-image inventory.
 
-- [ ] **Step 4: Independently inspect the final image**
+- [x] **Step 4: Independently inspect the final image**
 
 Require:
 
@@ -276,7 +289,7 @@ Also require the exact base image as the history/rootfs prefix, no runtime
 compiler addition by the derivative, and no installed duplicate Torch or vLLM
 distribution. Record the final image ID and byte size.
 
-- [ ] **Step 5: Write the transcript-free build report**
+- [x] **Step 5: Write the transcript-free build report**
 
 Record exact committed input hashes, base/final identities, version inventory,
 adapter/build-metadata proof, whether the native base path ran (`false`), build
@@ -294,7 +307,7 @@ archive content.
 - Consumes: Task 2 final image, immutable normalized gateway image `sha256:f434a9c6533dd050968e56f547206ca4660ab4aa53d2f9d85ee6b5d8f12f473c`, exact 1.7B model revision, owner-only frozen benchmark.
 - Produces: one transcript-free non-speech gate decision with real CUDA proof.
 
-- [ ] **Step 1: Start one isolated candidate**
+- [x] **Step 1: Start one isolated candidate**
 
 Use exact name `qwen3-asr-midpoint-v023-test`, restart policy `no`, all GPUs,
 4 GiB shared memory, network `voice_default`, loopback
@@ -329,7 +342,7 @@ docker run -d \
 
 Do not add `VLLM_USE_V2_MODEL_RUNNER` or any other tuning variable.
 
-- [ ] **Step 2: Prove bounded readiness, model identity, API, and CUDA**
+- [x] **Step 2: Prove bounded readiness, model identity, API, and CUDA**
 
 Poll for at most 300 seconds. Require `/v1/models` to contain exactly
 `qwen3-asr`, zero restarts, and the exact image/model command. Start the exact
@@ -341,7 +354,7 @@ Send one authorized hash-validated German WAV with `language=de`. Require HTTP
 it, candidate PID intersection with the GPU compute process, and nonzero
 aggregate SM during the request.
 
-- [ ] **Step 3: Validate the frozen discriminator contract**
+- [x] **Step 3: Validate the frozen discriminator contract**
 
 Require these exact safe identities before inference:
 
@@ -358,7 +371,7 @@ request contract: d5164cfa9c2898f0adacb666a69e771f58dfb8955dfdcd01f0238f83c7c150
 Validate owner-only modes and every selected audio hash without printing paths
 or content.
 
-- [ ] **Step 4: Run all ten non-speech cases exactly once**
+- [x] **Step 4: Run all ten non-speech cases exactly once**
 
 Send `non_speech-01` through `non_speech-10` in established order, concurrency
 `1`, through `http://127.0.0.1:18002/v1/audio/transcriptions` with
@@ -382,7 +395,7 @@ candidate_cuda == true
 
 The result is terminal for this plan. Do not run the complete A/B even on pass.
 
-- [ ] **Step 5: Validate and report without protected content**
+- [x] **Step 5: Validate and report without protected content**
 
 Validate the safe-result schema recursively against forbidden keys and types,
 finite numeric bounds, exact case map, corpus/model/image hashes, raw artifact
@@ -400,19 +413,19 @@ per-case word counts, request/CUDA gates, artifact hashes, and PASS/FAIL only.
 - Consumes: Task 3 terminal decision.
 - Produces: zero test containers, retained midpoint images, unchanged production, historical non-executable outcome, green branch.
 
-- [ ] **Step 1: Remove only the two named test containers**
+- [x] **Step 1: Remove only the two named test containers**
 
 Remove `asr-midpoint-v023-gateway` and `qwen3-asr-midpoint-v023-test`. Require
 zero exact-name matches afterward. Retain base and final candidate images; do
 not prune any image or build cache.
 
-- [ ] **Step 2: Prove final production and image retention**
+- [x] **Step 2: Prove final production and image retention**
 
 Compare full production image/command/state/health/restarts/policy to Task 2
 preflight and require byte equality. Inspect both retained midpoint image IDs
 and final platform/size.
 
-- [ ] **Step 3: Append the exact historical outcome**
+- [x] **Step 3: Append the exact historical outcome**
 
 Mark both design and plan completed historical records. Record build identity,
 whether base reuse succeeded, ten-case counts, all safety gates, final decision,
@@ -422,7 +435,7 @@ agentic-worker header with a prominent
 is historical evidence only, and mark
 every conditional step that did not run explicitly `NOT EXECUTED`.
 
-- [ ] **Step 4: Run fresh full verification**
+- [x] **Step 4: Run fresh full verification**
 
 ```bash
 bash -n dgx/asr/build-midpoint-base.sh
@@ -437,7 +450,7 @@ git status --short
 Expected: every command passes and only the two intended outcome documents are
 modified after the Task 1 recipe commit.
 
-- [ ] **Step 5: Commit the evidenced outcome**
+- [x] **Step 5: Commit the evidenced outcome**
 
 ```bash
 git add \

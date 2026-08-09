@@ -57,13 +57,14 @@ the rollback report.
 
 ## Start services
 
-> **ASR rollout hold:** The repository Spark-vLLM ASR image failed the final
-> same-model non-speech safety gate and is retained for investigation only. Do
-> not use the Compose command below to replace or recreate the currently
-> running production `qwen3-asr`. A future ASR adoption requires a new complete
-> quality/load/CUDA gate and separate explicit rollout authorization. The
-> command below remains the canonical bootstrap procedure only after that hold
-> is resolved, or for services explicitly selected without `qwen3-asr`.
+> **ASR rollout hold:** The previous Spark-vLLM candidate failed the same-model
+> non-speech safety gate. The repository vLLM 0.23 midpoint image now passes
+> only the short ten-case discriminator; the complete 70/12 quality/load/CUDA
+> gate has not run. Do not use the Compose command below to replace or recreate
+> the currently running production `qwen3-asr` without that complete gate and
+> separate explicit rollout authorization. The command remains the canonical
+> bootstrap procedure only after the hold is resolved, or for services
+> explicitly selected without `qwen3-asr`.
 
 After provisioning and validating the private TTS profile:
 

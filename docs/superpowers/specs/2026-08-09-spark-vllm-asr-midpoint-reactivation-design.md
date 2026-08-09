@@ -1,20 +1,31 @@
 # Spark-vLLM ASR v0.23.0 Midpoint Reactivation Design
 
+> **COMPLETED HISTORICAL RECORD — DO NOT EXECUTE.** The commands and contracts
+> below record the completed experiment; they are not rollout instructions.
+
 **Date:** 2026-08-09
+
+## Outcome
+
+The corrected vLLM `0.23.0` candidate passed the frozen 1.7B non-speech gate
+at the exact production limit: `10/10` requests, `5` hallucinated words, no
+structural or safety failures, and candidate-correlated CUDA activity. It is
+retained as the next candidate. The conditional complete 70/12 A/B and rollout
+were **NOT EXECUTED**.
 
 ## Goal
 
-Finish the previously interrupted vLLM `0.23.0` midpoint candidate and test it
+The completed work finished the previously interrupted vLLM `0.23.0` midpoint candidate and tested it
 against the frozen ten-case non-speech gate with the exact production model.
-The work reuses the already-built midpoint base instead of repeating its
-approximately 2.5-hour source build.
+The recovered intermediate failed its exact-version check, so the work rebuilt
+the corrected base rather than accepting an invalid reusable artifact.
 
 Production remains immutable. This design authorizes an isolated candidate
 build and non-speech qualification only, not a full A/B or rollout.
 
-## Recovered Base
+## Rejected Intermediate and Corrected Base
 
-The GX10 still contains:
+The recovered intermediate was:
 
 ```text
 tag:      dgx-spark-vllm:midpoint-v023
@@ -23,9 +34,20 @@ size:     approximately 19 GB
 platform: ARM64/Linux
 ```
 
-This base was produced by the previously reviewed midpoint build recipe after
-the completed FlashInfer and vLLM native builds. Before reuse, validate its
-exact runtime inventory and build metadata against the historical contract:
+It was rejected before derivative construction because its installed
+distribution was `vllm==0.23.1.dev0+g0fc695...`, not the required `0.23.0`.
+The source recipe was corrected with the official `VLLM_VERSION_OVERRIDE` and
+rebuilt. The accepted artifacts are:
+
+```text
+base:       sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1
+base size:  18,963,321,874 bytes
+candidate:  sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930
+size:       19,126,682,710 bytes
+platform:   ARM64/Linux
+```
+
+The accepted runtime inventory and build metadata match:
 
 - eugr snapshot `b51af15a280d28c2ad9096b3ef581524eddbd0e7`;
 - CUDA `13.0.2` base and runtime CUDA `13.0`;
@@ -39,8 +61,8 @@ exact runtime inventory and build metadata against the historical contract:
 - Qwen3-ASR adapter SHA-256
   `e233961d38d0a396db34cf2f7d83c6dc1c33aa55768ba894eee6de097120342d`.
 
-Any mismatch rejects reuse and stops this design. Do not silently rebuild or
-substitute a nearby image.
+The mismatch did reject reuse. The subsequent full rebuild was explicit,
+fail-closed, and retained the reviewed dependency contract.
 
 ## Repository Recipe and Final Image
 
@@ -121,3 +143,7 @@ Remove only the named candidate and gateway containers after the run. Retain
 the midpoint base and final candidate images. Production must finish on its
 current image and UrocyonF 1.7B command as `running|healthy|0|unless-stopped`
 with zero restarts.
+
+Final cleanup removed both named test containers and retained both accepted
+images. Production remained exactly
+`sha256:38f255cd9c0b6bac1e9b1aaa72904c25f7d3e3958ef56cefee9531ff65f2cbe3|running|healthy|0|unless-stopped`.
