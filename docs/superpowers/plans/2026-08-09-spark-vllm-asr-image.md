@@ -8,19 +8,19 @@
 
 **Tech Stack:** Docker/Compose, ARM64 NVIDIA GB10, CUDA 13.0, PyTorch 2.11, Spark-vLLM, Qwen3-ASR-0.6B, uv, pytest, Ruff, Portainer, the existing ASR benchmark gateway and protected German corpus.
 
-## Fixed contracts
+## Global Constraints
 
 - Base image: `eugr/spark-vllm@sha256:1d861bef8a6c0851140cec2575ebd32342d55bc0fd28ad4c6ca178269e9d1cff`.
 - Expected inherited runtime: Python `3.12.3`, Torch `2.11.0+cu130`, `torch.version.cuda == "13.0"`, vLLM `0.26.1rc1.dev468+g6b5bec7be.d20260807`, Triton `3.6.0`, and FlashInfer `0.6.18`.
 - Added distributions: only `soundfile==0.13.1` and `av==17.0.1`, installed with `--require-hashes --no-deps`. Inherited `cffi==2.1.1` is reused.
-- Do not install or rebuild Torch, vLLM, Triton, FlashInfer, Flash-Attention, CUDA, CFFI, or a compiler unless a real failing gate proves the exact requirement and the plan is revised before continuing.
+- Do not install or rebuild Torch, vLLM, Triton, FlashInfer, Flash-Attention, CUDA, CFFI, or a compiler, and do not patch inherited vLLM source.
 - Model snapshot: `/root/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-0.6B/snapshots/5eb144179a02acc5e5ba31e748d22b0cf3e303b0`.
-- API: multipart WAV plus `language=de` to `POST /v1/audio/transcriptions`; response is exactly a JSON object with a string `text` field.
+- API: multipart WAV plus `language=de` to `POST /v1/audio/transcriptions`; the response must be a JSON object with a string `text` field and may contain additive fields such as `usage`.
 - Candidate: image `dgx-qwen3-asr:spark-vllm-test`, container `qwen3-asr-spark-test`, host bind `127.0.0.1:18001:8001`.
 - Current production invariant: image `sha256:38f255cd9c0b6bac1e9b1aaa72904c25f7d3e3958ef56cefee9531ff65f2cbe3`, size `33,294,535,748`, `running|healthy|0|unless-stopped`.
 - Portainer stack is `voice`, stack ID `16`, endpoint ID `1`, API origin `http://192.168.68.41:9000/api`.
 - Never print, commit, or copy out raw audio, references, transcripts, caller data, Portainer environments, tokens, or model-cache content.
-- Until Task 6 passes, do not stop, recreate, update, or replace production `qwen3-asr`.
+- Until the corrected Task 7 A/B passes, do not stop, recreate, update, or replace production `qwen3-asr`.
 
 ---
 
@@ -323,7 +323,7 @@ Use an existing authorized 16 kHz mono German test WAV without printing its path
 
 - HTTP 200;
 - `Content-Type: application/json`;
-- response object has exactly `text` and that value is a string;
+- response is a JSON object whose `text` value is a string; additive fields are allowed;
 - response and timing stay in an owner-only temporary directory and are never copied to Git or the report.
 
 - [ ] **Step 4: Correlate candidate PID and nonzero SM with the request**
@@ -340,37 +340,235 @@ Expected: production invariant is unchanged; candidate image remains available.
 
 ---
 
-### Task 6: Run the production-versus-candidate German quality and latency A/B
+### Task 6: Remove the unnecessary response patch and revalidate the candidate
 
 **Files:**
-- No repository files changed.
-- Protected raw artifacts remain only below `/home/volsch/ai-companion/runtime/asr-image-ab-*` on GX10.
-- Create outside Git: `.superpowers/sdd/2026-08-09-spark-vllm-asr-image/performance-ab-report.md`
+- Modify: `dgx/asr/Dockerfile`
+- Delete: `dgx/asr/patch_vllm_transcription_contract.py`
+- Modify: `tests/test_dgx_deployment.py`
+- Modify: `tests/test_stt.py`
+- Append outside Git: `.superpowers/sdd/2026-08-09-spark-vllm-asr-image/task-6-contract-correction-report.md`
 
 **Interfaces:**
-- Consumes: accepted candidate, current production, common gateway source in `/home/volsch/projekte/ai-companion/.worktrees/asr-baseline-first`, and frozen protected corpus root.
-- Produces: a transcript-free comparison with explicit quality, success, CUDA, p50, and p90 gates.
+- Consumes: design correction commit `80c86e6`, the real client behavior in `agent/stt.py`, and the Task 4 unpatched recipe.
+- Produces: an unpatched candidate whose API contains a string `text` field and whose image, model, CUDA, and production-isolation gates pass.
 
-- [ ] **Step 1: Create an owner-only run directory and stage only benchmark code**
+- [ ] **Step 1: Add failing tests for the corrected contract**
 
-On GX10 create a unique mode-`0700` directory below `/home/volsch/ai-companion/runtime`, with `umask 077`. Copy only `scripts/asr_benchmark.py`, `scripts/asr_corpus.py`, and `scripts/asr_score.py` from the local `asr-baseline-first` worktree into a mode-`0700` tools subdirectory; each file must be mode `0600`. Use the frozen root and its `.venv/bin/python`; never copy corpus files off GX10.
+Add this client regression to `tests/test_stt.py`:
 
-- [ ] **Step 2: Build and start two identical common gateways**
+```python
+@respx.mock
+async def test_transcribe_accepts_additive_response_fields(stt):
+    respx.post("http://stt:8001/v1/audio/transcriptions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"text": "Hallo Welt", "usage": {"seconds": 0.5}},
+        )
+    )
 
-Build `asr-benchmark-gateway:spark-image-ab` from:
+    assert await stt.transcribe(_pcm_16k()) == "Hallo Welt"
+```
+
+Replace the patch-retention deployment tests with a regression that requires:
+
+```python
+assert "patch_vllm_transcription_contract.py" not in dockerfile
+assert "TranscriptionResponse" not in dockerfile
+assert not (ROOT / "dgx/asr/patch_vllm_transcription_contract.py").exists()
+```
+
+Run:
+
+```bash
+.venv/bin/pytest -q tests/test_stt.py::test_transcribe_accepts_additive_response_fields \
+  tests/test_dgx_deployment.py -k 'additive or unpatched'
+```
+
+Expected: the client test passes against existing behavior; the deployment regression fails because the patch file and Docker invocation still exist. This is the Red proof that the image violates the corrected design.
+
+- [ ] **Step 2: Remove only the response patch**
+
+Delete `dgx/asr/patch_vllm_transcription_contract.py`, its Docker `COPY`/`RUN`, the installed-runtime `TranscriptionResponse` serialization assertion, and patch-specific helpers/fixtures. Restore the Task 3 post-install assertion that checks only inherited versions, locked audio packages, CFFI, and Qwen3-ASR module registration. Do not change the lock, base digest, Compose, model command, or healthcheck.
+
+- [ ] **Step 3: Run focused and full Green gates**
+
+```bash
+.venv/bin/pytest -q tests/test_stt.py tests/test_dgx_deployment.py
+.venv/bin/pytest -q
+.venv/bin/ruff check agent tests dgx
+.venv/bin/ruff format --check agent tests dgx
+docker compose --env-file dgx/.env.example -f dgx/docker-compose.yml config --quiet
+git diff --check
+```
+
+Expected: all pass, and no test or image source requires exact response keys.
+
+- [ ] **Step 4: Commit the corrected image contract**
+
+```bash
+git add dgx/asr/Dockerfile dgx/asr/patch_vllm_transcription_contract.py \
+  tests/test_dgx_deployment.py tests/test_stt.py
+git commit -m "fix(asr): follow production transcription contract"
+```
+
+- [ ] **Step 5: Rebuild and statically identify the unpatched candidate**
 
 ```bash
 docker --host ssh://volsch@192.168.68.41 build \
-  --file /home/volsch/projekte/ai-companion/.worktrees/asr-baseline-first/deploy/asr-benchmark-gateway.Dockerfile \
-  --tag asr-benchmark-gateway:spark-image-ab \
-  /home/volsch/projekte/ai-companion/.worktrees/asr-baseline-first
+  --progress=plain \
+  --file dgx/asr/Dockerfile \
+  --tag dgx-qwen3-asr:spark-vllm-test \
+  dgx
 ```
 
-Start production gateway `asr-image-ab-gateway-prod` on `voice_default`, backend `http://qwen3-asr:8001`, loopback port `18110`; start candidate gateway `asr-image-ab-gateway-candidate` with the same image/security options, backend `http://qwen3-asr-spark-test:8001`, loopback port `18111`. Both gateways must report `{"status":"ok"}`. Recreate the Task 5 candidate without its host port but on `voice_default`; keep production running.
+Require ARM64/Linux, size below `33,294,535,748`, exact inherited and added versions, Qwen3-ASR module availability, and no patch file in the image. Record the new candidate ID; do not assume it equals the earlier Task 4 ID even if cache reuse makes it so.
 
-- [ ] **Step 3: Run identical quality and load phases in paired order**
+- [ ] **Step 6: Repeat real model, API, and CUDA acceptance**
 
-Using the staged runner and exact frozen files, run once per side:
+Start the exact Task 5 candidate command. Require `/v1/models` with `qwen3-asr`, HTTP 200 JSON whose `text` field is a string, candidate PID correlation, and nonzero SM during a real authorized German request. Additive response fields are allowed and only their key names/types may be recorded. Remove only `qwen3-asr-spark-test`, retain the image, and prove production remains `running|healthy|0|unless-stopped` on the original image.
+
+---
+
+### Task 7: Run the corrected production-versus-candidate German A/B
+
+**Files:**
+- No tracked repository files changed.
+- Create only in the plan workspace: `gateway-overlay/`
+- Create only in the plan workspace: `gateway-overlay/tests/test_asr_gateway_additive_response.py`
+- Protected raw artifacts remain only below `/home/volsch/ai-companion/runtime/asr-image-ab-*` on GX10.
+- Replace outside Git: `.superpowers/sdd/2026-08-09-spark-vllm-asr-image/performance-ab-report.md`
+
+**Interfaces:**
+- Consumes: Task 6 unpatched candidate, current production, common gateway source in `/home/volsch/projekte/ai-companion/.worktrees/asr-baseline-first`, and the frozen protected corpus.
+- Produces: one fully successful paired series and a transcript-free comparison with explicit quality, CUDA, p50, and p90 gates.
+
+- [ ] **Step 1: Preserve and exclude the invalid first attempt**
+
+Keep the original owner-only evidence proving the unchanged gateway produced production `0/70` and `0/12`. Mark it `invalid_gateway_contract` and assert its raw files are never supplied to the corrected comparator. The corrected series starts with four new exclusive output paths.
+
+- [ ] **Step 2: Create a private gateway overlay and failing test**
+
+Create the private copy with:
+
+```bash
+overlay_root=/home/volsch/projekte/voip-agent/.worktrees/spark-vllm-asr/.superpowers/sdd/2026-08-09-spark-vllm-asr-image/gateway-overlay
+install -d -m 0700 "$overlay_root"
+rsync -a --delete \
+  --exclude .git --exclude .venv --exclude .pytest_cache --exclude .ruff_cache \
+  --exclude benchmarks/results --exclude runtime \
+  /home/volsch/projekte/ai-companion/.worktrees/asr-baseline-first/ \
+  "$overlay_root/"
+```
+
+Create `gateway-overlay/tests/test_asr_gateway_additive_response.py` with:
+
+```python
+import httpx
+import pytest
+
+from asr_benchmark_gateway.client import (
+    BackendClient,
+    InvalidBackendResponse,
+)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"text": "Hallo"},
+        {"text": "Hallo", "usage": {"seconds": 0.5}},
+    ],
+)
+async def test_backend_accepts_text_with_additive_fields(payload):
+    async def handler(request):
+        assert request.url.path == "/v1/audio/transcriptions"
+        return httpx.Response(200, json=payload)
+
+    client = BackendClient(
+        "http://backend",
+        1,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert await client.transcribe(b"wav", "de", 1.0) == "Hallo"
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("payload", [{}, {"text": 7}])
+async def test_backend_rejects_missing_or_non_string_text(payload):
+    async def handler(request):
+        assert request.url.path == "/v1/audio/transcriptions"
+        return httpx.Response(200, json=payload)
+
+    client = BackendClient(
+        "http://backend",
+        1,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(InvalidBackendResponse):
+            await client.transcribe(b"wav", "de", 1.0)
+    finally:
+        await client.aclose()
+```
+
+Run:
+
+```bash
+cd "$overlay_root"
+uv sync --frozen
+uv run pytest -q tests/test_asr_gateway_additive_response.py
+```
+
+Expected Red: the additive-field case raises `InvalidBackendResponse` because the copied client still requires exact keys.
+
+- [ ] **Step 3: Implement the minimal normalization overlay**
+
+In only the private copied `src/asr_benchmark_gateway/client.py`, replace the exact-key condition with:
+
+```python
+if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+    raise InvalidBackendResponse
+return payload["text"]
+```
+
+Run:
+
+```bash
+uv run pytest -q tests/test_asr_gateway.py tests/test_asr_gateway_additive_response.py
+uv run ruff check src/asr_benchmark_gateway tests/test_asr_gateway_additive_response.py
+uv run ruff format --check src/asr_benchmark_gateway tests/test_asr_gateway_additive_response.py
+```
+
+Expected: both accepted shapes pass; invalid/missing text remains fail-closed. Record SHA-256 hashes for the original client, overlaid client, overlay test, Dockerfile, `pyproject.toml`, and lock.
+
+- [ ] **Step 4: Build one normalized common gateway image**
+
+Build from the private overlay:
+
+```bash
+docker --host ssh://volsch@192.168.68.41 build \
+  --file "$overlay_root/deploy/asr-benchmark-gateway.Dockerfile" \
+  --tag asr-benchmark-gateway:spark-image-ab-normalized \
+  "$overlay_root"
+```
+
+Record its immutable image ID and source hashes. Both production and candidate gateway containers must use that exact image ID; no per-side source or environment difference is allowed.
+
+- [ ] **Step 5: Create protected run state and start both sides**
+
+On GX10 create a unique mode-`0700` run directory with `umask 077`. Stage only `asr_benchmark.py`, `asr_corpus.py`, and `asr_score.py` as mode `0600`; never copy corpus files off GX10. Start the Task 6 candidate on `voice_default`, then identical gateways:
+
+- `asr-image-ab-gateway-prod` -> `http://qwen3-asr:8001`, loopback `18110`;
+- `asr-image-ab-gateway-candidate` -> `http://qwen3-asr-spark-test:8001`, loopback `18111`.
+
+Both must report `{"status":"ok"}` and resolve to the same gateway image ID.
+
+- [ ] **Step 6: Run one complete paired series**
+
+Run four new exclusive mode-`0600` outputs in this order:
 
 ```text
 production quality: 70 cases, concurrency 1, gateway 18110
@@ -379,52 +577,48 @@ production load:    frozen 12-case subset, concurrency 4, gateway 18110
 candidate load:     frozen 12-case subset, concurrency 4, gateway 18111
 ```
 
-Invoke `scripts/asr_benchmark.py run --phase quality` with the protected root and manifest, and `run --phase load` with the same root/manifest plus `latency-subset-v1.json`. Every output must be created exclusively with mode `0600`; no raw JSON may be printed.
+Every request uses identical bytes, `language=de`, case order, and concurrency. Observe container-correlated CUDA and nonzero SM during each load phase. No raw JSON is printed.
 
-- [ ] **Step 4: Observe CUDA for each side during its load phase**
+- [ ] **Step 7: Produce and validate the transcript-free result**
 
-Correlate each container's PIDs with NVIDIA compute PIDs while its load phase runs and require nonzero SM utilization. Store only `production_cuda_observed=true` and `candidate_cuda_observed=true` plus bounded aggregate SM values in the protected comparison.
+The protected comparator must reject duplicate keys, unknown aggregate fields, failures, non-finite metrics, case-order drift, corpus/hash drift, forbidden content keys, and either invalid first-attempt path. It may read transcripts only inside the protected directory. Require:
 
-- [ ] **Step 5: Produce and validate a transcript-free comparison inside the protected directory**
+- 70/70 quality and 12/12 load successes per side;
+- candidate WER, CER, macro WER, real-path macro WER, empty-speech count,
+  malformed count, non-speech hallucinated words, language-change cases,
+  non-transcript additions, and command-risk cases no worse than production;
+- candidate entity recall and every non-null number/time/date accuracy no lower
+  than production;
+- candidate p50 divided by production p50 at most `1.05`;
+- candidate nearest-rank p90 divided by production p90 at most `1.10`;
+- both CUDA observations true.
 
-Use the staged `asr_score.py` against the protected manifest and each 70-record quality run. The comparator must reject duplicate JSON keys, unknown fields, missing/failed requests, non-finite metrics, case-order differences, corpus/hash drift, and any unexpected response shape. It may read transcripts only inside the owner-only run directory. Its mode-`0600` output contains no records, text, transcript, reference, audio path, error body, or raw PID.
+Include exact safe aggregate maps and hashes for candidate, production, model revision, corpus, subset, runner, comparator, gateway overlay sources, and built gateway image. Validate the mode-`0600` result again from disk.
 
-Require all of these gates:
+- [ ] **Step 8: Use the single replication rule only for a shared-host latency anomaly**
 
-- 70/70 quality and 12/12 load requests succeed for each side;
-- corpus version and ordered case IDs are identical;
-- candidate WER, CER, macro WER, real-path macro WER, empty-speech count, malformed count, non-speech hallucinated words, language-change cases, non-transcript additions, and command-risk cases are no worse than production;
-- candidate entity recall and each non-null number/time/date accuracy are no lower than production;
-- candidate load p50 end-to-end latency divided by production p50 is at most `1.05`;
-- candidate load nearest-rank p90 divided by production p90 is at most `1.10`;
-- both CUDA observations are true.
+If and only if quality, success, and CUDA gates pass but one isolated paired latency anomaly affects both sides, preserve series 1 and run one complete unchanged replication. Report both series and combined 24-sample load aggregates. Never delete outliers or selectively rerun cases.
 
-The safe output must include exact aggregate maps, finite numeric validation, corpus version, hashes of base image, candidate image, model snapshot identifier, runner files, manifest, subset, and gateway image. Validate the output a second time from disk before interpreting it.
+- [ ] **Step 9: Clean exact benchmark containers and report**
 
-- [ ] **Step 6: Apply the single permitted replication rule only if needed**
-
-If and only if one paired series fails solely because one isolated shared-host latency anomaly affects both sides, preserve series 1 and run one complete unchanged replication. Report series 1, series 2, and combined 24-sample load aggregates. Do not delete or selectively rerun cases. A quality, success, CUDA, or repeated latency failure rejects rollout.
-
-- [ ] **Step 7: Clean benchmark containers and report only safe evidence**
-
-Remove only `qwen3-asr-spark-test`, `asr-image-ab-gateway-prod`, and `asr-image-ab-gateway-candidate`. Recheck production `running|healthy|0|unless-stopped`. The report may contain image IDs, sizes, corpus version/hash, aggregate quality metrics, p50/p90 values and ratios, CUDA booleans, and pass/fail; it must contain no raw records or transcripts.
+Remove only the candidate and the two named gateways. Recheck production `running|healthy|0|unless-stopped`. The report contains safe aggregates, hashes, ratios, CUDA booleans, and eligibility only; no raw records or transcripts.
 
 ---
 
-### Task 7: Roll out the accepted image with exact rollback protection
+### Task 8: Roll out the accepted image with exact rollback protection
 
 **Files:**
 - No planned repository changes.
 - Protected backups and environments remain in a mode-`0700` local run directory.
-- Create outside Git: `.superpowers/sdd/2026-08-09-spark-vllm-asr-image/task-7-report.md`
+- Create outside Git: `.superpowers/sdd/2026-08-09-spark-vllm-asr-image/task-8-report.md`
 
 **Interfaces:**
-- Consumes: all-green Task 4-6 evidence and current live stack identity.
+- Consumes: all-green Task 6-7 evidence and current live stack identity.
 - Produces: updated healthy ASR production or automatic restoration of the exact pre-update stack.
 
 - [ ] **Step 1: Re-resolve all identities immediately before mutation**
 
-Require stack `voice`, ID `16`, endpoint `1`; production container healthy with stable zero restart count for 30 seconds; candidate image ID equal to the A/B image; and a clean repository at the accepted commit. If production image changed since Task 6, stop and reassess instead of applying the older candidate over newer production.
+Require stack `voice`, ID `16`, endpoint `1`; production healthy with zero restarts stable for 30 seconds; candidate image ID equal to the Task 7 image; and clean repository. If production changed since Task 7, stop rather than replacing newer production.
 
 - [ ] **Step 2: Create immutable rollback and release tags**
 
@@ -434,73 +628,53 @@ ssh volsch@192.168.68.41 'docker image tag sha256:38f255cd9c0b6bac1e9b1aaa72904c
 docker --host ssh://volsch@192.168.68.41 image tag dgx-qwen3-asr:spark-vllm-test "$release_tag"
 ```
 
-If the current production ID differs from the recorded baseline, derive the rollback tag from the newly verified ID and record it; never retag the older image as current production.
-
 - [ ] **Step 3: Back up exact Portainer Compose and environment**
 
-Use `/home/volsch/projekte/ai-companion/.worktrees/asr-baseline-first/scripts/portainer.py` with:
+Use the existing `scripts/portainer.py` from `asr-baseline-first` with `GX10_PORTAINER_TOKEN_FILE=/home/volsch/.gx10_portainer_token`, base URL `http://192.168.68.41:9000/api`, endpoint `1`, and `backup --name voice`. Store Compose, environment, and redacted metadata as new mode-`0600` files; never print environment values.
 
-```text
-GX10_PORTAINER_TOKEN_FILE=/home/volsch/.gx10_portainer_token
---base-url http://192.168.68.41:9000/api
---endpoint-id 1
-backup --name voice
-```
+- [ ] **Step 4: Prove the candidate stack has one semantic change**
 
-Write Compose and environment to new mode-`0600` files and redirect only the helper's redacted metadata stdout to a separate mode-`0600` file. Never print or source the environment.
+Replace only `services.qwen3-asr.image` with the immutable release tag. Parse both YAML files and assert every other value is deeply equal; require the textual diff to contain one removed and one added image line.
 
-- [ ] **Step 4: Create a one-line candidate stack revision and prove its diff**
+- [ ] **Step 5: Apply without pull or prune**
 
-From the exact backup, replace only the current `qwen3-asr` image scalar with the immutable release tag. Parse both YAML documents and assert every value except `services.qwen3-asr.image` is deeply equal. Also assert the textual diff contains exactly one removed image line and one added image line.
-
-- [ ] **Step 5: Apply the exact stack update without pull or prune**
-
-Run the same Portainer helper with `upsert --name voice --compose "$run_dir/voice-candidate.yml" --environment "$run_dir/voice-environment.json" --expected-stack-id 16 --apply`. The helper sets `Prune=false`; the image is already local, so no registry pull is required.
+Run `portainer.py upsert --name voice --compose "$run_dir/voice-candidate.yml" --environment "$run_dir/voice-environment.json" --expected-stack-id 16 --apply`. The accepted image is local and the helper sets `Prune=false`.
 
 - [ ] **Step 6: Run production acceptance**
 
-Within 300 seconds require:
+Within 300 seconds require the accepted image ID/release tag, `running|healthy|0|unless-stopped` stable for 30 seconds, `/v1/models` with `qwen3-asr`, one real German request returning a JSON object with string `text`, candidate-specific CUDA PID plus nonzero SM, and the rollback tag still resolving to the pre-update image.
 
-- `qwen3-asr` uses the accepted candidate image ID and immutable release tag;
-- `running|healthy|0|unless-stopped` and remains stable for 30 seconds;
-- `/v1/models` reports `qwen3-asr`;
-- one private real German 16 kHz WAV from `voice_default` receives HTTP 200 and exact `{text: string}` response shape;
-- the production ASR container's PID is observed on CUDA and aggregate SM exceeds zero during that request;
-- `dgx-qwen3-asr:rollback-...` still resolves to the exact pre-update image.
+- [ ] **Step 7: Roll back on any failed gate**
 
-- [ ] **Step 7: Roll back automatically on any failed gate**
-
-Use the same Portainer helper to upsert the exact backup Compose plus exact backup environment with stack ID `16`. Then require the pre-update image ID, `running|healthy|0|unless-stopped`, `/v1/models`, a real transcription, and real CUDA proof. Report the candidate as rejected; do not attempt a second rollout in the same task.
+Upsert the exact backup Compose and environment, then require the old image ID, health/restart invariant, model list, real request, and CUDA proof. Do not retry rollout in the same task.
 
 ---
 
-### Task 8: Run final verification, self-review, and commit the plan record
+### Task 9: Run final verification and whole-branch review
 
 **Files:**
-- Modify only if live evidence invalidated documentation: `docs/superpowers/specs/2026-08-09-spark-vllm-asr-image-design.md`
-- Already created: `docs/superpowers/plans/2026-08-09-spark-vllm-asr-image.md`
+- Modify only if evidence invalidated it: `docs/superpowers/specs/2026-08-09-spark-vllm-asr-image-design.md`
+- Modify only for execution truth: `docs/superpowers/plans/2026-08-09-spark-vllm-asr-image.md`
 
 **Interfaces:**
-- Consumes: final implementation and live acceptance result.
-- Produces: a clean, reviewable feature branch with exact evidence and no private artifacts.
+- Consumes: final implementation, A/B, rollout, and rollback evidence.
+- Produces: a clean reviewable branch with no private artifacts.
 
-- [ ] **Step 1: Run fresh complete repository verification**
+- [ ] **Step 1: Run fresh complete gates**
 
 ```bash
-pytest -q
-ruff check agent tests dgx
-ruff format --check agent tests dgx
+.venv/bin/pytest -q
+.venv/bin/ruff check agent tests dgx
+.venv/bin/ruff format --check agent tests dgx
 docker compose --env-file dgx/.env.example -f dgx/docker-compose.yml config --quiet
 git diff --check
 ```
 
-Expected: all commands pass from fresh processes.
+- [ ] **Step 2: Reverify final image and live state**
 
-- [ ] **Step 2: Verify the final image and live state one last time**
+Repeat Task 6 static identity/import checks and Task 8 live invariant. If rollout failed, prove the exact original production image is restored and healthy.
 
-Re-run Task 4's image identity/platform/import checks and Task 7's live invariant. If rollout was rejected, prove the original production image is restored and healthy; never describe a rejected candidate as deployed.
-
-- [ ] **Step 3: Inspect the entire branch diff for privacy and scope**
+- [ ] **Step 3: Inspect complete branch scope and privacy**
 
 ```bash
 git diff --stat 8ae3a04..HEAD
@@ -508,17 +682,10 @@ git diff --check 8ae3a04..HEAD
 git status --short --branch
 ```
 
-Review every changed file. Require no audio, transcript, caller data, token, Portainer environment, raw benchmark output, model cache, generated wheel, or image archive. The expected implementation surface is only ASR locks, ASR Dockerfile, ASR Compose ownership, deployment tests, design, and this plan.
+Require no audio, transcript, caller data, token, Portainer environment, raw benchmark output, model cache, wheel, or image archive. Expected tracked scope is ASR locks/Dockerfile/Compose/tests, the authorized embedding format fix, STT contract test, design, and plan.
 
-- [ ] **Step 4: Request code review and address only verified findings**
+- [ ] **Step 4: Run whole-branch review**
 
-Use `superpowers:requesting-code-review`. For any finding, use `superpowers:receiving-code-review`, reproduce the issue, add a failing test when behavior changes, and rerun the affected plus full gates. Do not broaden the image for speculative compatibility.
-
-- [ ] **Step 5: Commit this implementation plan before execution if not already committed**
-
-```bash
-git add docs/superpowers/plans/2026-08-09-spark-vllm-asr-image.md
-git commit -m "docs(asr): plan Spark vLLM image rollout"
-```
+Use `superpowers:requesting-code-review`, including deferred minors from the SDD ledger. Address verified findings through one reviewed fix wave, rerun affected and full gates, and do not add speculative compatibility code.
 
 Do not push, open a PR, merge, or delete the branch unless the user separately requests that delivery workflow.
