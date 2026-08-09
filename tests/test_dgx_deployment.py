@@ -212,6 +212,9 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     requirements = (ROOT / "dgx/tts/requirements-slim-arm64.lock").read_text(encoding="utf-8")
     tts_packages = (ROOT / "dgx/tts/tts-packages-arm64.lock").read_text(encoding="utf-8")
     flash_attn = (ROOT / "dgx/tts/flash-attn-arm64.lock").read_text(encoding="utf-8")
+    runtime_apt_packages = (ROOT / "dgx/tts/apt-runtime-packages-arm64.lock").read_text(
+        encoding="utf-8"
+    )
 
     assert (
         "ARG CUDA_DEVEL_IMAGE=nvidia/cuda:13.3.1-devel-ubuntu26.04@"
@@ -290,6 +293,13 @@ def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     )
     assert "--require-hashes" in dockerfile
     assert "flash-attn install failed" not in dockerfile
+    assert "gcc-15=15.2.0-16ubuntu1" in runtime_apt_packages
+    assert "libc6-dev=2.43-2ubuntu2.3" in runtime_apt_packages
+    assert "COPY --from=builder /usr/include/python3.14 /usr/include/python3.14" in dockerfile
+    assert "COPY --from=builder /usr/include/aarch64-linux-gnu/python3.14" in dockerfile
+    assert "CC=gcc-15" in dockerfile
+    assert "command -v nvcc" not in dockerfile
+    assert "build-essential" not in runtime_apt_packages
 
 
 def test_tts_image_extracts_pure_kaldi_compat_without_installing_torchaudio() -> None:

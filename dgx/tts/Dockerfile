@@ -65,7 +65,10 @@ RUN apt-get update \
 
 COPY --from=builder /opt/tts-venv /opt/tts-venv
 COPY --from=builder /opt/tts-licenses /usr/share/licenses
+COPY --from=builder /usr/include/python3.14 /usr/include/python3.14
+COPY --from=builder /usr/include/aarch64-linux-gnu/python3.14 /usr/include/aarch64-linux-gnu/python3.14
 ENV PATH=/opt/tts-venv/bin:$PATH \
+    CC=gcc-15 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app

@@ -78,6 +78,10 @@ It contains only:
 
 - Python 3.14 and the system libraries required by the exercised 12 Hz Qwen
   TTS path;
+- the exact `gcc-15` and `libc6-dev` runtime closure plus the Python 3.14
+  headers copied from the builder. Triton compiles its small CUDA driver helper
+  on the first real CUDA invocation; this needs a host-independent C compiler
+  and headers, but not `nvcc`, CUDA headers, `make`, or `build-essential`;
 - `/opt/tts-venv` copied from the builder;
 - the five repository-owned TTS server modules;
 - NVIDIA container runtime metadata inherited from the CUDA base.
@@ -98,8 +102,11 @@ build-time import test proves the production TTS modules do not require them.
 Do not add a general compatibility layer or unrelated dependency upgrades.
 
 Create an Ubuntu-26.04 runtime package lock from packages actually installed in
-the final stage. Package installation must use exact versions. Repository and
-Docker build checks must fail on unpinned base images or dependencies.
+the final stage. Package installation must use exact versions. The only runtime
+build-time exception is the explicit minimal compiler/header closure required
+by Triton's first-use driver-helper JIT; it must use `CC=gcc-15` and must not
+add `nvcc`, `make`, or `build-essential`. Repository and Docker build checks
+must fail on unpinned base images or dependencies.
 
 ## Preserved Contracts
 
@@ -133,7 +140,8 @@ Static validation must prove:
 
 - both Docker stages use the pinned CUDA 13.3.1 Ubuntu 26.04 ARM64 manifests;
 - all application and dependency locks are exact;
-- the runtime stage does not install build tools;
+- the runtime stage contains only Triton's explicit `gcc-15`/header JIT
+  exception, not `nvcc`, `make`, or `build-essential`;
 - existing unit tests, Ruff, formatting, and Compose rendering pass;
 - the candidate image is smaller than the current 33.7 GB image.
 
