@@ -181,8 +181,23 @@ must not support an image-ineligible conclusion or a compatibility-patch root
 cause. No production mutation was made; production remained healthy with zero
 restarts.
 
-The original digest-pinned Spark-vLLM candidate must instead be qualified with
-the exact cached Urocyon 1.7B-NVFP4 snapshot before any eligibility decision.
+The corrected same-model qualification is complete. Production and the
+unchanged first Spark-vLLM candidate both served the exact Urocyon
+Qwen3-ASR-1.7B-NVFP4 snapshot
+`61ad4d533c64e033a750b66c44aad6f18634997e` through one immutable normalized
+gateway image. Each side completed `70/70` quality and `12/12` load requests in
+the prescribed order, with exact model identity revalidated before every
+series and container-correlated CUDA observed for both load phases.
+
+The candidate passed request-success, corpus/order, WER/CER, entity recall,
+number/time/date, median-latency, p90-latency, and CUDA gates. Candidate versus
+production load ratios were `0.9965589999544625` at p50 and
+`0.9742123045873843` at nearest-rank p90. It failed the mandatory non-speech
+safety gate because hallucinated words increased from `5` to `14`. The
+candidate is therefore **not eligible for rollout**. The single replication
+rule did not apply because a quality gate failed; no outlier was removed and no
+quality series was rerun. Production remained on its original image, healthy,
+with zero restarts, and no rollout occurred.
 
 ## Rollout and Rollback
 
