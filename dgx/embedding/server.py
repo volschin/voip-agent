@@ -1,4 +1,5 @@
 import os
+
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -26,10 +27,7 @@ async def embed(req: EmbedRequest):
     vecs = model.encode(texts, normalize_embeddings=True).tolist()
     return {
         "object": "list",
-        "data": [
-            {"object": "embedding", "index": i, "embedding": v}
-            for i, v in enumerate(vecs)
-        ],
+        "data": [{"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(vecs)],
         "model": MODEL_ID,
     }
 
