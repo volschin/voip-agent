@@ -85,6 +85,20 @@ ASR loads the already cached `UrocyonF/Qwen3-ASR-1.7B-NVFP4` snapshot
 offline. TTS refuses to start unless PyTorch reports CUDA on `NVIDIA GB10`;
 there is no CPU fallback.
 
+## Build the midpoint ASR candidate
+
+To build the reproducible local midpoint candidate, run:
+
+```bash
+cd dgx
+./asr/build-midpoint-base.sh
+```
+
+To reuse the already verified local base and build only the ASR derivative, add
+`--reuse-base`. This produces only the local test tags
+`dgx-spark-vllm:midpoint-v023` and `dgx-qwen3-asr:spark-midpoint-v023-test`;
+it does not deploy either image.
+
 `qwen3-tts` builds locally from `./tts`. Production callers use stable
 whole-WAV `/v1/audio/speech`; `/v1/audio/speech/stream` remains available only
 for diagnostics. The image applies a version-bound patch to
