@@ -1,5 +1,6 @@
 """Deployment contract for the independently owned GX10 voice stack."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,98 @@ from dgx.tts.runtime import normalize_language, require_gb10_cuda
 ROOT = Path(__file__).resolve().parents[1]
 ASR_REVISION = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
 TTS_BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
+LOCK_ENTRY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\[[^]]+\])?==\S+")
+LOCK_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
 
 
 def _compose() -> dict:
     return yaml.safe_load((ROOT / "dgx/docker-compose.yml").read_text(encoding="utf-8"))
+
+
+def _assert_hash_locked(requirements: str) -> None:
+    lines = requirements.splitlines()
+    entry_indexes = [index for index, line in enumerate(lines) if LOCK_ENTRY.match(line)]
+
+    assert entry_indexes
+    for index, next_index in zip(entry_indexes, [*entry_indexes[1:], len(lines)], strict=True):
+        package_lines = lines[index:next_index]
+        package_block = "\n".join(line.split("#", maxsplit=1)[0] for line in package_lines)
+        hashes = re.findall(r"--hash=\S*", package_block)
+        assert hashes
+        assert all(LOCK_HASH.fullmatch(value) for value in hashes)
+
+
+def _normalized_lock_headers(requirements: str) -> set[str]:
+    return {
+        re.sub(r"[-_.]+", "-", match.group(0).split("==", maxsplit=1)[0]).lower()
+        + "=="
+        + match.group(0).split("==", maxsplit=1)[1]
+        for line in requirements.splitlines()
+        if (match := LOCK_ENTRY.match(line))
+    }
+
+
+def _normalized_package_name(header: str) -> str:
+    package_name = header.split("==", maxsplit=1)[0].split("[", maxsplit=1)[0]
+    return re.sub(r"[-_.]+", "-", package_name).lower()
+
+
+def _logical_docker_instructions(dockerfile: str) -> list[str]:
+    return re.sub(r"\\[ \t]*\n", " ", dockerfile).splitlines()
+
+
+def _has_forbidden_torchaudio_pip_install(dockerfile: str) -> bool:
+    return any(
+        re.search(r"\bpip\s+install\b.*\btorchaudio\b", instruction)
+        for instruction in _logical_docker_instructions(dockerfile)
+    )
+
+
+def _runtime_stage_instructions(dockerfile: str) -> list[str]:
+    instructions = _logical_docker_instructions(dockerfile)
+    runtime_start = next(
+        index
+        for index, instruction in enumerate(instructions)
+        if re.fullmatch(r"FROM\s+.+\s+AS\s+runtime", instruction, flags=re.IGNORECASE)
+    )
+    runtime_end = next(
+        (
+            index
+            for index, instruction in enumerate(
+                instructions[runtime_start + 1 :], runtime_start + 1
+            )
+            if re.match(r"FROM\s+", instruction, flags=re.IGNORECASE)
+        ),
+        len(instructions),
+    )
+    return [
+        instruction
+        for instruction in instructions[runtime_start + 1 : runtime_end]
+        if re.match(r"(?:RUN|COPY|ADD|ENV|CMD|ENTRYPOINT)\s+", instruction, flags=re.IGNORECASE)
+    ]
+
+
+_RUNTIME_TOOLING_ABSENCE_GATE = re.compile(
+    r"^RUN\s+!\s+command\s+-v\s+nvcc\s+&&\s+!\s+command\s+-v\s+make\s+&&\s+!\s+"
+    r"dpkg-query\s+-W\s+-f='\$\{db:Status-Status\}'\s+build-essential\s+2>/dev/null\s+"
+    r"\|\s+grep\s+-qx\s+installed$"
+)
+
+
+def _runtime_stage_has_tooling_absence_gate(dockerfile: str) -> bool:
+    return any(
+        _RUNTIME_TOOLING_ABSENCE_GATE.fullmatch(instruction)
+        for instruction in _runtime_stage_instructions(dockerfile)
+    )
+
+
+def _runtime_stage_uses_forbidden_tool(dockerfile: str) -> bool:
+    return any(
+        re.search(rf"(?<![A-Za-z0-9_.-]){tool}(?![A-Za-z0-9_.-])", instruction)
+        for instruction in _runtime_stage_instructions(dockerfile)
+        if not _RUNTIME_TOOLING_ABSENCE_GATE.fullmatch(instruction)
+        for tool in ("nvcc", "make", "build-essential")
+    )
 
 
 def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:
@@ -166,23 +255,215 @@ def test_tts_image_copies_clone_code_but_no_private_profile_assets() -> None:
 
 def test_tts_image_pins_base_digest_and_runtime_dependencies() -> None:
     dockerfile = (ROOT / "dgx/tts/Dockerfile").read_text(encoding="utf-8")
-    requirements = (ROOT / "dgx/tts/requirements-arm64.lock").read_text(encoding="utf-8")
+    runtime_input = (ROOT / "dgx/tts/requirements-slim-arm64.in").read_text(encoding="utf-8")
+    requirements = (ROOT / "dgx/tts/requirements-slim-arm64.lock").read_text(encoding="utf-8")
+    tts_packages = (ROOT / "dgx/tts/tts-packages-arm64.lock").read_text(encoding="utf-8")
+    flash_attn = (ROOT / "dgx/tts/flash-attn-arm64.lock").read_text(encoding="utf-8")
+    runtime_apt_packages = (ROOT / "dgx/tts/apt-runtime-packages-arm64.lock").read_text(
+        encoding="utf-8"
+    )
 
     assert (
-        "FROM ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3@"
-        "sha256:6506ebcb79b1bd0d48f8afca127984791f32345333be1be0fef334eaa5a9e23a" in dockerfile
+        "ARG CUDA_DEVEL_IMAGE=nvidia/cuda:13.3.1-devel-ubuntu26.04@"
+        "sha256:da3989b0ea8e8b4b241711edd5823bc1cc83d05a01882258bddad84d7394c37e" in dockerfile
     )
-    for dependency in (
-        "faster-qwen3-tts==0.2.6",
-        "qwen-tts==0.1.1",
-        "fastapi==0.135.3",
-        "uvicorn[standard]==0.44.0",
-        "pydantic==2.12.5",
-        "flash-attn==2.8.3",
-        "av==17.0.1",
+    assert (
+        "ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:13.3.1-base-ubuntu26.04@"
+        "sha256:f65b4f0b65bbf2e0a2520cebaec3120bf4ed110aecc3e7dcab3b11cb508a0484" in dockerfile
+    )
+    assert [line for line in dockerfile.splitlines() if line.startswith("FROM ")] == [
+        "FROM ${CUDA_DEVEL_IMAGE} AS builder",
+        "FROM ${CUDA_RUNTIME_IMAGE} AS runtime",
+    ]
+    runtime_input_headers = _normalized_lock_headers(runtime_input)
+    runtime_lock_headers = _normalized_lock_headers(requirements)
+    for input_dependency, resolved_dependency in (
+        ("accelerate==1.12.0", "accelerate==1.12.0"),
+        ("einops==0.8.2", "einops==0.8.2"),
+        ("fastapi==0.135.3", "fastapi==0.135.3"),
+        ("huggingface-hub==0.36.2", "huggingface-hub==0.36.2"),
+        ("librosa==0.11.0", "librosa==0.11.0"),
+        ("onnxruntime==1.28.0", "onnxruntime==1.28.0"),
+        ("pydantic==2.12.5", "pydantic==2.12.5"),
+        ("soundfile==0.14.0", "soundfile==0.14.0"),
+        ("sox==1.5.0", "sox==1.5.0"),
+        ("torch==2.13.0+cu132", "torch==2.13.0+cu132"),
+        ("transformers==4.57.3", "transformers==4.57.3"),
+        ("uvicorn[standard]==0.44.0", "uvicorn==0.44.0"),
     ):
-        assert dependency in requirements
-    locked = [line for line in requirements.splitlines() if line and not line.startswith("#")]
-    assert all("==" in line and " --hash=sha256:" in line for line in locked)
+        assert input_dependency in runtime_input_headers
+        assert resolved_dependency in runtime_lock_headers
+
+    assert (
+        "faster-qwen3-tts==0.2.6 "
+        "--hash=sha256:3881a41dc189f0a6e93fa047f376deffeb2fa84e888e7d570f79b3e2267765cc"
+        in tts_packages
+    )
+    assert (
+        "qwen-tts==0.1.1 "
+        "--hash=sha256:11a290d8dabc7ef91a90c54478c8ab19b3edb1d85c0882313721892bdc4af15d"
+        in tts_packages
+    )
+    assert (
+        "flash-attn==2.8.3 "
+        "--hash=sha256:1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d"
+        in flash_attn
+    )
+    excluded_runtime_packages = {
+        "vllm",
+        "ray",
+        "flashinfer",
+        "gradio",
+        "hf-gradio",
+        "torchaudio",
+    }
+    assert not excluded_runtime_packages & {
+        _normalized_package_name(header) for header in runtime_lock_headers
+    }
+    for lock in (requirements, tts_packages, flash_attn):
+        _assert_hash_locked(lock)
+
+    assert (
+        "COPY tts/requirements-slim-arm64.lock /tmp/requirements-slim-arm64.lock\n"
+        "RUN pip install --no-cache-dir --require-hashes \\\n"
+        "      -r /tmp/requirements-slim-arm64.lock" in dockerfile
+    )
+    assert (
+        "COPY tts/tts-packages-arm64.lock /tmp/tts-packages-arm64.lock\n"
+        "RUN pip install --no-cache-dir --require-hashes --no-deps \\\n"
+        "      -r /tmp/tts-packages-arm64.lock" in dockerfile
+    )
+    assert (
+        "COPY tts/flash-attn-arm64.lock /tmp/flash-attn-arm64.lock\n"
+        "RUN pip install --no-cache-dir --require-hashes --no-deps --no-build-isolation \\\n"
+        "      -r /tmp/flash-attn-arm64.lock" in dockerfile
+    )
     assert "--require-hashes" in dockerfile
     assert "flash-attn install failed" not in dockerfile
+    assert runtime_apt_packages.splitlines() == [
+        "python3=3.14.3-0ubuntu2",
+        "gcc-15=15.2.0-16ubuntu1",
+        "libc6-dev=2.43-2ubuntu2.3",
+        "libsndfile1=1.2.2-4",
+        "libgomp1=16-20260322-1ubuntu1",
+        "sox=14.7.0.9+ds1-1",
+        "libsox-fmt-base=14.7.0.9+ds1-1",
+    ]
+    assert "COPY --from=builder /usr/include/python3.14 /usr/include/python3.14" in dockerfile
+    assert "COPY --from=builder /usr/include/aarch64-linux-gnu/python3.14" in dockerfile
+    assert "CC=gcc-15" in dockerfile
+    assert not _runtime_stage_uses_forbidden_tool(dockerfile)
+    assert _runtime_stage_has_tooling_absence_gate(dockerfile)
+
+
+def test_tts_runtime_stage_rejects_forbidden_tooling_instructions() -> None:
+    builder_only = """FROM base AS builder
+RUN apt-get install -y build-essential make
+FROM base AS runtime
+RUN echo runtime-ready
+"""
+    assert not _runtime_stage_uses_forbidden_tool(builder_only)
+
+    later_debug_stage = """FROM base AS builder
+FROM base AS runtime
+RUN echo runtime-ready
+FROM base AS debug
+RUN make docs
+"""
+    assert not _runtime_stage_uses_forbidden_tool(later_debug_stage)
+
+    forbidden_runtime_fixtures = (
+        """FROM base AS builder
+FROM base AS runtime
+RUN apt-get install -y build-essential
+""",
+        """FROM base AS builder
+FROM base AS runtime
+RUN /usr/bin/make all
+""",
+        """FROM base AS builder
+FROM base AS runtime
+COPY --from=builder /usr/local/cuda/bin/nvcc /usr/local/bin/nvcc
+""",
+    )
+    assert all(
+        _runtime_stage_uses_forbidden_tool(fixture) for fixture in forbidden_runtime_fixtures
+    )
+
+
+def test_tts_image_extracts_pure_kaldi_compat_without_installing_torchaudio() -> None:
+    """Catch a CUDA 13.2 Torch image silently gaining an ABI-mismatched TorchAudio wheel."""
+    dockerfile = (ROOT / "dgx/tts/Dockerfile").read_text(encoding="utf-8")
+    compat_lock = (ROOT / "dgx/tts/torchaudio-kaldi-compat-arm64.lock").read_text(encoding="utf-8")
+
+    assert (
+        "torchaudio==2.9.1 "
+        "--hash=sha256:9c0d004f784c49078017f8217fdc901df0eb9724e50fb269b3a6c99b1d4eae75"
+        in compat_lock
+    )
+    assert (
+        "COPY tts/torchaudio-kaldi-compat-arm64.lock "
+        "/tmp/torchaudio-kaldi-compat-arm64.lock" in dockerfile
+    )
+    assert "pip download --no-cache-dir --require-hashes --no-deps" in dockerfile
+    assert "torchaudio/compliance/kaldi.py" in dockerfile
+    assert "torchaudio-2.9.1.dist-info/LICENSE" in dockerfile
+    assert "kaldi_compat.py" in dockerfile
+    assert "BSD-2-Clause" in dockerfile
+    assert "SPDX-License-Identifier: BSD-2-Clause\\\\n# Full license:" in dockerfile
+    assert "only fbank is supported" in dockerfile
+    assert "/usr/share/licenses/torchaudio-kaldi-compat/LICENSE" in dockerfile
+    assert "COPY --from=builder /opt/tts-licenses /usr/share/licenses" in dockerfile
+    assert "importlib.util.find_spec(" in dockerfile
+    assert "import qwen_tts; print" not in dockerfile
+    assert "importlib.util.find_spec('torchaudio') is None" not in dockerfile
+
+    logical_dockerfile = "\n".join(_logical_docker_instructions(dockerfile))
+    assert re.search(
+        r"\bpip\s+download\b.*torchaudio-kaldi-compat-arm64\.lock",
+        logical_dockerfile,
+    )
+    assert not _has_forbidden_torchaudio_pip_install(dockerfile)
+
+    forbidden_install_fixtures = (
+        "RUN pip install torchaudio==2.9.1",
+        "RUN pip \\" + "\n    install torchaudio==2.9.1",
+        "RUN pip \\  " + "\n    install torchaudio==2.9.1",
+        "RUN pip \\\t" + "\n    install torchaudio==2.9.1",
+    )
+    assert all(
+        _has_forbidden_torchaudio_pip_install(fixture) for fixture in forbidden_install_fixtures
+    )
+    assert not _has_forbidden_torchaudio_pip_install("RUN pip download torchaudio==2.9.1")
+
+
+def test_tts_lock_contract_rejects_tampered_hashes() -> None:
+    requirements = (ROOT / "dgx/tts/requirements-slim-arm64.lock").read_text(encoding="utf-8")
+    tts_packages = (ROOT / "dgx/tts/tts-packages-arm64.lock").read_text(encoding="utf-8")
+    tampered_runtime = requirements.replace(
+        "3e2091cd341423207e2f084a6654b1efcd250dc326f2a37d6dde446e07cabb11",
+        "not-a-full-sha256",
+    )
+    tampered_qwen = tts_packages.replace(
+        "3881a41dc189f0a6e93fa047f376deffeb2fa84e888e7d570f79b3e2267765cc",
+        "not-a-full-sha256",
+    )
+    tampered_empty_runtime_hash = requirements.replace(
+        "    --hash=sha256:70988c352feb481887077d2ab845125024b2a137a5090d6d7a32b57d03a45df6",
+        "    --hash=",
+        1,
+    )
+    comment_only_multiline_hash = "demo==1.0\n # --hash=sha256:" + "0" * 64
+    comment_only_inline_hash = "demo==1.0 # --hash=sha256:" + "0" * 64
+
+    for tampered in (
+        tampered_runtime,
+        tampered_qwen,
+        tampered_empty_runtime_hash,
+        comment_only_multiline_hash,
+        comment_only_inline_hash,
+    ):
+        with pytest.raises(AssertionError):
+            _assert_hash_locked(tampered)
+
+    assert _normalized_package_name("vllm[foo]==1.0") == "vllm"

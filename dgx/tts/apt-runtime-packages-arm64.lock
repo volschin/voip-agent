@@ -1,0 +1,7 @@
+python3=3.14.3-0ubuntu2
+gcc-15=15.2.0-16ubuntu1
+libc6-dev=2.43-2ubuntu2.3
+libsndfile1=1.2.2-4
+libgomp1=16-20260322-1ubuntu1
+sox=14.7.0.9+ds1-1
+libsox-fmt-base=14.7.0.9+ds1-1

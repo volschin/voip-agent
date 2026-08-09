@@ -1,27 +1,45 @@
-# Thin TTS sidecar — reuses the v3 vLLM image's Python/torch/audio stack
-# (aarch64-native, has librosa/soundfile already). Adds qwen-tts + FastAPI.
-FROM ghcr.io/aeon-7/vllm-aeon-ultimate-dflash:qwen36-v3@sha256:6506ebcb79b1bd0d48f8afca127984791f32345333be1be0fef334eaa5a9e23a
+ARG CUDA_DEVEL_IMAGE=nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:da3989b0ea8e8b4b241711edd5823bc1cc83d05a01882258bddad84d7394c37e
+ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:13.3.1-base-ubuntu26.04@sha256:f65b4f0b65bbf2e0a2520cebaec3120bf4ed110aecc3e7dcab3b11cb508a0484
 
-# Qwen audio I/O and every package added to the pinned base image are locked
-# to the exact versions verified on the GX10 ARM64 target.
-COPY tts/apt-packages-arm64.lock /tmp/apt-packages-arm64.lock
+FROM ${CUDA_DEVEL_IMAGE} AS builder
+
+COPY tts/apt-builder-packages-arm64.lock /tmp/apt-builder-packages-arm64.lock
 RUN apt-get update \
  && xargs -r apt-get install -y --no-install-recommends \
-      < /tmp/apt-packages-arm64.lock \
+      < /tmp/apt-builder-packages-arm64.lock \
  && rm -rf /var/lib/apt/lists/*
 
-COPY tts/requirements-arm64.lock /tmp/requirements-arm64.lock
-
-# flash-attn for max throughput. The qwen-asr README explicitly recommends this
-# install style ("--no-build-isolation"). ARM64 compiles the hash-pinned source
-# distribution (about 15 minutes on GX10) and failure must fail the image build.
-# Cap MAX_JOBS to keep memory pressure down on Spark's unified RAM during the
-# native build; 4 is conservative for a 20-core ARM with 128GB but keeps the
-# build stable.
-ENV MAX_JOBS=4 \
+RUN python3 -m venv /opt/tts-venv
+ENV PATH=/opt/tts-venv/bin:$PATH \
+    MAX_JOBS=4 \
     FLASH_ATTN_CUDA_ARCHS=120
-RUN pip install --no-cache-dir --break-system-packages --no-build-isolation \
-      --require-hashes -r /tmp/requirements-arm64.lock
+
+COPY tts/requirements-slim-arm64.lock /tmp/requirements-slim-arm64.lock
+RUN pip install --no-cache-dir --require-hashes \
+      -r /tmp/requirements-slim-arm64.lock
+
+COPY tts/tts-packages-arm64.lock /tmp/tts-packages-arm64.lock
+RUN pip install --no-cache-dir --require-hashes --no-deps \
+      -r /tmp/tts-packages-arm64.lock
+
+COPY tts/flash-attn-arm64.lock /tmp/flash-attn-arm64.lock
+RUN pip install --no-cache-dir --require-hashes --no-deps --no-build-isolation \
+      -r /tmp/flash-attn-arm64.lock
+
+COPY tts/torchaudio-kaldi-compat-arm64.lock /tmp/torchaudio-kaldi-compat-arm64.lock
+RUN pip download --no-cache-dir --require-hashes --no-deps \
+      -r /tmp/torchaudio-kaldi-compat-arm64.lock \
+      --dest /tmp/torchaudio-kaldi \
+ && package_root="$(python3 -c \
+      'from pathlib import Path; import importlib.util; print(Path(importlib.util.find_spec('\''qwen_tts'\'').origin).resolve().parent)')" \
+ && kaldi_wheel="$(find /tmp/torchaudio-kaldi -name 'torchaudio-*.whl' -print -quit)" \
+ && python3 -c "from pathlib import Path; from zipfile import ZipFile; import sys; wheel, root, license_root = sys.argv[1:]; archive = ZipFile(wheel); source = archive.read('torchaudio/compliance/kaldi.py').decode(); license_text = archive.read('torchaudio-2.9.1.dist-info/LICENSE'); archive.close(); assert source.count('import torchaudio\\n') == 1; provenance = '# Derived from torchaudio 2.9.1, torchaudio/compliance/kaldi.py.\\n# SPDX-License-Identifier: BSD-2-Clause\\n# Full license: /usr/share/licenses/torchaudio-kaldi-compat/LICENSE\\n# Compatibility contract: only fbank is supported; mfcc is outside this runtime contract.\\n\\n'; Path(root, 'core/tokenizer_25hz/vq/kaldi_compat.py').write_text(provenance + source.replace('import torchaudio\\n', ''), encoding='utf-8'); license_path = Path(license_root) / 'LICENSE'; license_path.parent.mkdir(parents=True, exist_ok=True); license_path.write_bytes(license_text)" \
+      "$kaldi_wheel" "$package_root" /opt/tts-licenses/torchaudio-kaldi-compat \
+ && python3 -c "from pathlib import Path; import sys; path = Path(sys.argv[1]) / 'core/tokenizer_25hz/vq/speech_vq.py'; source = path.read_text(encoding='utf-8'); updated = source.replace('import torchaudio.compliance.kaldi as kaldi', 'from . import kaldi_compat as kaldi'); assert updated != source; path.write_text(updated, encoding='utf-8')" \
+      "$package_root" \
+ && rm -rf /tmp/torchaudio-kaldi
+
+RUN python3 -c 'import faster_qwen3_tts, qwen_tts, torch; import qwen_tts.core; import qwen_tts.inference.qwen3_tts_model; from qwen_tts.core.tokenizer_25hz.vq import kaldi_compat; features = kaldi_compat.fbank(torch.ones(1, 400), num_mel_bins=80, dither=0, sample_frequency=16000); assert features.shape == (1, 80); assert torch.isfinite(features).all()'
 
 # faster-qwen3-tts 0.2.6 has no cancellation hook in its stable decode loop.
 # Apply a fail-closed, version-bound patch so barge-in can stop between codec
@@ -37,6 +55,26 @@ RUN package_root="$(python3 -c \
  && rm /tmp/faster-qwen3-tts-0.2.6-cooperative-cancel.patch \
       /tmp/verify_cooperative_cancel_patch.py
 
+FROM ${CUDA_RUNTIME_IMAGE} AS runtime
+
+COPY tts/apt-runtime-packages-arm64.lock /tmp/apt-runtime-packages-arm64.lock
+RUN apt-get update \
+ && xargs -r apt-get install -y --no-install-recommends \
+      < /tmp/apt-runtime-packages-arm64.lock \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN ! command -v nvcc \
+ && ! command -v make \
+ && ! dpkg-query -W -f='${db:Status-Status}' build-essential 2>/dev/null | grep -qx installed
+
+COPY --from=builder /opt/tts-venv /opt/tts-venv
+COPY --from=builder /opt/tts-licenses /usr/share/licenses
+COPY --from=builder /usr/include/python3.14 /usr/include/python3.14
+COPY --from=builder /usr/include/aarch64-linux-gnu/python3.14 /usr/include/aarch64-linux-gnu/python3.14
+ENV PATH=/opt/tts-venv/bin:$PATH \
+    CC=gcc-15 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
 COPY tts/server.py /app/dgx/tts/server.py
 COPY tts/runtime.py /app/dgx/tts/runtime.py
@@ -44,6 +82,5 @@ COPY tts/profiles.py /app/dgx/tts/profiles.py
 COPY tts/clone_runtime.py /app/dgx/tts/clone_runtime.py
 COPY tts/api.py /app/dgx/tts/api.py
 
-ENV PYTHONUNBUFFERED=1
 EXPOSE 8002
 CMD ["python3", "-m", "dgx.tts.server"]

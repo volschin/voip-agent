@@ -1,0 +1,6 @@
+python3=3.14.3-0ubuntu2
+python3-venv=3.14.3-0ubuntu2
+python3-dev=3.14.3-0ubuntu2
+build-essential=12.12ubuntu2.26.04.2
+ninja-build=1.13.2-1
+patch=2.8-2build1
