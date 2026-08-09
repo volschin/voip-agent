@@ -1,10 +1,9 @@
-ARG SPARK_BASE=dgx-spark-vllm:midpoint-v023
-FROM ${SPARK_BASE}
+FROM eugr/spark-vllm@sha256:1d861bef8a6c0851140cec2575ebd32342d55bc0fd28ad4c6ca178269e9d1cff
 
 COPY asr/requirements-audio-arm64.lock /tmp/requirements-audio-arm64.lock
 RUN python3 -m pip install --no-cache-dir --require-hashes --no-deps \
       -r /tmp/requirements-audio-arm64.lock \
- && python3 -c "import hashlib, importlib.metadata as m, importlib.util as u, pathlib, torch; adapter = u.find_spec('vllm.model_executor.models.qwen3_asr'); assert adapter and adapter.origin; assert hashlib.sha256(pathlib.Path(adapter.origin).read_bytes()).hexdigest() == 'e233961d38d0a396db34cf2f7d83c6dc1c33aa55768ba894eee6de097120342d'; assert torch.__version__ == '2.11.0+cu130'; assert torch.version.cuda == '13.0'; assert m.version('vllm') == '0.23.0'; assert m.version('transformers') == '5.12.1'; assert m.version('flashinfer-python') == '0.6.12'; assert m.version('soundfile') == '0.13.1'; assert m.version('av') == '17.0.1'"
+ && python3 -c "import importlib.metadata as m, importlib.util as u, torch; assert torch.__version__ == '2.11.0+cu130'; assert torch.version.cuda == '13.0'; assert m.version('vllm') == '0.26.1rc1.dev468+g6b5bec7be.d20260807'; assert m.version('soundfile') == '0.13.1'; assert m.version('av') == '17.0.1'; assert m.version('cffi') == '2.1.1'; assert u.find_spec('vllm.model_executor.models.qwen3_asr')"
 
 EXPOSE 8001
 ENV PYTHONUNBUFFERED=1
