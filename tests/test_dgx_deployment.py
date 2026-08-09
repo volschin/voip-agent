@@ -1,6 +1,8 @@
 """Deployment contract for the independently owned GX10 voice stack."""
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -410,6 +412,94 @@ def test_asr_spark_image_is_unpatched() -> None:
     assert "patch_vllm_transcription_contract.py" not in dockerfile
     assert "TranscriptionResponse" not in dockerfile
     assert not (ROOT / "dgx/asr/patch_vllm_transcription_contract.py").exists()
+
+
+_QWEN3_OMNI_ASYNC_CU_SEQLENS = """        cu_seqlens = async_tensor_h2d(
+            cu_chunk_lens, dtype=torch.int32, device=aftercnn_lens.device
+        ).cumsum(-1, dtype=torch.int32)
+"""
+_QWEN3_OMNI_DIRECT_CU_SEQLENS = (
+    "        cu_seqlens = torch.tensor("
+    "cu_chunk_lens, device=aftercnn_lens.device).cumsum(\n"
+    "            -1, dtype=torch.int32\n"
+    "        )\n"
+)
+
+
+def test_qwen3_omni_audio_encoder_patch_replaces_one_validated_operation(tmp_path: Path) -> None:
+    """Catch a correction that changes more than the proven cu_seqlens operation."""
+    target = tmp_path / "qwen3_omni_moe_thinker.py"
+    target.write_text(
+        "class Encoder:\n"
+        "    def forward(self):\n" + _QWEN3_OMNI_ASYNC_CU_SEQLENS + "        return cu_seqlens\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "dgx/asr/patch_qwen3_omni_audio_encoder.py"), str(target)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    patched = target.read_text(encoding="utf-8")
+    assert patched == (
+        "class Encoder:\n"
+        "    def forward(self):\n" + _QWEN3_OMNI_DIRECT_CU_SEQLENS + "        return cu_seqlens\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "class Encoder:\n    def forward(self):\n        return None\n",
+        "class Encoder:\n    def forward(self):\n"
+        + _QWEN3_OMNI_ASYNC_CU_SEQLENS
+        + _QWEN3_OMNI_ASYNC_CU_SEQLENS
+        + "        return cu_seqlens\n",
+    ),
+)
+def test_qwen3_omni_audio_encoder_patch_rejects_ambiguous_source(
+    tmp_path: Path, source: str
+) -> None:
+    """Catch source drift or duplicate matches before the image silently changes behavior."""
+    target = tmp_path / "qwen3_omni_moe_thinker.py"
+    target.write_text(source, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "dgx/asr/patch_qwen3_omni_audio_encoder.py"), str(target)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert target.read_text(encoding="utf-8") == source
+
+
+def test_asr_spark_image_applies_guarded_qwen3_omni_audio_encoder_patch() -> None:
+    """Catch an image build that omits the validated encoder correction."""
+    dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
+    instructions = _logical_docker_instructions(dockerfile)
+    patch_path = "/tmp/patch_qwen3_omni_audio_encoder.py"
+    module_path = (
+        "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/"
+        "qwen3_omni_moe_thinker.py"
+    )
+
+    assert f"COPY asr/patch_qwen3_omni_audio_encoder.py {patch_path}" in instructions
+    patch_runs = [
+        instruction
+        for instruction in instructions
+        if instruction.startswith("RUN ")
+        and re.search(
+            rf"python3\s+{re.escape(patch_path)}\s+{re.escape(module_path)}(?:\s|$)",
+            instruction,
+        )
+    ]
+    assert len(patch_runs) == 1
+    assert f"rm {patch_path}" in patch_runs[0]
 
 
 class FakeCuda:
