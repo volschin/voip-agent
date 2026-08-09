@@ -15,9 +15,28 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source_root=$(mktemp -d)
 trap 'rm -rf -- "$source_root"' EXIT
 
+assert_cuda_arm64_manifest() {
+  docker buildx imagetools inspect --raw "nvidia/cuda:13.0.2-devel-ubuntu24.04@$CUDA_IMAGE_DIGEST" | \
+    python3 -c '
+import json
+import sys
+
+expected_digest = sys.argv[1]
+manifest = json.load(sys.stdin)
+matches = [
+    entry
+    for entry in manifest.get("manifests", [])
+    if entry.get("digest") == expected_digest
+    and entry.get("platform", {}).get("architecture") == "arm64"
+    and entry.get("platform", {}).get("os") == "linux"
+]
+assert len(matches) == 1, matches
+' "$CUDA_ARM64_MANIFEST"
+}
+
 assert_image_inventory() {
   local image_tag=$1
-  local image_id architecture labels environment
+  local image_id architecture labels environment source_layers image_layers
 
   image_id=$(docker image inspect --format '{{.Id}}' "$image_tag")
   architecture=$(docker image inspect --format '{{.Architecture}}' "$image_tag")
@@ -25,6 +44,21 @@ assert_image_inventory() {
   environment=$(docker image inspect --format '{{json .Config.Env}}' "$image_tag")
   test -n "$image_id"
   test "$architecture" = arm64
+  test "$labels" = null
+  assert_cuda_arm64_manifest
+  source_layers=$(docker image inspect --format '{{json .RootFS.Layers}}' \
+    "nvidia/cuda:13.0.2-devel-ubuntu24.04@$CUDA_ARM64_MANIFEST")
+  image_layers=$(docker image inspect --format '{{json .RootFS.Layers}}' "$image_tag")
+  python3 - "$image_tag" "$source_layers" "$image_layers" <<'PY'
+import json
+import sys
+
+image_tag, source_layers_json, image_layers_json = sys.argv[1:]
+source_layers = json.loads(source_layers_json)
+image_layers = json.loads(image_layers_json)
+assert source_layers
+assert image_layers[: len(source_layers)] == source_layers, image_tag
+PY
   case "$environment" in
     *"UV_EXCLUDE_NEWER=$DEPENDENCY_CUTOFF"*) ;;
     *) printf '%s is missing UV_EXCLUDE_NEWER=%s\n' "$image_tag" "$DEPENDENCY_CUTOFF" >&2; exit 1 ;;
@@ -112,6 +146,7 @@ PY
   printf '%s repository-added source patches: none\n' "$image_tag"
 }
 
+assert_cuda_arm64_manifest
 git clone --filter=blob:none https://github.com/eugr/spark-vllm-docker.git "$source_root/eugr"
 git -C "$source_root/eugr" checkout --detach "$EUGR_COMMIT"
 git -C "$source_root/eugr" apply --check --unidiff-zero "$script_dir/eugr-midpoint.patch"

@@ -380,11 +380,22 @@ def test_asr_midpoint_build_pins_complete_historical_stack() -> None:
         "6da422082f910a8dd230f7e42e26ece4dc37bccc",
         "2026-06-18T23:59:59Z",
         "sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6",
+        "sha256:450d11555d20ac8ebbbc13ebf17589c2bd42869171a90179ce7098b4a5e64c6a",
     ):
         assert value in script or value in patch
     assert "transformers==5.12.1" in patch
     assert "VLLM_PRS" not in script
     assert "FLASHINFER_PRS" not in script
+
+
+def test_asr_midpoint_build_asserts_arm64_manifest_and_label_provenance() -> None:
+    script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
+
+    assert "docker buildx imagetools inspect --raw" in script
+    assert "CUDA_ARM64_MANIFEST" in script
+    assert "RootFS.Layers" in script
+    assert "source_layers" in script
+    assert 'test "$labels" = null' in script
 
 
 def test_asr_midpoint_runtime_asserts_adapter_and_versions() -> None:
