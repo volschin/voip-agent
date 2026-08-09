@@ -1,6 +1,7 @@
 """Deployment contract for the independently owned GX10 voice stack."""
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,17 @@ import yaml
 from dgx.tts.runtime import normalize_language, require_gb10_cuda
 
 ROOT = Path(__file__).resolve().parents[1]
-ASR_REVISION = "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
+ASR_REVISION = "61ad4d533c64e033a750b66c44aad6f18634997e"
+EUGR_MIDPOINT_COMMIT = "b51af15a280d28c2ad9096b3ef581524eddbd0e7"
+VLLM_MIDPOINT_COMMIT = "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665"
+FLASHINFER_MIDPOINT_COMMIT = "d768c14e7cf5dd5df45a8a1de78ae815879f108a"
+NCCL_MIDPOINT_COMMIT = "6da422082f910a8dd230f7e42e26ece4dc37bccc"
+MIDPOINT_DEPENDENCY_CUTOFF = "2026-06-18T23:59:59Z"
+MIDPOINT_CUDA_IMAGE_DIGEST = (
+    "sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6"
+)
+MIDPOINT_BASE_IMAGE_ID = "sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1"
+QWEN3_ASR_ADAPTER_SHA256 = "e233961d38d0a396db34cf2f7d83c6dc1c33aa55768ba894eee6de097120342d"
 TTS_BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
 LOCK_ENTRY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\[[^]]+\])?==\S+")
 LOCK_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
@@ -55,6 +66,73 @@ def _has_forbidden_torchaudio_pip_install(dockerfile: str) -> bool:
     return any(
         re.search(r"\bpip\s+install\b.*\btorchaudio\b", instruction)
         for instruction in _logical_docker_instructions(dockerfile)
+    )
+
+
+_ASR_FORBIDDEN_RUNTIME_PACKAGES = (
+    "torch",
+    "vllm",
+    "triton",
+    "flashinfer",
+    "flash-attn",
+    "flash_attn",
+    "cffi",
+)
+_ASR_AUDIO_LOCK_PATH = "/tmp/requirements-audio-arm64.lock"
+_PIP_INSTALL_COMMAND = re.compile(
+    r"\b(?:python(?:3(?:\.\d+)?)?\s+-m\s+)?(?:\S*/)?pip(?:3(?:\.\d+)?)?\b"
+    r"(?:\s+(?!install\b)\S+)*\s+install\b",
+    flags=re.IGNORECASE,
+)
+_REQUIREMENTS_FILE = re.compile(r"(?:^|\s)(?:-r|--requirement)(?:\s+|=)(\S+)")
+_ASR_FORBIDDEN_COMPILER_ADDITION = re.compile(
+    r"(?<![A-Za-z0-9_.+-])(?:gcc(?:-\d+)?|g\+\+(?:-\d+)?|make|build-essential|cmake|"
+    r"ninja(?:-build)?|nvcc|(?:nvidia-)?cuda-toolkit(?:-[A-Za-z0-9.]+)*|"
+    r"cuda-(?:nvcc|compiler)(?:-[A-Za-z0-9.]+)*)(?![A-Za-z0-9_.+-])",
+    flags=re.IGNORECASE,
+)
+
+
+def _asr_python_package_install_commands(dockerfile: str) -> list[str]:
+    commands = []
+    for instruction in _logical_docker_instructions(dockerfile):
+        if not re.match(r"RUN\s+", instruction, flags=re.IGNORECASE):
+            continue
+        for match in _PIP_INSTALL_COMMAND.finditer(instruction):
+            command_end = re.search(r"\s+(?:&&|\|\||;)\s+", instruction[match.end() :])
+            end = match.end() + command_end.start() if command_end else len(instruction)
+            commands.append(instruction[match.start() : end])
+    return commands
+
+
+def _has_asr_invalid_python_package_install(dockerfile: str) -> bool:
+    """Return whether ASR has another Python-package path or replaces inherited runtime packages."""
+    installs = _asr_python_package_install_commands(dockerfile)
+    if len(installs) != 1:
+        return True
+
+    install = installs[0]
+    if _REQUIREMENTS_FILE.findall(install) != [_ASR_AUDIO_LOCK_PATH]:
+        return True
+    if "--require-hashes" not in install or "--no-deps" not in install:
+        return True
+
+    return any(
+        re.search(
+            rf"(?<![A-Za-z0-9_.-]){re.escape(package)}"
+            r"(?![A-Za-z0-9_.-])",
+            install,
+        )
+        for package in _ASR_FORBIDDEN_RUNTIME_PACKAGES
+    )
+
+
+def _has_asr_forbidden_compiler_addition(dockerfile: str) -> bool:
+    """Return whether a Dockerfile adds a compiler or CUDA build toolkit."""
+    return any(
+        _ASR_FORBIDDEN_COMPILER_ADDITION.search(instruction)
+        for instruction in _logical_docker_instructions(dockerfile)
+        if re.match(r"RUN\s+", instruction, flags=re.IGNORECASE)
     )
 
 
@@ -177,6 +255,304 @@ def test_asr_is_offline_pinned_and_health_checks_loaded_model() -> None:
     assert command[command.index("--served-model-name") + 1] == "qwen3-asr"
     assert "/v1/models" in health_command
     assert "qwen3-asr" in health_command
+
+
+def test_asr_uses_exact_production_urocyon_1p7b_snapshot() -> None:
+    command = [str(value) for value in _compose()["services"]["qwen3-asr"]["command"]]
+
+    assert command[command.index("serve") + 1] == (
+        "/root/.cache/huggingface/hub/models--UrocyonF--Qwen3-ASR-1.7B-NVFP4/"
+        "snapshots/61ad4d533c64e033a750b66c44aad6f18634997e"
+    )
+
+
+def test_asr_audio_lock_rejects_decoder_drift_and_implicit_dependency_resolution() -> None:
+    """Catch an audio decoder update or resolver expansion that changes the validated base image."""
+    requirements_input = (ROOT / "dgx/asr/requirements-audio-arm64.in").read_text(encoding="utf-8")
+    requirements_lock = (ROOT / "dgx/asr/requirements-audio-arm64.lock").read_text(encoding="utf-8")
+    expected_headers = {"soundfile==0.13.1", "av==17.0.1"}
+
+    assert requirements_input.splitlines() == ["soundfile==0.13.1", "av==17.0.1"], (
+        "The ASR audio input must remain the two validated direct decoder distributions."
+    )
+    lock_headers = [
+        re.sub(r"[-_.]+", "-", match.group(0).split("==", maxsplit=1)[0]).lower()
+        + "=="
+        + match.group(0).split("==", maxsplit=1)[1]
+        for line in requirements_lock.splitlines()
+        if (match := LOCK_ENTRY.match(line))
+    ]
+    assert len(lock_headers) == 2 and set(lock_headers) == expected_headers, (
+        "The generated ASR audio lock must not introduce a transitive or replacement package."
+    )
+
+    lines = requirements_lock.splitlines()
+    entry_indexes = [index for index, line in enumerate(lines) if LOCK_ENTRY.match(line)]
+    for index, next_index in zip(entry_indexes, [*entry_indexes[1:], len(lines)], strict=True):
+        header = lines[index].split(maxsplit=1)[0]
+        package_block = "\n".join(
+            line.split("#", maxsplit=1)[0] for line in lines[index:next_index]
+        )
+        hashes = re.findall(r"--hash=\S+", package_block)
+
+        assert hashes, f"{header} must have a hash so a future build cannot resolve a new wheel."
+        assert all(LOCK_HASH.fullmatch(value) for value in hashes), (
+            f"{header} must use complete SHA-256 hashes so the selected wheel is reproducible."
+        )
+
+
+@pytest.mark.parametrize(
+    "dockerfile",
+    (
+        "RUN pip3 \\\n    install vllm==0.26.1rc1",
+        "RUN python3 -m pip \\\n    --quiet install triton==3.6.0",
+        "RUN pip install --require-hashes --no-deps -r /tmp/requirements-audio-arm64.lock "
+        "&& pip3.12 install vllm==0.26.1rc1",
+        "RUN pip install --require-hashes -r /tmp/runtime-replacement.lock",
+    ),
+)
+def test_asr_spark_image_install_guard_rejects_alternate_python_package_paths(
+    dockerfile: str,
+) -> None:
+    """Catch an alternate pip path that can replace the inherited runtime."""
+    assert _has_asr_invalid_python_package_install(dockerfile), (
+        "Every non-audio Python package installation path must be rejected."
+    )
+
+
+def test_asr_spark_image_install_guard_allows_runtime_metadata_validation() -> None:
+    """Allow validating inherited packages after the sole locked audio installation."""
+    dockerfile = """RUN python3 -m pip install --no-cache-dir --require-hashes --no-deps \\
+    -r /tmp/requirements-audio-arm64.lock \\
+ && python3 -c "import cffi, vllm; print(cffi.__version__, vllm.__version__)"
+"""
+
+    assert not _has_asr_invalid_python_package_install(dockerfile), (
+        "Metadata checks after the locked audio install must not be mistaken for "
+        "package replacement."
+    )
+
+
+@pytest.mark.parametrize(
+    "dockerfile",
+    (
+        "RUN apt-get update && apt-get install -y gcc g++ make build-essential cmake ninja",
+        "RUN apt-get install -y cuda-toolkit-13-0",
+        "RUN apt-get install -y cuda-nvcc-13-0",
+        "RUN apt-get install -y cuda-compiler-13-0",
+        "RUN apt-get install -y \\\n    nvidia-cuda-toolkit && /usr/local/cuda/bin/nvcc --version",
+    ),
+)
+def test_asr_spark_image_rejects_compiler_and_cuda_toolkit_additions(dockerfile: str) -> None:
+    """Catch build tooling that invalidates the fixed no-compiler Spark image contract."""
+    assert _has_asr_forbidden_compiler_addition(dockerfile), (
+        "The minimal ASR derivative must reject compiler and CUDA-toolkit additions."
+    )
+
+
+def test_asr_spark_image_has_no_compiler_or_cuda_toolkit_additions() -> None:
+    """Catch the real ASR recipe gaining build tooling after its fixed base image is adopted."""
+    dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
+
+    assert not _has_asr_forbidden_compiler_addition(dockerfile), (
+        "The ASR Dockerfile must not add a compiler or CUDA toolkit to the fixed Spark base."
+    )
+
+
+def test_asr_spark_image_rejects_core_stack_reinstallation() -> None:
+    """Catch a pip install that replaces the Torch/vLLM runtime proven on the Spark base image."""
+    dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
+    logical_instructions = _logical_docker_instructions(dockerfile)
+    expected_base = "FROM ${SPARK_BASE}"
+    assert [
+        instruction
+        for instruction in logical_instructions
+        if re.match(r"(?:ARG|FROM)\s+", instruction)
+    ] == [
+        "ARG SPARK_BASE=dgx-spark-vllm:midpoint-v023",
+        expected_base,
+    ], "The ASR derivative must inherit exactly the repository-built midpoint Spark-vLLM base."
+    assert not _has_asr_invalid_python_package_install(dockerfile), (
+        "The ASR image may install only the direct audio lock and must not replace "
+        "inherited runtime dependencies."
+    )
+    assert not _has_asr_forbidden_compiler_addition(dockerfile), (
+        "The ASR derivative must not add a compiler or CUDA build toolkit."
+    )
+
+
+def test_asr_midpoint_build_pins_complete_historical_stack() -> None:
+    script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
+    patch = (ROOT / "dgx/asr/eugr-midpoint.patch").read_text(encoding="utf-8")
+
+    for value in (
+        EUGR_MIDPOINT_COMMIT,
+        VLLM_MIDPOINT_COMMIT,
+        FLASHINFER_MIDPOINT_COMMIT,
+        NCCL_MIDPOINT_COMMIT,
+        MIDPOINT_DEPENDENCY_CUTOFF,
+        MIDPOINT_CUDA_IMAGE_DIGEST,
+        "sha256:450d11555d20ac8ebbbc13ebf17589c2bd42869171a90179ce7098b4a5e64c6a",
+    ):
+        assert value in script or value in patch
+    assert "transformers==5.12.1" in patch
+    assert "VLLM_PRS" not in script
+    assert "FLASHINFER_PRS" not in script
+
+
+def test_asr_midpoint_build_asserts_arm64_manifest_and_label_provenance() -> None:
+    script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
+
+    assert "docker buildx imagetools inspect --raw" in script
+    assert "docker buildx imagetools inspect --format '{{json .Image}}'" in script
+    assert "CUDA_ARM64_MANIFEST" in script
+    assert "RootFS.Layers" in script
+    assert "source_layers" in script
+    assert 'source_image["config"].get("Labels")' in script
+    assert "image_labels == source_labels" in script
+    assert 'test "$labels" = null' not in script
+
+
+def test_asr_midpoint_inventory_checks_effective_runtime_once_per_distribution() -> None:
+    script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
+
+    assert "importlib.metadata.distributions()" in script
+    assert "assert len(matches) == 1, (image_tag, name, matches)" in script
+    assert "docker run --rm -i --network none" in script
+    assert "docker image save" not in script
+    assert "layer.tar" not in script
+    assert '"base_image: ${CUDA_IMAGE}",' in script
+
+
+def test_asr_midpoint_build_normalizes_exact_vllm_distribution_version() -> None:
+    patch = (ROOT / "dgx/asr/eugr-midpoint.patch").read_text(encoding="utf-8")
+
+    assert "VLLM_VERSION_OVERRIDE=0.23.0 uv build" in patch, (
+        "The pinned post-release vLLM commit otherwise creates a date-dependent dev wheel."
+    )
+
+
+def test_asr_midpoint_build_uses_exact_refs_as_deterministic_cache_keys() -> None:
+    script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
+    patch = (ROOT / "dgx/asr/eugr-midpoint.patch").read_text(encoding="utf-8")
+    added_lines = {
+        line[1:].strip()
+        for line in patch.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    }
+
+    assert 'FI_CMD+=("--build-arg" "CACHEBUST_FLASHINFER=$FLASHINFER_REF")' in added_lines
+    assert 'VLLM_CMD+=("--build-arg" "CACHEBUST_VLLM=$VLLM_REF")' in added_lines
+    assert not any("CACHEBUST_" in line and "date +%s" in line for line in added_lines)
+    assert "expected_upstream_changes=$'Dockerfile\\nbuild-and-copy.sh'" in script
+
+
+def test_asr_midpoint_build_exempts_only_exact_pytorch_stack_from_cutoff() -> None:
+    patch = (ROOT / "dgx/asr/eugr-midpoint.patch").read_text(encoding="utf-8")
+    exact_install = (
+        "env -u UV_EXCLUDE_NEWER uv pip install torch==2.11.0 torchvision==0.26.0 "
+        "torchaudio==2.11.0 triton==3.6.0 "
+        "--index-url https://download.pytorch.org/whl/cu130"
+    )
+
+    assert patch.count(exact_install) == 2, (
+        "The PyTorch index omits upload dates, so only its exact builder and runner stack "
+        "may override the historical package cutoff."
+    )
+
+
+def test_asr_midpoint_runtime_asserts_adapter_and_versions() -> None:
+    dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
+    assert "ARG SPARK_BASE=dgx-spark-vllm:midpoint-v023" in dockerfile
+    assert "0.23.0" in dockerfile
+    assert "2.11.0+cu130" in dockerfile
+    assert "5.12.1" in dockerfile
+    assert "0.6.12" in dockerfile
+    assert QWEN3_ASR_ADAPTER_SHA256 in dockerfile
+
+
+def test_asr_midpoint_reuse_path_is_bound_to_exact_existing_base() -> None:
+    script = (ROOT / "dgx/asr/build-midpoint-base.sh").read_text(encoding="utf-8")
+
+    assert f"REUSABLE_BASE_IMAGE_ID={MIDPOINT_BASE_IMAGE_ID}" in script
+    assert "--reuse-base" in script
+    assert 'test "$base_id" = "$REUSABLE_BASE_IMAGE_ID"' in script
+    assert 'assert_historical_inventory "$BASE_TAG"' in script
+
+
+def test_asr_midpoint_build_help_is_side_effect_free() -> None:
+    result = subprocess.run(
+        [ROOT / "dgx/asr/build-midpoint-base.sh", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "--reuse-base" in result.stdout
+
+
+def test_asr_midpoint_build_rejects_unknown_argument() -> None:
+    result = subprocess.run(
+        [ROOT / "dgx/asr/build-midpoint-base.sh", "--unknown"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "unknown argument: --unknown" in result.stderr
+
+
+def test_asr_spark_image_build_preserves_existing_service_contract() -> None:
+    """Catch a mutable Compose image or changed running ASR service."""
+    service = _compose()["services"]["qwen3-asr"]
+    environment = set(service["environment"])
+    command = [str(value) for value in service["command"]]
+    health_command = " ".join(service["healthcheck"]["test"])
+
+    assert service["build"] == {"context": ".", "dockerfile": "asr/Dockerfile"}, (
+        "Compose must build the repository-owned ASR derivative rather than "
+        "pulling an external image."
+    )
+    assert "image" not in service, (
+        "A mutable external ASR image tag would bypass the locked derivative."
+    )
+    assert service["container_name"] == "qwen3-asr", (
+        "The stable ASR service identity must not change."
+    )
+    assert service["deploy"]["resources"]["reservations"]["devices"] == [
+        {"driver": "nvidia", "count": 1, "capabilities": ["gpu"]}
+    ], "The ASR service must retain its GPU reservation."
+    assert service["networks"] == ["default", "shared_ai_voice"], (
+        "The ASR service must retain both its internal and proxy networks."
+    )
+    assert service["shm_size"] == "4gb", "The ASR image must retain its shared-memory allocation."
+    assert service["restart"] == "unless-stopped", (
+        "The ASR service must retain its recovery policy."
+    )
+    assert service["labels"] == ["autoheal=true"], (
+        "The ASR service must remain eligible for autoheal."
+    )
+    assert {"HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1"} <= environment, (
+        "The ASR service must continue using the preloaded model cache offline."
+    )
+    assert ASR_REVISION in " ".join(command), "The ASR model snapshot revision must remain pinned."
+    assert command[command.index("--served-model-name") + 1] == "qwen3-asr", (
+        "The ASR OpenAI model identifier must stay stable."
+    )
+    assert "/v1/models" in health_command and "qwen3-asr" in health_command, (
+        "The ASR health check must continue validating the loaded served model."
+    )
+
+
+def test_asr_spark_image_is_unpatched() -> None:
+    """Ensure the image inherits vLLM's additive transcription response unchanged."""
+    dockerfile = (ROOT / "dgx/asr/Dockerfile").read_text(encoding="utf-8")
+
+    assert "patch_vllm_transcription_contract.py" not in dockerfile
+    assert "TranscriptionResponse" not in dockerfile
+    assert not (ROOT / "dgx/asr/patch_vllm_transcription_contract.py").exists()
 
 
 class FakeCuda:

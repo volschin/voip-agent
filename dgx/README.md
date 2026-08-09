@@ -57,6 +57,15 @@ the rollback report.
 
 ## Start services
 
+> **ASR rollout hold:** The repository vLLM 0.23 midpoint image passed the exact
+> 1.7B non-speech discriminator and the complete paired 70/12
+> quality/load/CUDA gate against production. It is eligible for rollout, but no
+> rollout has been authorized or performed. Do not use the Compose command
+> below to replace or recreate the currently running production `qwen3-asr`
+> without separate explicit rollout authorization. The command remains the
+> canonical bootstrap procedure only after that hold is resolved, or for
+> services explicitly selected without `qwen3-asr`.
+
 After provisioning and validating the private TTS profile:
 
 ```bash
@@ -72,10 +81,24 @@ keeps the stack-private default network and additionally attaches those two
 services to the pre-created neutral `shared_ai_voice` network consumed by
 Traefik. The stack does not publish ports 8001 or 8002 after cutover.
 
-ASR loads the already cached revision
-`5eb144179a02acc5e5ba31e748d22b0cf3e303b0` with Hugging Face and Transformers
+ASR loads the already cached `UrocyonF/Qwen3-ASR-1.7B-NVFP4` snapshot
+`61ad4d533c64e033a750b66c44aad6f18634997e` with Hugging Face and Transformers
 offline. TTS refuses to start unless PyTorch reports CUDA on `NVIDIA GB10`;
 there is no CPU fallback.
+
+## Build the midpoint ASR candidate
+
+To build the reproducible local midpoint candidate, run:
+
+```bash
+cd dgx
+./asr/build-midpoint-base.sh
+```
+
+To reuse the already verified local base and build only the ASR derivative, add
+`--reuse-base`. This produces only the local test tags
+`dgx-spark-vllm:midpoint-v023` and `dgx-qwen3-asr:spark-midpoint-v023-test`;
+it does not deploy either image.
 
 `qwen3-tts` builds locally from `./tts`. Production callers use stable
 whole-WAV `/v1/audio/speech`; `/v1/audio/speech/stream` remains available only

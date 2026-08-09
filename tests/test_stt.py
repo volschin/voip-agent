@@ -26,6 +26,18 @@ async def test_transcribe_returns_text(stt):
 
 
 @respx.mock
+async def test_transcribe_accepts_additive_response_fields(stt):
+    respx.post("http://stt:8001/v1/audio/transcriptions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"text": "Hallo Welt", "usage": {"seconds": 0.5}},
+        )
+    )
+
+    assert await stt.transcribe(_pcm_16k()) == "Hallo Welt"
+
+
+@respx.mock
 async def test_transcribe_sends_wav_with_language(stt):
     route = respx.post("http://stt:8001/v1/audio/transcriptions").mock(
         return_value=httpx.Response(200, json={"text": "test"})
