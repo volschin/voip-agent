@@ -159,3 +159,48 @@ the preflight image and command as `running|healthy|0|unless-stopped`.
 Record the execution outcome in this design and the implementation plan. An
 eligible result is a benchmark conclusion only and requires separate rollout
 authorization.
+
+## Executed Outcome
+
+This experiment completed on 2026-08-10 UTC and is now a historical record.
+It does not authorize another run or a production rollout.
+
+The candidate built as
+`sha256:1891cdd1578ea2bc6e47c7a6bbd9db0bc4c77061a89c285985a0878aac7ed46a`
+(`26,774,947,982` bytes, ARM64/Linux). Its rootfs retained every baseline
+layer, its image configuration and ASR adapter were unchanged, and the full
+normalized distribution multiset was identical except for exactly these
+three replacements:
+
+```text
+flashinfer-python:    0.6.12 -> 0.6.18
+flashinfer-jit-cache: 0.6.12 -> 0.6.18
+flashinfer-cubin:     0.6.12 -> 0.6.18
+```
+
+The frozen discriminator passed at the fixed boundary: `10/10` requests,
+zero failures or malformed responses, and five hallucinated words. Per-case
+counts were `1,1,1,0,0,0,0,1,0,1`; additions, language changes, command-risk,
+and nondeterministic cases were all zero. Candidate-correlated CUDA was true,
+with maximum aggregate SM of `65%`.
+
+The conditional complete comparison therefore ran once. Production and
+candidate each completed `70/70` quality and `12/12` load. Every quality
+aggregate was identical, including WER `0.045275590551181105`, CER
+`0.038238702201622246`, macro WER `0.061799719887955185`, entity recall
+`0.6363636363636364`, and five non-speech hallucinated words.
+
+Production load p50/p90 were `376.72439799644053 ms` and
+`615.44096597936 ms`; candidate p50/p90 were `395.5528330989182 ms` and
+`617.4334769602865 ms`. The candidate ratios were `1.0499793355636489`
+and `1.0032375338839457`, passing the fixed `1.05` and `1.10` limits. The p50
+result is only narrowly inside its limit and must be preserved as operational
+risk rather than rounded to a comfortable margin. Both CUDA proofs were true
+and reached `96%` maximum SM. The sealed safe-result SHA-256 is
+`24ea2fa49234073a44e28941bef5270f641acac94dd5dc7392e8ffcee24beeaa`.
+
+All three benchmark containers were removed and the candidate image was
+retained. Production finished unchanged on
+`sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930`
+as `running|healthy|0|unless-stopped`. The candidate is benchmark-eligible;
+adoption still requires separate rollout authorization.

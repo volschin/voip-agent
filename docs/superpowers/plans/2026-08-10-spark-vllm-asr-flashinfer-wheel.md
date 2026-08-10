@@ -10,6 +10,9 @@
 
 **Tech Stack:** Bash, Docker BuildKit, ARM64 NVIDIA GB10, CUDA 13.0, PyTorch 2.11, vLLM 0.23.0, FlashInfer 0.6.18, UrocyonF/Qwen3-ASR-1.7B-NVFP4, pytest, Ruff.
 
+**Status:** Completed 2026-08-10 UTC. This checked plan is a historical
+execution record and no longer authorizes commands or rollout.
+
 ## Global Constraints
 
 - Baseline tag: `dgx-qwen3-asr:vllm023-615e858c`.
@@ -39,7 +42,7 @@
 - Consumes: exact local baseline tag and the three public release assets.
 - Produces: `dgx-qwen3-asr:vllm023-flashinfer0618-test` with a verified single-package-family delta.
 
-- [ ] **Step 1: Write focused failing deployment-contract tests**
+- [x] **Step 1: Write focused failing deployment-contract tests**
 
 Add behavior tests that execute the verifier against hand-checked image
 inventories and file bytes, including altered package/config/rootfs/adapter/
@@ -49,7 +52,7 @@ rejection of a wrong base before download. Add the focused static deployment
 contract for the exact three upstream release assets and dependency-closed
 Dockerfile.
 
-- [ ] **Step 2: Run the focused tests and observe the expected missing-file failures**
+- [x] **Step 2: Run the focused tests and observe the expected missing-file failures**
 
 ```bash
 /home/volsch/projekte/voip-agent/venv/bin/pytest -q \
@@ -58,7 +61,7 @@ Dockerfile.
 
 Expected: FAIL because the candidate Dockerfile and script do not exist.
 
-- [ ] **Step 3: Implement the minimal Dockerfile and build script**
+- [x] **Step 3: Implement the minimal Dockerfile and build script**
 
 The Dockerfile accepts only `ARG QUALIFIED_ASR_BASE`, inherits it, copies the
 three wheels, installs their exact filenames in one `python3 -m pip install
@@ -71,7 +74,7 @@ SHA-256, builds with `--pull=false`, then uses the Python verifier to capture
 and compare real rootfs, image configuration, adapter, and installed
 distribution inventories fail closed.
 
-- [ ] **Step 4: Run focused and repository deployment tests**
+- [x] **Step 4: Run focused and repository deployment tests**
 
 ```bash
 bash -n dgx/asr/build-flashinfer-wheel-candidate.sh
@@ -85,7 +88,7 @@ git diff --check
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit the recipe**
+- [x] **Step 5: Commit the recipe**
 
 ```bash
 git add dgx/asr/Dockerfile.flashinfer-wheel-candidate \
@@ -106,20 +109,20 @@ git commit -m "build(asr): add FlashInfer wheel candidate"
 - Consumes: committed Task 1 recipe and current live production invariant.
 - Produces: immutable candidate image plus transcript-free static/runtime provenance.
 
-- [ ] **Step 1: Capture production and namespace preflight**
+- [x] **Step 1: Capture production and namespace preflight**
 
 Require exact production image/command, `running|healthy|0|unless-stopped`, the
 exact baseline tag/image, the normalized gateway image, and zero containers
 named `qwen3-asr-flashinfer0618-test`, `asr-flashinfer0618-gateway`, or
 `asr-flashinfer0618-production-gateway`.
 
-- [ ] **Step 2: Transfer only committed recipe inputs**
+- [x] **Step 2: Transfer only committed recipe inputs**
 
 Use `git archive HEAD dgx/asr` into a mode-0700 remote temporary directory.
 Verify the four committed recipe/input SHA-256 values without printing the
 remote path. Do not transfer `.env`, models, benchmark data, or worktree state.
 
-- [ ] **Step 3: Run the build script once**
+- [x] **Step 3: Run the build script once**
 
 Execute `build-flashinfer-wheel-candidate.sh` from the transferred archive.
 Require all three download digests/sizes, exact base ID, exact rootfs prefix,
@@ -127,13 +130,13 @@ unchanged configuration and non-FlashInfer distribution multiset (including
 any inherited duplicate metadata), each FlashInfer distribution exactly once
 at 0.6.18, ARM64/Linux, and the retained ASR adapter hash.
 
-- [ ] **Step 4: Independently inspect the candidate**
+- [x] **Step 4: Independently inspect the candidate**
 
 Repeat the image ID, platform, rootfs prefix, configuration, package inventory,
 and import checks outside the build script. Record the candidate image ID and
 size. Any mismatch rejects the build without changing production.
 
-- [ ] **Step 5: Write the transcript-free build report**
+- [x] **Step 5: Write the transcript-free build report**
 
 Record only committed input hashes, baseline/candidate IDs, release asset
 identities, package equality proof, adapter hash, platform/size, duration, and
@@ -150,32 +153,32 @@ the unchanged production invariant.
 - Consumes: Task 2 image, exact 1.7B snapshot, immutable normalized gateway, frozen benchmark artifact.
 - Produces: one transcript-free PASS/FAIL and authorization decision for Task 4.
 
-- [ ] **Step 1: Validate the protected benchmark artifact and hashes**
+- [x] **Step 1: Validate the protected benchmark artifact and hashes**
 
 Require exactly one owner-only artifact with the established same-model label,
 mode `0600`, exact corpus/ten-case/order/runner/scorer/request hashes, fixed ten
 case IDs, and `language=de`. Do not print its path or content.
 
-- [ ] **Step 2: Start and prove the isolated candidate and gateway**
+- [x] **Step 2: Start and prove the isolated candidate and gateway**
 
 Start `qwen3-asr-flashinfer0618-test` and `asr-flashinfer0618-gateway` with the
 exact runtime contract. Require loopback-only ports, restart policy `no`, exact
 image/model readiness, normalized text-only response shape, candidate PID
 correlation, and nonzero CUDA SM during one real request.
 
-- [ ] **Step 3: Send the exact ten non-speech probes once**
+- [x] **Step 3: Send the exact ten non-speech probes once**
 
 Run the protected runner once against the candidate gateway with fixed bytes,
 IDs, order, timeout, scorer, and `language=de`. Require `10/10` successful
 responses and a transcript-free result artifact. Do not retry or tune.
 
-- [ ] **Step 4: Apply the fixed discriminator**
+- [x] **Step 4: Apply the fixed discriminator**
 
 Require hallucinated words `<= 5`, zero malformed/addition/language-change/
 command-risk/nondeterminism cases, and candidate CUDA true. On failure, mark
 Task 4 skipped and continue to Task 5. On success, proceed to Task 4.
 
-- [ ] **Step 5: Write the transcript-free discriminator report**
+- [x] **Step 5: Write the transcript-free discriminator report**
 
 Record exact identities and hashes, request count, per-case word counts,
 aggregate count, safety map, CUDA evidence, and the full-test decision.
@@ -190,25 +193,25 @@ aggregate count, safety map, CUDA evidence, and the full-test decision.
 - Consumes: Task 3 PASS, current production, ready candidate, identical normalized gateways.
 - Produces: complete 70/70 quality and 12/12 load eligibility result.
 
-- [ ] **Step 1: Revalidate both exact model/image identities and gateway equality**
+- [x] **Step 1: Revalidate both exact model/image identities and gateway equality**
 
 Start the production gateway only after Task 3 passes. Require both gateways
 use the same immutable image and normalization contract and both backends serve
 the exact 1.7B revision.
 
-- [ ] **Step 2: Run the fixed series in the prescribed order**
+- [x] **Step 2: Run the fixed series in the prescribed order**
 
 Run production quality 70, candidate quality 70, production load 12, and
 candidate load 12. Require every request to succeed and fresh container-bound
 CUDA evidence for both sides.
 
-- [ ] **Step 3: Apply the complete gate**
+- [x] **Step 3: Apply the complete gate**
 
 Require no quality/non-speech regression, p50 ratio `<= 1.05`, p90 ratio
 `<= 1.10`, all request/safety/provenance gates true, and no outlier deletion or
 selective repetition.
 
-- [ ] **Step 4: Append the transcript-free full result**
+- [x] **Step 4: Append the transcript-free full result**
 
 Record quality aggregates, non-speech counts, latency aggregates/ratios, CUDA
 booleans/maxima, request counts, exact provenance, and final eligibility.
@@ -224,23 +227,23 @@ booleans/maxima, request counts, exact provenance, and final eligibility.
 - Consumes: Task 3 and conditional Task 4 evidence.
 - Produces: zero benchmark containers, unchanged production, tracked final report, green repository.
 
-- [ ] **Step 1: Remove only the three exact benchmark container names**
+- [x] **Step 1: Remove only the three exact benchmark container names**
 
 Remove candidate and candidate gateway, plus production gateway only if Task 4
 created it. Require all three exact-name counts zero. Retain the candidate image.
 
-- [ ] **Step 2: Prove the final production invariant byte-for-byte**
+- [x] **Step 2: Prove the final production invariant byte-for-byte**
 
 Compare image, command, state, health, restart count, policy, and model identity
 with Task 2 preflight. Require exact equality.
 
-- [ ] **Step 3: Append the exact execution outcome to design and plan**
+- [x] **Step 3: Append the exact execution outcome to design and plan**
 
 Record candidate ID/size, wheel provenance, discriminator metrics, whether the
 full series ran, full metrics when applicable, cleanup counts, production
 invariant, and eligibility. Keep the report transcript-free.
 
-- [ ] **Step 4: Run fresh full repository verification**
+- [x] **Step 4: Run fresh full repository verification**
 
 ```bash
 /home/volsch/projekte/voip-agent/venv/bin/pytest -q
@@ -254,7 +257,7 @@ git status --short
 Expected: all pass and only intended recipe, tests, README, design, and plan are
 modified.
 
-- [ ] **Step 5: Commit the evidenced outcome**
+- [x] **Step 5: Commit the evidenced outcome**
 
 ```bash
 git add docs/superpowers/specs/2026-08-10-spark-vllm-asr-flashinfer-wheel-design.md \
@@ -264,3 +267,25 @@ git commit -m "docs(asr): record FlashInfer wheel benchmark"
 
 Expected: owner-only reports, wheels, images, and benchmark artifacts remain
 untracked.
+
+## Historical Execution Result
+
+- Candidate: `sha256:1891cdd1578ea2bc6e47c7a6bbd9db0bc4c77061a89c285985a0878aac7ed46a`,
+  ARM64/Linux, `26,774,947,982` bytes.
+- Static delta: only the three FlashInfer distributions changed from 0.6.12
+  to 0.6.18; all other distribution multiplicities, rootfs ancestry, image
+  configuration, and adapter bytes matched the baseline.
+- Non-speech gate: PASS, `10/10`, five words with per-case counts
+  `1,1,1,0,0,0,0,1,0,1`, no structural or safety failures, CUDA true,
+  maximum SM `65%`.
+- Complete comparison: PASS, both sides `70/70` quality and `12/12` load;
+  quality aggregates identical.
+- Load: production p50/p90 `376.72439799644053/615.44096597936 ms`;
+  candidate `395.5528330989182/617.4334769602865 ms`; ratios
+  `1.0499793355636489/1.0032375338839457`. The p50 pass is marginal.
+- CUDA: both true, both maximum SM `96%`.
+- Safe result: `24ea2fa49234073a44e28941bef5270f641acac94dd5dc7392e8ffcee24beeaa`.
+- Cleanup: all three exact benchmark-container counts zero; candidate image
+  retained; production unchanged as `running|healthy|0|unless-stopped` on
+  `sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930`.
+- Decision: benchmark-eligible only; no rollout was executed or authorized.
