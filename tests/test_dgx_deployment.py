@@ -191,6 +191,11 @@ def _runtime_stage_uses_forbidden_tool(dockerfile: str) -> bool:
 
 def _candidate_inventory(flashinfer_version: str) -> dict:
     return {
+        "image_id": (
+            FLASHINFER_WHEEL_BASE_IMAGE_ID
+            if flashinfer_version == "0.6.12"
+            else "sha256:" + "1" * 64
+        ),
         "architecture": "arm64",
         "os": "linux",
         "rootfs_layers": ["sha256:base-a", "sha256:base-b"],
@@ -214,7 +219,10 @@ def _candidate_inventory(flashinfer_version: str) -> dict:
 
 
 def _run_flashinfer_candidate_verifier(
-    tmp_path: Path, base: dict, candidate: dict
+    tmp_path: Path,
+    base: dict,
+    candidate: dict,
+    environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     base_path = tmp_path / "base.json"
     candidate_path = tmp_path / "candidate.json"
@@ -231,6 +239,7 @@ def _run_flashinfer_candidate_verifier(
         check=False,
         capture_output=True,
         text=True,
+        env=environment,
     )
 
 
@@ -344,6 +353,82 @@ def test_flashinfer_wheel_candidate_verifies_asset_bytes_and_sha256(tmp_path: Pa
     assert wrong_hash.returncode != 0
 
 
+def test_flashinfer_wheel_candidate_verification_survives_optimized_python(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "candidate.whl"
+    wheel.write_bytes(b"wheel-bytes")
+    verifier = ROOT / "dgx/asr/verify_flashinfer_wheel_candidate.py"
+    optimized_environment = os.environ | {"PYTHONOPTIMIZE": "1"}
+
+    wrong_file = subprocess.run(
+        [sys.executable, verifier, "verify-file", wheel, "12", "0" * 64],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=optimized_environment,
+    )
+    base = _candidate_inventory("0.6.12")
+    candidate = _candidate_inventory("0.6.18")
+    candidate["rootfs_layers"].extend(["sha256:overlay-a", "sha256:overlay-b"])
+    wrong_images = _run_flashinfer_candidate_verifier(
+        tmp_path,
+        base,
+        candidate,
+        environment=optimized_environment,
+    )
+
+    assert wrong_file.returncode != 0
+    assert wrong_images.returncode != 0
+
+
+def test_flashinfer_wheel_candidate_verifies_exact_release_asset_metadata(
+    tmp_path: Path,
+) -> None:
+    expected_assets = [
+        {
+            "id": 507452716,
+            "name": "flashinfer_python-0.6.18-py3-none-any.whl",
+            "size": 17122160,
+        },
+        {
+            "id": 507452715,
+            "name": "flashinfer_jit_cache-0.6.18-cp39-abi3-manylinux_2_28_aarch64.whl",
+            "size": 252992614,
+        },
+        {
+            "id": 507452717,
+            "name": "flashinfer_cubin-0.6.18-py3-none-any.whl",
+            "size": 1239178852,
+        },
+    ]
+    verifier = ROOT / "dgx/asr/verify_flashinfer_wheel_candidate.py"
+
+    def verify(release: dict, name: str) -> subprocess.CompletedProcess[str]:
+        path = tmp_path / name
+        path.write_text(json.dumps(release), encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, verifier, "verify-release", path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    accepted = verify({"id": 367461871, "assets": expected_assets}, "accepted.json")
+    renamed_assets = json.loads(json.dumps(expected_assets))
+    renamed_assets[0]["name"] = "renamed.whl"
+    wrong_name = verify({"id": 367461871, "assets": renamed_assets}, "wrong-name.json")
+    wrong_release = verify({"id": 367461872, "assets": expected_assets}, "wrong-release.json")
+    wrong_size_assets = json.loads(json.dumps(expected_assets))
+    wrong_size_assets[1]["size"] += 1
+    wrong_size = verify({"id": 367461871, "assets": wrong_size_assets}, "wrong-size.json")
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert wrong_name.returncode != 0
+    assert wrong_release.returncode != 0
+    assert wrong_size.returncode != 0
+
+
 def test_flashinfer_wheel_candidate_build_script_stops_before_download_on_bad_input(
     tmp_path: Path,
 ) -> None:
@@ -353,6 +438,12 @@ def test_flashinfer_wheel_candidate_build_script_stops_before_download_on_bad_in
     )
     unknown_result = subprocess.run(
         ["bash", script, "--unknown"], check=False, capture_output=True, text=True
+    )
+    extra_help_result = subprocess.run(
+        ["bash", script, "--help", "unexpected"],
+        check=False,
+        capture_output=True,
+        text=True,
     )
 
     fake_bin = tmp_path / "bin"
@@ -382,6 +473,7 @@ def test_flashinfer_wheel_candidate_build_script_stops_before_download_on_bad_in
     assert help_result.returncode == 0
     assert "candidate" in help_result.stdout.lower()
     assert unknown_result.returncode == 2
+    assert extra_help_result.returncode == 2
     assert wrong_base_result.returncode != 0
     assert not curl_marker.exists()
 
@@ -501,9 +593,21 @@ def test_flashinfer_wheel_candidate_recipe_is_exact_and_dependency_closed() -> N
     assert not _has_asr_forbidden_compiler_addition(dockerfile)
     assert "verify-file" in script
     assert script.count("verify-file") == 1
+    assert "verify-release" in script
+    assert "RELEASE_ID=367461871" in script
+    assert "releases/$RELEASE_ID" in script
     assert "capture-image" in script
     assert "verify-images" in script
     assert "--pull=false" in script
+    assert "QUALIFIED_ASR_BASE=$QUALIFIED_BASE_IMAGE_ID" in script
+    assert "--iidfile" in script
+    assert script.index("verify-images") < script.index('docker image tag "$candidate_image_id"')
+    assert not any(instruction.startswith("COPY ") for instruction in instructions)
+    run_instructions = [
+        instruction for instruction in instructions if instruction.startswith("RUN ")
+    ]
+    assert len(run_instructions) == 1
+    assert "--mount=type=bind" in run_instructions[0]
 
 
 def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:

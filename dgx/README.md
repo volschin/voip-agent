@@ -57,14 +57,13 @@ the rollback report.
 
 ## Start services
 
-> **ASR rollout hold:** The repository vLLM 0.23 midpoint image passed the exact
-> 1.7B non-speech discriminator and the complete paired 70/12
-> quality/load/CUDA gate against production. It is eligible for rollout, but no
-> rollout has been authorized or performed. Do not use the Compose command
-> below to replace or recreate the currently running production `qwen3-asr`
-> without separate explicit rollout authorization. The command remains the
-> canonical bootstrap procedure only after that hold is resolved, or for
-> services explicitly selected without `qwen3-asr`.
+> **ASR production status:** The qualified repository vLLM 0.23 image was
+> subsequently rolled out under separate authorization and is the current
+> production `qwen3-asr`. Experimental derivative images, including the
+> FlashInfer 0.6.18 wheel candidate, do not authorize another replacement or
+> recreation. Use the Compose command below for `qwen3-asr` only with a new
+> explicit rollout decision; it remains the canonical bootstrap procedure for
+> other selected services.
 
 After provisioning and validating the private TTS profile:
 

@@ -63,16 +63,18 @@ Expected: FAIL because the candidate Dockerfile and script do not exist.
 
 - [x] **Step 3: Implement the minimal Dockerfile and build script**
 
-The Dockerfile accepts only `ARG QUALIFIED_ASR_BASE`, inherits it, copies the
-three wheels, installs their exact filenames in one `python3 -m pip install
---no-cache-dir --no-deps --force-reinstall` instruction, removes the wheel
-payloads, and asserts the exact runtime inventory.
+The Dockerfile accepts only `ARG QUALIFIED_ASR_BASE`, inherits it, mounts the
+verified wheel context read-only for one `python3 -m pip install --no-cache-dir
+--no-deps --force-reinstall` instruction, and appends exactly one layer without
+retaining wheel payloads.
 
 The Bash script parses only `--help`, checks the exact base image before any
-download, downloads the three exact assets to `mktemp -d`, verifies bytes and
-SHA-256, builds with `--pull=false`, then uses the Python verifier to capture
-and compare real rootfs, image configuration, adapter, and installed
-distribution inventories fail closed.
+download, verifies the exact release and asset metadata, downloads the three
+exact assets to `mktemp -d`, verifies bytes and SHA-256, builds with
+`--pull=false` from the immutable base image ID into an untagged image, then
+uses the Python verifier to capture and compare real rootfs, image
+configuration, adapter, and installed distribution inventories fail closed.
+Only a verified image is promoted to the documented candidate tag.
 
 - [x] **Step 4: Run focused and repository deployment tests**
 
