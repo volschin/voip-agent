@@ -1,7 +1,10 @@
 """Deployment contract for the independently owned GX10 voice stack."""
 
+import json
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,6 +24,9 @@ MIDPOINT_CUDA_IMAGE_DIGEST = (
 )
 MIDPOINT_BASE_IMAGE_ID = "sha256:223bad8197c46c8f436ac0fce693e841da4c9b4f5af5a5d86c070c1a5dfd22f1"
 QWEN3_ASR_ADAPTER_SHA256 = "e233961d38d0a396db34cf2f7d83c6dc1c33aa55768ba894eee6de097120342d"
+FLASHINFER_WHEEL_BASE_IMAGE_ID = (
+    "sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930"
+)
 TTS_BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
 LOCK_ENTRY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\[[^]]+\])?==\S+")
 LOCK_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
@@ -181,6 +187,300 @@ def _runtime_stage_uses_forbidden_tool(dockerfile: str) -> bool:
         if not _RUNTIME_TOOLING_ABSENCE_GATE.fullmatch(instruction)
         for tool in ("nvcc", "make", "build-essential")
     )
+
+
+def _candidate_inventory(flashinfer_version: str) -> dict:
+    return {
+        "architecture": "arm64",
+        "os": "linux",
+        "rootfs_layers": ["sha256:base-a", "sha256:base-b"],
+        "config": {
+            "Cmd": ["vllm", "serve"],
+            "Env": ["PYTHONUNBUFFERED=1"],
+            "Healthcheck": {"Test": ["CMD", "healthcheck"]},
+        },
+        "adapter_sha256": QWEN3_ASR_ADAPTER_SHA256,
+        "distributions": [
+            {"name": "av", "version": "17.0.1"},
+            {"name": "flashinfer-cubin", "version": flashinfer_version},
+            {"name": "flashinfer-jit-cache", "version": flashinfer_version},
+            {"name": "flashinfer-python", "version": flashinfer_version},
+            {"name": "soundfile", "version": "0.13.1"},
+            {"name": "torch", "version": "2.11.0+cu130"},
+            {"name": "transformers", "version": "5.12.1"},
+            {"name": "vllm", "version": "0.23.0"},
+        ],
+    }
+
+
+def _run_flashinfer_candidate_verifier(
+    tmp_path: Path, base: dict, candidate: dict
+) -> subprocess.CompletedProcess[str]:
+    base_path = tmp_path / "base.json"
+    candidate_path = tmp_path / "candidate.json"
+    base_path.write_text(json.dumps(base), encoding="utf-8")
+    candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            ROOT / "dgx/asr/verify_flashinfer_wheel_candidate.py",
+            "verify-images",
+            base_path,
+            candidate_path,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_flashinfer_wheel_candidate_accepts_only_the_flashinfer_distribution_delta(
+    tmp_path: Path,
+) -> None:
+    base = _candidate_inventory("0.6.12")
+    candidate = _candidate_inventory("0.6.18")
+    candidate["rootfs_layers"].append("sha256:candidate-overlay")
+
+    result = _run_flashinfer_candidate_verifier(tmp_path, base, candidate)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_flashinfer_wheel_candidate_rejects_a_non_flashinfer_distribution_change(
+    tmp_path: Path,
+) -> None:
+    base = _candidate_inventory("0.6.12")
+    candidate = _candidate_inventory("0.6.18")
+    candidate["rootfs_layers"].append("sha256:candidate-overlay")
+    next(
+        distribution
+        for distribution in candidate["distributions"]
+        if distribution["name"] == "vllm"
+    )["version"] = "0.23.1"
+
+    result = _run_flashinfer_candidate_verifier(tmp_path, base, candidate)
+
+    assert result.returncode != 0
+
+
+def test_flashinfer_wheel_candidate_rejects_image_or_flashinfer_contract_drift(
+    tmp_path: Path,
+) -> None:
+    base = _candidate_inventory("0.6.12")
+
+    candidates = []
+
+    wrong_config = _candidate_inventory("0.6.18")
+    wrong_config["rootfs_layers"].append("sha256:candidate-overlay")
+    wrong_config["config"]["Env"].append("UNPLANNED=1")
+    candidates.append(wrong_config)
+
+    wrong_layers = _candidate_inventory("0.6.18")
+    wrong_layers["rootfs_layers"] = ["sha256:replacement", "sha256:candidate-overlay"]
+    candidates.append(wrong_layers)
+
+    wrong_adapter = _candidate_inventory("0.6.18")
+    wrong_adapter["rootfs_layers"].append("sha256:candidate-overlay")
+    wrong_adapter["adapter_sha256"] = "0" * 64
+    candidates.append(wrong_adapter)
+
+    wrong_flashinfer = _candidate_inventory("0.6.17")
+    wrong_flashinfer["rootfs_layers"].append("sha256:candidate-overlay")
+    candidates.append(wrong_flashinfer)
+
+    duplicate = _candidate_inventory("0.6.18")
+    duplicate["rootfs_layers"].append("sha256:candidate-overlay")
+    duplicate["distributions"].append({"name": "vLLM", "version": "0.23.0"})
+    candidates.append(duplicate)
+
+    for index, candidate in enumerate(candidates):
+        case_dir = tmp_path / str(index)
+        case_dir.mkdir()
+        result = _run_flashinfer_candidate_verifier(case_dir, base, candidate)
+        assert result.returncode != 0, index
+
+
+def test_flashinfer_wheel_candidate_verifies_asset_bytes_and_sha256(tmp_path: Path) -> None:
+    wheel = tmp_path / "candidate.whl"
+    wheel.write_bytes(b"wheel-bytes")
+    command = [
+        sys.executable,
+        ROOT / "dgx/asr/verify_flashinfer_wheel_candidate.py",
+        "verify-file",
+        wheel,
+        "11",
+        "9ceb18f15662bb87e54af2f5953c0484d2ef76f5444d87913360b9ef87d7296d",
+    ]
+
+    accepted = subprocess.run(command, check=False, capture_output=True, text=True)
+    wrong_size = subprocess.run(
+        [*command[:-2], "12", command[-1]], check=False, capture_output=True, text=True
+    )
+    wrong_hash = subprocess.run(
+        [*command[:-1], "0" * 64], check=False, capture_output=True, text=True
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert wrong_size.returncode != 0
+    assert wrong_hash.returncode != 0
+
+
+def test_flashinfer_wheel_candidate_build_script_stops_before_download_on_bad_input(
+    tmp_path: Path,
+) -> None:
+    script = ROOT / "dgx/asr/build-flashinfer-wheel-candidate.sh"
+    help_result = subprocess.run(
+        ["bash", script, "--help"], check=False, capture_output=True, text=True
+    )
+    unknown_result = subprocess.run(
+        ["bash", script, "--unknown"], check=False, capture_output=True, text=True
+    )
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'sha256:not-the-qualified-base'\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    curl_marker = tmp_path / "curl-was-called"
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        f"#!/usr/bin/env bash\nprintf called > {curl_marker}\n",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    environment = os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}"}
+    wrong_base_result = subprocess.run(
+        ["bash", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert help_result.returncode == 0
+    assert "candidate" in help_result.stdout.lower()
+    assert unknown_result.returncode == 2
+    assert wrong_base_result.returncode != 0
+    assert not curl_marker.exists()
+
+
+def test_flashinfer_wheel_candidate_captures_real_image_and_runtime_inventory(
+    tmp_path: Path,
+) -> None:
+    image_inspect = [
+        {
+            "Id": FLASHINFER_WHEEL_BASE_IMAGE_ID,
+            "Architecture": "arm64",
+            "Os": "linux",
+            "RootFS": {"Layers": ["sha256:base-a", "sha256:base-b"]},
+            "Config": {"Cmd": ["vllm", "serve"], "Env": ["PYTHONUNBUFFERED=1"]},
+        }
+    ]
+    runtime = {
+        "adapter_sha256": QWEN3_ASR_ADAPTER_SHA256,
+        "distributions": [{"name": "vllm", "version": "0.23.0"}],
+    }
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        "#!/usr/bin/env bash\n"
+        "if test \"$1 $2\" = 'image inspect'; then\n"
+        f"  printf '%s\\n' '{json.dumps(image_inspect)}'\n"
+        'elif test "$1" = run; then\n'
+        f"  printf '%s\\n' '{json.dumps(runtime)}'\n"
+        "else\n"
+        "  exit 3\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    output = tmp_path / "inventory.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            ROOT / "dgx/asr/verify_flashinfer_wheel_candidate.py",
+            "capture-image",
+            "candidate:test",
+            output,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(output.read_text(encoding="utf-8")) == {
+        "image_id": FLASHINFER_WHEEL_BASE_IMAGE_ID,
+        "architecture": "arm64",
+        "os": "linux",
+        "rootfs_layers": ["sha256:base-a", "sha256:base-b"],
+        "config": {"Cmd": ["vllm", "serve"], "Env": ["PYTHONUNBUFFERED=1"]},
+        "adapter_sha256": QWEN3_ASR_ADAPTER_SHA256,
+        "distributions": [{"name": "vllm", "version": "0.23.0"}],
+    }
+
+
+def test_flashinfer_wheel_candidate_recipe_is_exact_and_dependency_closed() -> None:
+    dockerfile_path = ROOT / "dgx/asr/Dockerfile.flashinfer-wheel-candidate"
+    assert dockerfile_path.is_file()
+    dockerfile = dockerfile_path.read_text(encoding="utf-8")
+    script = (ROOT / "dgx/asr/build-flashinfer-wheel-candidate.sh").read_text(encoding="utf-8")
+    expected_assets = {
+        (
+            "flashinfer_python-0.6.18-py3-none-any.whl",
+            "507452716",
+            "17122160",
+            "a722af5bbabd9156a6f75cec948822f0e966f8a83fffd913ead1fac851da7754",
+        ),
+        (
+            "flashinfer_jit_cache-0.6.18-cp39-abi3-manylinux_2_28_aarch64.whl",
+            "507452715",
+            "252992614",
+            "6e1eadb95eeaff33eb9393f73d6ad45d1c2bce001370d4388f76950043d7f0f1",
+        ),
+        (
+            "flashinfer_cubin-0.6.18-py3-none-any.whl",
+            "507452717",
+            "1239178852",
+            "fe03b57b9fa233a23efc3d29fa7a1fd48ebb9b7e8eda529187d505f2b1493315",
+        ),
+    }
+
+    assert FLASHINFER_WHEEL_BASE_IMAGE_ID in script
+    assert "dgx-qwen3-asr:vllm023-flashinfer0618-test" in script
+    for filename, asset_id, size, digest in expected_assets:
+        assert filename in script and filename in dockerfile
+        assert asset_id in script
+        assert size in script
+        assert digest in script
+
+    instructions = _logical_docker_instructions(dockerfile)
+    assert [
+        instruction for instruction in instructions if re.match(r"(?:ARG|FROM)\s+", instruction)
+    ] == [
+        "ARG QUALIFIED_ASR_BASE=dgx-qwen3-asr:vllm023-615e858c",
+        "FROM ${QUALIFIED_ASR_BASE}",
+    ]
+    installs = _asr_python_package_install_commands(dockerfile)
+    assert len(installs) == 1
+    assert "--no-deps" in installs[0]
+    assert "--force-reinstall" in installs[0]
+    assert all(filename in installs[0] for filename, _, _, _ in expected_assets)
+    assert not any(
+        re.match(r"(?:CMD|ENTRYPOINT|ENV|HEALTHCHECK)\s+", instruction)
+        for instruction in instructions
+    )
+    assert not _has_asr_forbidden_compiler_addition(dockerfile)
+    assert "verify-file" in script
+    assert script.count("verify-file") == 1
+    assert "capture-image" in script
+    assert "verify-images" in script
+    assert "--pull=false" in script
 
 
 def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:

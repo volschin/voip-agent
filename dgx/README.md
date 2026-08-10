@@ -100,6 +100,22 @@ To reuse the already verified local base and build only the ASR derivative, add
 `dgx-spark-vllm:midpoint-v023` and `dgx-qwen3-asr:spark-midpoint-v023-test`;
 it does not deploy either image.
 
+To build the isolated FlashInfer wheel comparison from the currently qualified
+vLLM 0.23 image, run:
+
+```bash
+cd dgx
+./asr/build-flashinfer-wheel-candidate.sh
+```
+
+The script requires the exact local `dgx-qwen3-asr:vllm023-615e858c` image,
+downloads and hash-verifies the three precompiled Spark-vLLM FlashInfer 0.6.18
+wheels, and produces only
+`dgx-qwen3-asr:vllm023-flashinfer0618-test`. It verifies that every installed
+distribution outside the FlashInfer package family remains identical. The
+candidate is not deployed by this command and must pass its staged benchmark
+before it can be considered eligible.
+
 `qwen3-tts` builds locally from `./tts`. Production callers use stable
 whole-WAV `/v1/audio/speech`; `/v1/audio/speech/stream` remains available only
 for diagnostics. The image applies a version-bound patch to

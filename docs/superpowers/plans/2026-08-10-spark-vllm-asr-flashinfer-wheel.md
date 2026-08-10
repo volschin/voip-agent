@@ -31,6 +31,7 @@
 **Files:**
 - Create: `dgx/asr/Dockerfile.flashinfer-wheel-candidate`
 - Create: `dgx/asr/build-flashinfer-wheel-candidate.sh`
+- Create: `dgx/asr/verify_flashinfer_wheel_candidate.py`
 - Modify: `tests/test_dgx_deployment.py`
 - Modify: `dgx/README.md`
 
@@ -40,11 +41,13 @@
 
 - [ ] **Step 1: Write focused failing deployment-contract tests**
 
-Add tests that require the exact baseline ID, candidate tag, three asset IDs,
-filenames, sizes and SHA-256 values; `--no-deps --force-reinstall`; pre-download
-hash/size checks; package-inventory comparison excluding exactly the three
-FlashInfer names; inherited rootfs/config checks; and side-effect-free `--help`
-plus pre-Docker rejection of unknown arguments.
+Add behavior tests that execute the verifier against hand-checked image
+inventories and file bytes, including altered package/config/rootfs/adapter/
+FlashInfer/duplicate cases. Execute the build script with fake external
+commands to prove side-effect-free `--help`, unknown-argument rejection, and
+rejection of a wrong base before download. Add the focused static deployment
+contract for the exact three upstream release assets and dependency-closed
+Dockerfile.
 
 - [ ] **Step 2: Run the focused tests and observe the expected missing-file failures**
 
@@ -64,8 +67,9 @@ payloads, and asserts the exact runtime inventory.
 
 The Bash script parses only `--help`, checks the exact base image before any
 download, downloads the three exact assets to `mktemp -d`, verifies bytes and
-SHA-256, builds with `--pull=false`, then compares rootfs, image configuration,
-and installed distribution inventories fail closed.
+SHA-256, builds with `--pull=false`, then uses the Python verifier to capture
+and compare real rootfs, image configuration, adapter, and installed
+distribution inventories fail closed.
 
 - [ ] **Step 4: Run focused and repository deployment tests**
 
