@@ -273,22 +273,34 @@ untracked.
 
 ## Historical Execution Result
 
-- Candidate: `sha256:1891cdd1578ea2bc6e47c7a6bbd9db0bc4c77061a89c285985a0878aac7ed46a`,
-  ARM64/Linux, `26,774,947,982` bytes.
+- Initial image `sha256:1891cdd1...ed46a` and its positive benchmark were
+  superseded after review found optimized-Python, release-identity,
+  tag-promotion, base-binding, and multi-layer verification gaps.
+- Those findings were fixed with explicit checks and optimized-mode tests,
+  exact release metadata, checked ephemeral base tagging from the immutable
+  ID, verify-before-promote, and a one-layer BuildKit bind mount.
+- Final candidate:
+  `sha256:864acad23c3c55738f50ed546a2a175767e8835fa12ddd3fc4a58e3a9ded56d1`,
+  ARM64/Linux, `25,265,654,356` bytes, exact rootfs layer count `21 + 1`.
 - Static delta: only the three FlashInfer distributions changed from 0.6.12
   to 0.6.18; all other distribution multiplicities, rootfs ancestry, image
   configuration, and adapter bytes matched the baseline.
 - Non-speech gate: PASS, `10/10`, five words with per-case counts
   `1,1,1,0,0,0,0,1,0,1`, no structural or safety failures, CUDA true,
-  maximum SM `65%`.
-- Complete comparison: PASS, both sides `70/70` quality and `12/12` load;
-  quality aggregates identical.
-- Load: production p50/p90 `376.72439799644053/615.44096597936 ms`;
-  candidate `395.5528330989182/617.4334769602865 ms`; ratios
-  `1.0499793355636489/1.0032375338839457`. The p50 pass is marginal.
+  maximum SM `72%`, safe SHA-256 `2e17fb7f...84bd`.
+- Complete comparison: FAIL, although both sides completed `70/70` quality
+  and `12/12` load with CUDA.
+- Quality: production WER/CER/macro WER
+  `0.04330708661417323/0.03785245268443414/0.05783146591970121`;
+  candidate `0.045275590551181105/0.038238702201622246/0.061799719887955185`.
+- Load: production p50/p90 `383.4179179975763/544.1918869037181 ms`;
+  candidate `404.35268403962255/637.96085503418 ms`; ratios
+  `1.0546003852698886/1.1723086477161173` exceeded both limits.
 - CUDA: both true, both maximum SM `96%`.
-- Safe result: `24ea2fa49234073a44e28941bef5270f641acac94dd5dc7392e8ffcee24beeaa`.
+- Replication: forbidden because quality also failed; series count remained one.
+- Complete safe result:
+  `ea78f048cea1dfe1e7963d3ff768e3b23446f81f65129388918a9b84635bf5c9`.
 - Cleanup: all three exact benchmark-container counts zero; candidate image
   retained; production unchanged as `running|healthy|0|unless-stopped` on
   `sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930`.
-- Decision: benchmark-eligible only; no rollout was executed or authorized.
+- Decision: final candidate rejected; no rollout was executed or authorized.

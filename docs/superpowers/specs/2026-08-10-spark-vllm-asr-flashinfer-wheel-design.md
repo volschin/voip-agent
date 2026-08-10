@@ -165,12 +165,22 @@ authorization.
 This experiment completed on 2026-08-10 UTC and is now a historical record.
 It does not authorize another run or a production rollout.
 
-The candidate built as
-`sha256:1891cdd1578ea2bc6e47c7a6bbd9db0bc4c77061a89c285985a0878aac7ed46a`
-(`26,774,947,982` bytes, ARM64/Linux). Its rootfs retained every baseline
-layer, its image configuration and ASR adapter were unchanged, and the full
-normalized distribution multiset was identical except for exactly these
-three replacements:
+The first recipe built image `sha256:1891cdd1...ed46a` and produced a passing
+full comparison, but an independent review found that its `assert`-based
+verification disappeared under optimized Python, release names were not
+validated, mutable tags remained in the build path, the final tag preceded
+verification, and wheel payloads occupied separate layers. That image and its
+positive result are superseded and confer no eligibility.
+
+The remediated recipe has explicit fail-closed exceptions, an optimized-mode
+regression test, exact release metadata validation, a checked random local tag
+created from the immutable base ID, untagged build/verified promotion, and a
+read-only BuildKit wheel mount. It built the final candidate as
+`sha256:864acad23c3c55738f50ed546a2a175767e8835fa12ddd3fc4a58e3a9ded56d1`
+(`25,265,654,356` bytes, ARM64/Linux). Its 22-layer rootfs contains the exact
+21 baseline layers plus one replacement layer; image configuration and ASR
+adapter were unchanged. The normalized distribution multiset was identical
+except for exactly these three replacements:
 
 ```text
 flashinfer-python:    0.6.12 -> 0.6.18
@@ -178,29 +188,33 @@ flashinfer-jit-cache: 0.6.12 -> 0.6.18
 flashinfer-cubin:     0.6.12 -> 0.6.18
 ```
 
-The frozen discriminator passed at the fixed boundary: `10/10` requests,
+The final candidate's frozen discriminator passed at the fixed boundary:
+`10/10` requests,
 zero failures or malformed responses, and five hallucinated words. Per-case
 counts were `1,1,1,0,0,0,0,1,0,1`; additions, language changes, command-risk,
 and nondeterministic cases were all zero. Candidate-correlated CUDA was true,
-with maximum aggregate SM of `65%`.
+with maximum aggregate SM of `72%`. Its safe-result SHA-256 is
+`2e17fb7f3b50f74fc0a9f51db069b513dccc429ed0780dc91ef2204cfbb484bd`.
 
 The conditional complete comparison therefore ran once. Production and
-candidate each completed `70/70` quality and `12/12` load. Every quality
-aggregate was identical, including WER `0.045275590551181105`, CER
-`0.038238702201622246`, macro WER `0.061799719887955185`, entity recall
-`0.6363636363636364`, and five non-speech hallucinated words.
+candidate each completed `70/70` quality and `12/12` load with correlated
+CUDA. The candidate did not pass the fixed complete gate. Production WER/CER/
+macro WER were `0.04330708661417323`, `0.03785245268443414`, and
+`0.05783146591970121`; candidate values were `0.045275590551181105`,
+`0.038238702201622246`, and `0.061799719887955185`, so
+`quality_non_degradation` was false. Both retained five non-speech words.
 
-Production load p50/p90 were `376.72439799644053 ms` and
-`615.44096597936 ms`; candidate p50/p90 were `395.5528330989182 ms` and
-`617.4334769602865 ms`. The candidate ratios were `1.0499793355636489`
-and `1.0032375338839457`, passing the fixed `1.05` and `1.10` limits. The p50
-result is only narrowly inside its limit and must be preserved as operational
-risk rather than rounded to a comfortable margin. Both CUDA proofs were true
-and reached `96%` maximum SM. The sealed safe-result SHA-256 is
-`24ea2fa49234073a44e28941bef5270f641acac94dd5dc7392e8ffcee24beeaa`.
+Production load p50/p90 were `383.4179179975763 ms` and
+`544.1918869037181 ms`; candidate p50/p90 were `404.35268403962255 ms` and
+`637.96085503418 ms`. Ratios `1.0546003852698886` and
+`1.1723086477161173` exceeded the fixed `1.05` and `1.10` limits. Both CUDA
+proofs were true and reached `96%` maximum SM. The fixed protocol forbids
+replicating a quality failure; no series was repeated. The sealed complete
+safe-result SHA-256 is
+`ea78f048cea1dfe1e7963d3ff768e3b23446f81f65129388918a9b84635bf5c9`.
 
 All three benchmark containers were removed and the candidate image was
 retained. Production finished unchanged on
 `sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930`
-as `running|healthy|0|unless-stopped`. The candidate is benchmark-eligible;
-adoption still requires separate rollout authorization.
+as `running|healthy|0|unless-stopped`. The final candidate is not
+benchmark-eligible and must not be rolled out.
