@@ -391,7 +391,11 @@ def test_flashinfer_wheel_candidate_captures_real_image_and_runtime_inventory(
         "if test \"$1 $2\" = 'image inspect'; then\n"
         f"  printf '%s\\n' '{json.dumps(image_inspect)}'\n"
         'elif test "$1" = run; then\n'
-        f"  printf '%s\\n' '{json.dumps(runtime)}'\n"
+        '  case "$*" in\n'
+        "    *find_spec*) exit 7 ;;\n"
+        f"    *locate_file*) printf '%s\\n' '{json.dumps(runtime)}' ;;\n"
+        "    *) exit 8 ;;\n"
+        "  esac\n"
         "else\n"
         "  exit 3\n"
         "fi\n",

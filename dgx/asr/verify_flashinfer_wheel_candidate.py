@@ -18,12 +18,12 @@ EXPECTED_ADAPTER_SHA256 = "e233961d38d0a396db34cf2f7d83c6dc1c33aa55768ba894eee6d
 _RUNTIME_INVENTORY_CODE = r"""
 import hashlib
 import importlib.metadata as metadata
-import importlib.util
 import json
 from pathlib import Path
 
-adapter = importlib.util.find_spec("vllm.model_executor.models.qwen3_asr")
-assert adapter and adapter.origin
+vllm_distribution = metadata.distribution("vllm")
+adapter = Path(vllm_distribution.locate_file("vllm/model_executor/models/qwen3_asr.py"))
+assert adapter.is_file()
 distributions = sorted(
     (
         {"name": distribution.metadata.get("Name", ""), "version": distribution.version}
@@ -32,7 +32,7 @@ distributions = sorted(
     key=lambda value: (value["name"].lower(), value["version"]),
 )
 print(json.dumps({
-    "adapter_sha256": hashlib.sha256(Path(adapter.origin).read_bytes()).hexdigest(),
+    "adapter_sha256": hashlib.sha256(adapter.read_bytes()).hexdigest(),
     "distributions": distributions,
 }, sort_keys=True))
 """
