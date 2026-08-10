@@ -422,11 +422,105 @@ def test_flashinfer_wheel_candidate_verifies_exact_release_asset_metadata(
     wrong_size_assets = json.loads(json.dumps(expected_assets))
     wrong_size_assets[1]["size"] += 1
     wrong_size = verify({"id": 367461871, "assets": wrong_size_assets}, "wrong-size.json")
+    extra_non_object = verify(
+        {"id": 367461871, "assets": [*expected_assets, None]}, "extra-null.json"
+    )
+    duplicate = verify(
+        {"id": 367461871, "assets": [*expected_assets, expected_assets[0]]},
+        "duplicate.json",
+    )
 
     assert accepted.returncode == 0, accepted.stderr
     assert wrong_name.returncode != 0
     assert wrong_release.returncode != 0
     assert wrong_size.returncode != 0
+    assert extra_non_object.returncode != 0
+    assert duplicate.returncode != 0
+
+
+@pytest.mark.parametrize("failure_mode", ("base-drift", "verifier"))
+def test_flashinfer_wheel_candidate_never_promotes_a_failed_build(
+    tmp_path: Path,
+    failure_mode: str,
+) -> None:
+    script = ROOT / "dgx/asr/build-flashinfer-wheel-candidate.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    inspect_count = tmp_path / "temporary-inspect-count"
+    candidate_id = "sha256:" + "2" * 64
+
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$*\" >> {docker_log}\n"
+        "if test \"$1 $2\" = 'image inspect'; then\n"
+        "  target=${!#}\n"
+        "  case $target in\n"
+        "    dgx-qwen3-asr:vllm023-615e858c)\n"
+        f"      printf '%s\\n' '{FLASHINFER_WHEEL_BASE_IMAGE_ID}' ;;\n"
+        "    dgx-qwen3-asr:flashinfer-base-*)\n"
+        f"      count=$(cat {inspect_count} 2>/dev/null || printf 0)\n"
+        f"      printf '%s' $((count + 1)) > {inspect_count}\n"
+        '      if test "${FAKE_MODE-}" = base-drift && test "$count" -ge 1; then\n'
+        "        printf '%s\\n' 'sha256:drift'\n"
+        "      else\n"
+        f"        printf '%s\\n' '{FLASHINFER_WHEEL_BASE_IMAGE_ID}'\n"
+        "      fi ;;\n"
+        f"    *) printf '%s\\n' '{candidate_id}' ;;\n"
+        "  esac\n"
+        'elif test "$1" = build; then\n'
+        '  while test "$#" -gt 0; do\n'
+        '    if test "$1" = --iidfile; then\n'
+        f"      shift; printf '%s' '{candidate_id}' > \"$1\"; exit 0\n"
+        "    fi\n"
+        "    shift\n"
+        "  done\n"
+        "elif test \"$1 $2\" = 'image tag' || test \"$1 $2\" = 'image rm'; then\n"
+        "  exit 0\n"
+        "else\n"
+        "  exit 8\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        "#!/usr/bin/env bash\n"
+        'while test "$#" -gt 0; do\n'
+        '  if test "$1" = --output; then shift; printf \'{}\' > "$1"; exit 0; fi\n'
+        "  shift\n"
+        "done\n"
+        "exit 9\n",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$*" in\n'
+        '  *verify-images*) test "${FAKE_MODE-}" != verifier ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "FAKE_MODE": failure_mode,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        },
+    )
+
+    assert result.returncode != 0
+    commands = docker_log.read_text(encoding="utf-8")
+    assert f"image tag {candidate_id} dgx-qwen3-asr:vllm023-flashinfer0618-test" not in commands
 
 
 def test_flashinfer_wheel_candidate_build_script_stops_before_download_on_bad_input(

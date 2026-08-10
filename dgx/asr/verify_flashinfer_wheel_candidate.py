@@ -18,16 +18,14 @@ FLASHINFER_DISTRIBUTIONS = frozenset(
 EXPECTED_BASE_IMAGE_ID = "sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930"
 EXPECTED_ADAPTER_SHA256 = "e233961d38d0a396db34cf2f7d83c6dc1c33aa55768ba894eee6de097120342d"
 EXPECTED_RELEASE_ID = 367461871
-EXPECTED_RELEASE_ASSETS = frozenset(
-    {
-        (507452716, "flashinfer_python-0.6.18-py3-none-any.whl", 17122160),
-        (
-            507452715,
-            "flashinfer_jit_cache-0.6.18-cp39-abi3-manylinux_2_28_aarch64.whl",
-            252992614,
-        ),
-        (507452717, "flashinfer_cubin-0.6.18-py3-none-any.whl", 1239178852),
-    }
+EXPECTED_RELEASE_ASSETS = (
+    (507452716, "flashinfer_python-0.6.18-py3-none-any.whl", 17122160),
+    (
+        507452715,
+        "flashinfer_jit_cache-0.6.18-cp39-abi3-manylinux_2_28_aarch64.whl",
+        252992614,
+    ),
+    (507452717, "flashinfer_cubin-0.6.18-py3-none-any.whl", 1239178852),
 )
 _RUNTIME_INVENTORY_CODE = r"""
 import hashlib
@@ -126,10 +124,25 @@ def verify_release(path: Path) -> None:
     _require(release.get("id") == EXPECTED_RELEASE_ID, "unexpected release ID")
     assets = release.get("assets")
     _require(isinstance(assets, list), "release assets must be a list")
-    actual_assets = frozenset(
-        (asset["id"], asset["name"], asset["size"]) for asset in assets if isinstance(asset, dict)
+    _require(
+        len(assets) == len(EXPECTED_RELEASE_ASSETS),
+        "release must contain exactly the expected assets",
     )
-    _require(actual_assets == EXPECTED_RELEASE_ASSETS, "release asset metadata changed")
+    _require(all(isinstance(asset, dict) for asset in assets), "release asset must be an object")
+    _require(
+        all(
+            type(asset.get("id")) is int
+            and type(asset.get("name")) is str
+            and type(asset.get("size")) is int
+            for asset in assets
+        ),
+        "release asset fields have unexpected types",
+    )
+    actual_assets = tuple(sorted((asset["id"], asset["name"], asset["size"]) for asset in assets))
+    _require(
+        actual_assets == tuple(sorted(EXPECTED_RELEASE_ASSETS)),
+        "release asset metadata changed",
+    )
 
 
 def capture_image(image: str, output: Path) -> None:
