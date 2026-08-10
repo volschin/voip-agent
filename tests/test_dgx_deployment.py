@@ -599,7 +599,9 @@ def test_flashinfer_wheel_candidate_recipe_is_exact_and_dependency_closed() -> N
     assert "capture-image" in script
     assert "verify-images" in script
     assert "--pull=false" in script
-    assert "QUALIFIED_ASR_BASE=$QUALIFIED_BASE_IMAGE_ID" in script
+    assert 'docker image tag "$QUALIFIED_BASE_IMAGE_ID" "$temporary_base_tag"' in script
+    assert script.count("docker image inspect --format '{{.Id}}' \"$temporary_base_tag\"") == 2
+    assert "QUALIFIED_ASR_BASE=$temporary_base_tag" in script
     assert "--iidfile" in script
     assert script.index("verify-images") < script.index('docker image tag "$candidate_image_id"')
     assert not any(instruction.startswith("COPY ") for instruction in instructions)

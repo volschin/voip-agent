@@ -36,10 +36,19 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 umask 077
 wheel_dir=$(mktemp -d)
 inventory_dir=$(mktemp -d)
+temporary_base_tag="dgx-qwen3-asr:flashinfer-base-$$-$RANDOM"
 cleanup() {
+  docker image rm "$temporary_base_tag" >/dev/null 2>&1 || true
   rm -rf -- "$wheel_dir" "$inventory_dir"
 }
 trap cleanup EXIT
+
+docker image tag "$QUALIFIED_BASE_IMAGE_ID" "$temporary_base_tag"
+temporary_base_image_id=$(docker image inspect --format '{{.Id}}' "$temporary_base_tag")
+if test "$temporary_base_image_id" != "$QUALIFIED_BASE_IMAGE_ID"; then
+  printf 'temporary base tag mismatch\n' >&2
+  exit 1
+fi
 
 curl --fail --location --retry 3 --retry-all-errors \
   --header 'Accept: application/vnd.github+json' \
@@ -61,13 +70,18 @@ for asset in "${ASSETS[@]}"; do
 done
 
 docker build --pull=false \
-  --build-arg "QUALIFIED_ASR_BASE=$QUALIFIED_BASE_IMAGE_ID" \
+  --build-arg "QUALIFIED_ASR_BASE=$temporary_base_tag" \
   --iidfile "$inventory_dir/candidate.iid" \
   --file "$script_dir/Dockerfile.flashinfer-wheel-candidate" \
   "$wheel_dir"
 candidate_image_id=$(tr -d '\n' <"$inventory_dir/candidate.iid")
 if test -z "$candidate_image_id"; then
   printf 'candidate image ID is missing\n' >&2
+  exit 1
+fi
+temporary_base_image_id=$(docker image inspect --format '{{.Id}}' "$temporary_base_tag")
+if test "$temporary_base_image_id" != "$QUALIFIED_BASE_IMAGE_ID"; then
+  printf 'temporary base tag changed during build\n' >&2
   exit 1
 fi
 

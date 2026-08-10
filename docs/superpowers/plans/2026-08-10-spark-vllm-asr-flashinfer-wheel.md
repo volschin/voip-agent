@@ -70,9 +70,10 @@ retaining wheel payloads.
 
 The Bash script parses only `--help`, checks the exact base image before any
 download, verifies the exact release and asset metadata, downloads the three
-exact assets to `mktemp -d`, verifies bytes and SHA-256, builds with
-`--pull=false` from the immutable base image ID into an untagged image, then
-uses the Python verifier to capture and compare real rootfs, image
+exact assets to `mktemp -d`, verifies bytes and SHA-256, creates a random
+temporary local tag from the immutable base image ID and checks it before and
+after an untagged `--pull=false` build, then uses the Python verifier to capture
+and compare the exact base-ID rootfs, image
 configuration, adapter, and installed distribution inventories fail closed.
 Only a verified image is promoted to the documented candidate tag.
 
