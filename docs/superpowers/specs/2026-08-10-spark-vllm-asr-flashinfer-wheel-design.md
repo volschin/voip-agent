@@ -75,11 +75,11 @@ The build script must:
 - build with `--pull=false` from the exact local baseline tag;
 - verify the candidate rootfs begins with every baseline layer;
 - verify image configuration is inherited unchanged;
-- verify one and only one installed distribution for every package;
-- prove that the installed distribution inventory is byte-for-byte equal by
-  name and version after excluding only the three FlashInfer distributions;
-- require all three FlashInfer distributions at exactly `0.6.18` and retain
-  the existing vLLM adapter hash.
+- prove that the installed distribution multiset is byte-for-byte equal by
+  normalized name and version after excluding only the three FlashInfer
+  distributions; inherited duplicate metadata must remain exactly identical;
+- require each of the three FlashInfer distributions exactly once at `0.6.18`
+  and retain the existing vLLM adapter hash.
 
 The candidate tag is:
 

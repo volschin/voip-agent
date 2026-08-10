@@ -123,8 +123,9 @@ remote path. Do not transfer `.env`, models, benchmark data, or worktree state.
 
 Execute `build-flashinfer-wheel-candidate.sh` from the transferred archive.
 Require all three download digests/sizes, exact base ID, exact rootfs prefix,
-unchanged configuration and non-FlashInfer distribution map, FlashInfer
-0.6.18 triple, ARM64/Linux, and the retained ASR adapter hash.
+unchanged configuration and non-FlashInfer distribution multiset (including
+any inherited duplicate metadata), each FlashInfer distribution exactly once
+at 0.6.18, ARM64/Linux, and the retained ASR adapter hash.
 
 - [ ] **Step 4: Independently inspect the candidate**
 

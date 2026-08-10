@@ -246,6 +246,25 @@ def test_flashinfer_wheel_candidate_accepts_only_the_flashinfer_distribution_del
     assert result.returncode == 0, result.stderr
 
 
+def test_flashinfer_wheel_candidate_preserves_identical_baseline_distribution_duplicates(
+    tmp_path: Path,
+) -> None:
+    base = _candidate_inventory("0.6.12")
+    candidate = _candidate_inventory("0.6.18")
+    for inventory in (base, candidate):
+        inventory["distributions"].extend(
+            [
+                {"name": "setuptools", "version": "68.1.2"},
+                {"name": "setuptools", "version": "78.1.0"},
+            ]
+        )
+    candidate["rootfs_layers"].append("sha256:candidate-overlay")
+
+    result = _run_flashinfer_candidate_verifier(tmp_path, base, candidate)
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_flashinfer_wheel_candidate_rejects_a_non_flashinfer_distribution_change(
     tmp_path: Path,
 ) -> None:

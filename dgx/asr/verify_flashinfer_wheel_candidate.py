@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import json
 import re
@@ -42,13 +43,12 @@ def _normalized_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def _distribution_map(inventory: dict[str, Any]) -> dict[str, str]:
-    distributions: dict[str, str] = {}
+def _distribution_map(inventory: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    distributions: dict[str, list[str]] = collections.defaultdict(list)
     for entry in inventory["distributions"]:
         name = _normalized_name(entry["name"])
-        assert name not in distributions, f"duplicate distribution: {name}"
-        distributions[name] = entry["version"]
-    return distributions
+        distributions[name].append(entry["version"])
+    return {name: tuple(sorted(versions)) for name, versions in distributions.items()}
 
 
 def verify_images(base: dict[str, Any], candidate: dict[str, Any]) -> None:
@@ -64,10 +64,10 @@ def verify_images(base: dict[str, Any], candidate: dict[str, Any]) -> None:
     candidate_distributions = _distribution_map(candidate)
     assert {
         name: base_distributions.pop(name) for name in FLASHINFER_DISTRIBUTIONS
-    } == dict.fromkeys(FLASHINFER_DISTRIBUTIONS, "0.6.12")
+    } == dict.fromkeys(FLASHINFER_DISTRIBUTIONS, ("0.6.12",))
     assert {
         name: candidate_distributions.pop(name) for name in FLASHINFER_DISTRIBUTIONS
-    } == dict.fromkeys(FLASHINFER_DISTRIBUTIONS, "0.6.18")
+    } == dict.fromkeys(FLASHINFER_DISTRIBUTIONS, ("0.6.18",))
     assert candidate_distributions == base_distributions
 
 
