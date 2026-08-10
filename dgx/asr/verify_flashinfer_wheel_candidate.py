@@ -121,7 +121,11 @@ def verify_file(path: Path, expected_size: int, expected_sha256: str) -> None:
 def verify_release(path: Path) -> None:
     release = json.loads(path.read_text(encoding="utf-8"))
     _require(isinstance(release, dict), "release metadata must be an object")
-    _require(release.get("id") == EXPECTED_RELEASE_ID, "unexpected release ID")
+    release_id = release.get("id")
+    _require(
+        type(release_id) is int and release_id == EXPECTED_RELEASE_ID,
+        "unexpected release ID",
+    )
     assets = release.get("assets")
     _require(isinstance(assets, list), "release assets must be a list")
     _require(

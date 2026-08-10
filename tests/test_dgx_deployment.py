@@ -419,6 +419,7 @@ def test_flashinfer_wheel_candidate_verifies_exact_release_asset_metadata(
     renamed_assets[0]["name"] = "renamed.whl"
     wrong_name = verify({"id": 367461871, "assets": renamed_assets}, "wrong-name.json")
     wrong_release = verify({"id": 367461872, "assets": expected_assets}, "wrong-release.json")
+    float_release = verify({"id": 367461871.0, "assets": expected_assets}, "float-release.json")
     wrong_size_assets = json.loads(json.dumps(expected_assets))
     wrong_size_assets[1]["size"] += 1
     wrong_size = verify({"id": 367461871, "assets": wrong_size_assets}, "wrong-size.json")
@@ -433,6 +434,7 @@ def test_flashinfer_wheel_candidate_verifies_exact_release_asset_metadata(
     assert accepted.returncode == 0, accepted.stderr
     assert wrong_name.returncode != 0
     assert wrong_release.returncode != 0
+    assert float_release.returncode != 0
     assert wrong_size.returncode != 0
     assert extra_non_object.returncode != 0
     assert duplicate.returncode != 0
