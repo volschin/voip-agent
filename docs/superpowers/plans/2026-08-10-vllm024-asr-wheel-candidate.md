@@ -36,7 +36,7 @@
 
 **Interfaces:** Exact baseline plus two official wheels in; verified candidate tag out.
 
-- [ ] **Step 1: Write focused failing deployment-contract tests**
+- [x] **Step 1: Write focused failing deployment-contract tests**
 
 Add behavior tests for exact inventory/release success and wrong package,
 version, config, platform, rootfs, adapter, duplicates, multiplicity, or release
@@ -45,7 +45,7 @@ handling, wrong-base rejection before download, verify-before-promote, and
 base-drift rejection. Check the exact two assets, one read-only bind-mounted
 `RUN`, no `COPY`, no compiler, and no build network or resolver.
 
-- [ ] **Step 2: Observe the intended RED state**
+- [x] **Step 2: Observe the intended RED state**
 
 ```bash
 /home/volsch/projekte/voip-agent/venv/bin/pytest -q \
@@ -54,7 +54,7 @@ base-drift rejection. Check the exact two assets, one read-only bind-mounted
 
 Expected: FAIL because the three recipe files do not exist.
 
-- [ ] **Step 3: Implement the minimal recipe**
+- [x] **Step 3: Implement the minimal recipe**
 
 The Dockerfile accepts only `ARG QUALIFIED_ASR_BASE`, inherits it, bind-mounts
 the verified wheel directory read-only, and performs one dependency-closed pip
@@ -71,7 +71,7 @@ binds a random temporary tag to the exact base ID; builds untagged with
 `DOCKER_BUILDKIT=1`, `--network=none`, and `--pull=false`; verifies inventories;
 rechecks the base; and only then promotes the image. Cleanup is exact.
 
-- [ ] **Step 4: Verify locally**
+- [x] **Step 4: Verify locally**
 
 ```bash
 bash -n dgx/asr/build-vllm024-wheel-candidate.sh
@@ -87,7 +87,7 @@ git diff --check
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit the recipe**
+- [x] **Step 5: Commit the recipe**
 
 ```bash
 git add dgx/asr/Dockerfile.vllm024-wheel-candidate \

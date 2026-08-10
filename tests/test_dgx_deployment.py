@@ -27,6 +27,7 @@ QWEN3_ASR_ADAPTER_SHA256 = "e233961d38d0a396db34cf2f7d83c6dc1c33aa55768ba894eee6
 FLASHINFER_WHEEL_BASE_IMAGE_ID = (
     "sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930"
 )
+VLLM024_ADAPTER_SHA256 = "639d3691fae9195ed38e17306a29b04bc60025e1119d0090443ec7d935eceffd"
 TTS_BASE_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
 LOCK_ENTRY = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\[[^]]+\])?==\S+")
 LOCK_HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
@@ -706,6 +707,444 @@ def test_flashinfer_wheel_candidate_recipe_is_exact_and_dependency_closed() -> N
     ]
     assert len(run_instructions) == 1
     assert "--mount=type=bind" in run_instructions[0]
+
+
+def _vllm024_inventory(candidate: bool) -> dict:
+    return {
+        "image_id": ("sha256:" + "2" * 64 if candidate else FLASHINFER_WHEEL_BASE_IMAGE_ID),
+        "architecture": "arm64",
+        "os": "linux",
+        "rootfs_layers": [f"sha256:base-{index}" for index in range(21)]
+        + (["sha256:vllm024-overlay"] if candidate else []),
+        "config": {
+            "Cmd": ["vllm", "serve"],
+            "Env": ["PYTHONUNBUFFERED=1"],
+            "Healthcheck": {"Test": ["CMD", "healthcheck"]},
+        },
+        "adapter_sha256": VLLM024_ADAPTER_SHA256 if candidate else QWEN3_ASR_ADAPTER_SHA256,
+        "distributions": [
+            {"name": "av", "version": "17.0.1"},
+            {"name": "flashinfer-cubin", "version": "0.6.12"},
+            {"name": "flashinfer-jit-cache", "version": "0.6.12"},
+            {"name": "flashinfer-python", "version": "0.6.12"},
+            {"name": "humming-kernels", "version": "0.1.6" if candidate else "0.1.4"},
+            {"name": "soundfile", "version": "0.13.1"},
+            {"name": "torch", "version": "2.11.0+cu130"},
+            {"name": "transformers", "version": "5.12.1"},
+            {"name": "triton", "version": "3.6.0"},
+            {"name": "vllm", "version": "0.24.0" if candidate else "0.23.0"},
+        ],
+    }
+
+
+def _run_vllm024_candidate_verifier(
+    tmp_path: Path,
+    base: dict,
+    candidate: dict,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    base_path = tmp_path / "base.json"
+    candidate_path = tmp_path / "candidate.json"
+    base_path.write_text(json.dumps(base), encoding="utf-8")
+    candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            ROOT / "dgx/asr/verify_vllm024_wheel_candidate.py",
+            "verify-images",
+            base_path,
+            candidate_path,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+
+def test_vllm024_wheel_candidate_accepts_only_the_two_distribution_delta(
+    tmp_path: Path,
+) -> None:
+    base = _vllm024_inventory(False)
+    candidate = _vllm024_inventory(True)
+    for inventory in (base, candidate):
+        inventory["distributions"].extend(
+            [
+                {"name": "setuptools", "version": "68.1.2"},
+                {"name": "setuptools", "version": "78.1.0"},
+            ]
+        )
+
+    result = _run_vllm024_candidate_verifier(tmp_path, base, candidate)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "third-package",
+        "wrong-config",
+        "wrong-platform",
+        "wrong-rootfs-prefix",
+        "extra-layer",
+        "wrong-base-adapter",
+        "wrong-candidate-adapter",
+        "wrong-vllm-version",
+        "wrong-humming-version",
+        "duplicate-changed-package",
+        "lost-unrelated-duplicate",
+    ),
+)
+def test_vllm024_wheel_candidate_rejects_contract_drift(tmp_path: Path, mutation: str) -> None:
+    base = _vllm024_inventory(False)
+    candidate = _vllm024_inventory(True)
+    if mutation == "third-package":
+        candidate["distributions"][0]["version"] = "17.0.2"
+    elif mutation == "wrong-config":
+        candidate["config"]["Env"].append("UNPLANNED=1")
+    elif mutation == "wrong-platform":
+        candidate["architecture"] = "amd64"
+    elif mutation == "wrong-rootfs-prefix":
+        candidate["rootfs_layers"][0] = "sha256:replacement"
+    elif mutation == "extra-layer":
+        candidate["rootfs_layers"].append("sha256:extra")
+    elif mutation == "wrong-base-adapter":
+        base["adapter_sha256"] = "0" * 64
+    elif mutation == "wrong-candidate-adapter":
+        candidate["adapter_sha256"] = "0" * 64
+    elif mutation == "wrong-vllm-version":
+        candidate["distributions"][-1]["version"] = "0.24.1"
+    elif mutation == "wrong-humming-version":
+        candidate["distributions"][4]["version"] = "0.1.5"
+    elif mutation == "duplicate-changed-package":
+        candidate["distributions"].append({"name": "vLLM", "version": "0.24.0"})
+    elif mutation == "lost-unrelated-duplicate":
+        base["distributions"].append({"name": "setuptools", "version": "68.1.2"})
+
+    result = _run_vllm024_candidate_verifier(tmp_path, base, candidate)
+
+    assert result.returncode != 0
+
+
+def test_vllm024_wheel_candidate_verifies_file_bytes_under_optimized_python(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "candidate.whl"
+    wheel.write_bytes(b"wheel-bytes")
+    verifier = ROOT / "dgx/asr/verify_vllm024_wheel_candidate.py"
+    command = [
+        sys.executable,
+        verifier,
+        "verify-file",
+        wheel,
+        "11",
+        "9ceb18f15662bb87e54af2f5953c0484d2ef76f5444d87913360b9ef87d7296d",
+    ]
+    environment = os.environ | {"PYTHONOPTIMIZE": "1"}
+
+    accepted = subprocess.run(command, check=False, capture_output=True, text=True, env=environment)
+    wrong = subprocess.run(
+        [*command[:-2], "12", "0" * 64],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert wrong.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("package", "filename", "url", "size", "digest", "requires_python"),
+    (
+        (
+            "vllm",
+            "vllm-0.24.0-cp38-abi3-manylinux_2_28_aarch64.whl",
+            "https://files.pythonhosted.org/packages/9e/80/51a071305b4eed0f6f512dc1c1c6957cbb14ccce38db1be90ffcff2a2844/vllm-0.24.0-cp38-abi3-manylinux_2_28_aarch64.whl",
+            271361241,
+            "700db71c3cf14697d42583521f38b12fac38db1e7a8ad062e8e4d63a5dadebd5",
+            "<3.15,>=3.10",
+        ),
+        (
+            "humming-kernels",
+            "humming_kernels-0.1.6-py3-none-any.whl",
+            "https://files.pythonhosted.org/packages/25/85/490681b9ba24531da91d0bae801d2b26850e5a80bbd02c2efc500756e36b/humming_kernels-0.1.6-py3-none-any.whl",
+            178759,
+            "e64c0883fca930074bf920f4ba47cbf3acd244d7352f6c74c8d2182439770d8f",
+            ">=3.10",
+        ),
+    ),
+)
+def test_vllm024_wheel_candidate_verifies_exact_pypi_release_metadata(
+    tmp_path: Path,
+    package: str,
+    filename: str,
+    url: str,
+    size: int,
+    digest: str,
+    requires_python: str,
+) -> None:
+    version = "0.24.0" if package == "vllm" else "0.1.6"
+    selected = {
+        "filename": filename,
+        "url": url,
+        "size": size,
+        "digests": {"sha256": digest},
+        "requires_python": requires_python,
+        "yanked": False,
+    }
+    release = {
+        "info": {"name": package, "version": version, "requires_python": requires_python},
+        "urls": [selected, {"filename": "unrelated.tar.gz"}],
+    }
+    verifier = ROOT / "dgx/asr/verify_vllm024_wheel_candidate.py"
+
+    def run(payload: dict, name: str) -> subprocess.CompletedProcess[str]:
+        path = tmp_path / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, verifier, "verify-release", package, path],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=os.environ | {"PYTHONOPTIMIZE": "1"},
+        )
+
+    accepted = run(release, "accepted.json")
+    failures = []
+    for field, value in (
+        ("url", "https://example.invalid/wheel"),
+        ("size", size + 1),
+        ("requires_python", ">=3.11"),
+        ("yanked", True),
+    ):
+        altered = json.loads(json.dumps(release))
+        altered["urls"][0][field] = value
+        failures.append(run(altered, f"wrong-{field}.json"))
+    altered_hash = json.loads(json.dumps(release))
+    altered_hash["urls"][0]["digests"]["sha256"] = "0" * 64
+    failures.append(run(altered_hash, "wrong-hash.json"))
+    duplicate = json.loads(json.dumps(release))
+    duplicate["urls"].append(selected)
+    failures.append(run(duplicate, "duplicate.json"))
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert all(result.returncode != 0 for result in failures)
+
+
+def test_vllm024_wheel_candidate_build_script_rejects_bad_input_before_download(
+    tmp_path: Path,
+) -> None:
+    script = ROOT / "dgx/asr/build-vllm024-wheel-candidate.sh"
+    help_result = subprocess.run(["bash", script, "--help"], capture_output=True, text=True)
+    unknown_result = subprocess.run(["bash", script, "--unknown"], capture_output=True, text=True)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'sha256:not-the-qualified-base'\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    marker = tmp_path / "curl-called"
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(f"#!/usr/bin/env bash\nprintf called > {marker}\n", encoding="utf-8")
+    fake_curl.chmod(0o755)
+    wrong_base = subprocess.run(
+        ["bash", script],
+        capture_output=True,
+        text=True,
+        env=os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert help_result.returncode == 0
+    assert "candidate" in help_result.stdout.lower()
+    assert unknown_result.returncode == 2
+    assert wrong_base.returncode != 0
+    assert not marker.exists()
+
+
+def test_vllm024_wheel_candidate_capture_requires_inventory_and_pip_check(
+    tmp_path: Path,
+) -> None:
+    inspect = [
+        {
+            "Id": FLASHINFER_WHEEL_BASE_IMAGE_ID,
+            "Architecture": "arm64",
+            "Os": "linux",
+            "RootFS": {"Layers": [f"sha256:base-{index}" for index in range(21)]},
+            "Config": {"Cmd": ["vllm", "serve"], "Env": ["PYTHONUNBUFFERED=1"]},
+        }
+    ]
+    runtime = {
+        "adapter_sha256": QWEN3_ASR_ADAPTER_SHA256,
+        "distributions": [{"name": "vllm", "version": "0.23.0"}],
+    }
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$*\" >> {docker_log}\n"
+        "if test \"$1 $2\" = 'image inspect'; then\n"
+        f"  printf '%s\\n' '{json.dumps(inspect)}'\n"
+        'elif test "$1" = run; then\n'
+        '  case "$*" in\n'
+        f"    *locate_file*) printf '%s\\n' '{json.dumps(runtime)}' ;;\n"
+        '    *pip*check*) test "${FAIL_PIP_CHECK-}" != 1 ;;\n'
+        "    *) exit 8 ;;\n"
+        "  esac\n"
+        "else exit 3; fi\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    output = tmp_path / "inventory.json"
+    command = [
+        sys.executable,
+        ROOT / "dgx/asr/verify_vllm024_wheel_candidate.py",
+        "capture-image",
+        "candidate:test",
+        output,
+    ]
+    environment = os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    accepted = subprocess.run(command, capture_output=True, text=True, env=environment)
+    rejected = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        env=environment | {"FAIL_PIP_CHECK": "1"},
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert rejected.returncode != 0
+    assert (
+        json.loads(output.read_text(encoding="utf-8"))["adapter_sha256"] == QWEN3_ASR_ADAPTER_SHA256
+    )
+    commands = docker_log.read_text(encoding="utf-8")
+    assert commands.count("--network none") == 4
+    assert commands.count("--read-only") == 4
+    assert commands.count("--cap-drop ALL") == 4
+    assert commands.count("no-new-privileges") == 4
+
+
+@pytest.mark.parametrize("failure_mode", ("base-drift", "verifier"))
+def test_vllm024_wheel_candidate_never_promotes_failed_build(
+    tmp_path: Path, failure_mode: str
+) -> None:
+    script = ROOT / "dgx/asr/build-vllm024-wheel-candidate.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    inspect_count = tmp_path / "temporary-inspect-count"
+    candidate_id = "sha256:" + "2" * 64
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$*\" >> {docker_log}\n"
+        "if test \"$1 $2\" = 'image inspect'; then\n"
+        "  target=${!#}\n"
+        "  case $target in\n"
+        "    dgx-qwen3-asr:vllm023-615e858c)\n"
+        f"      printf '%s\\n' '{FLASHINFER_WHEEL_BASE_IMAGE_ID}' ;;\n"
+        "    dgx-qwen3-asr:vllm024-base-*)\n"
+        f"      count=$(cat {inspect_count} 2>/dev/null || printf 0)\n"
+        f"      printf '%s' $((count + 1)) > {inspect_count}\n"
+        '      if test "${FAKE_MODE-}" = base-drift && test "$count" -ge 1; then\n'
+        "        printf '%s\\n' 'sha256:drift'\n"
+        "      else\n"
+        f"        printf '%s\\n' '{FLASHINFER_WHEEL_BASE_IMAGE_ID}'\n"
+        "      fi ;;\n"
+        f"    *) printf '%s\\n' '{candidate_id}' ;;\n"
+        "  esac\n"
+        'elif test "$1" = build; then\n'
+        '  while test "$#" -gt 0; do\n'
+        '    if test "$1" = --iidfile; then\n'
+        f"      shift; printf '%s' '{candidate_id}' > \"$1\"; exit 0\n"
+        "    fi\n"
+        "    shift\n"
+        "  done\n"
+        "elif test \"$1 $2\" = 'image tag' || test \"$1 $2\" = 'image rm'; then\n"
+        "  exit 0\n"
+        "else exit 8; fi\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        "#!/usr/bin/env bash\n"
+        'while test "$#" -gt 0; do\n'
+        '  if test "$1" = --output; then shift; printf x > "$1"; exit 0; fi\n'
+        "  shift\n"
+        "done\n"
+        "exit 9\n",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$*" in\n'
+        '  *verify-images*) test "${FAKE_MODE-}" != verifier ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", script],
+        capture_output=True,
+        text=True,
+        env=os.environ | {"FAKE_MODE": failure_mode, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert result.returncode != 0
+    commands = docker_log.read_text(encoding="utf-8")
+    assert f"image tag {candidate_id} dgx-qwen3-asr:vllm024-pypi-test" not in commands
+
+
+def test_vllm024_wheel_candidate_recipe_is_exact_and_dependency_closed() -> None:
+    dockerfile_path = ROOT / "dgx/asr/Dockerfile.vllm024-wheel-candidate"
+    verifier_path = ROOT / "dgx/asr/verify_vllm024_wheel_candidate.py"
+    script_path = ROOT / "dgx/asr/build-vllm024-wheel-candidate.sh"
+    assert dockerfile_path.is_file() and verifier_path.is_file() and script_path.is_file()
+    dockerfile = dockerfile_path.read_text(encoding="utf-8")
+    script = script_path.read_text(encoding="utf-8")
+    assets = {
+        (
+            "vllm-0.24.0-cp38-abi3-manylinux_2_28_aarch64.whl",
+            "271361241",
+            "700db71c3cf14697d42583521f38b12fac38db1e7a8ad062e8e4d63a5dadebd5",
+        ),
+        (
+            "humming_kernels-0.1.6-py3-none-any.whl",
+            "178759",
+            "e64c0883fca930074bf920f4ba47cbf3acd244d7352f6c74c8d2182439770d8f",
+        ),
+    }
+    for filename, size, digest in assets:
+        assert filename in dockerfile and filename in script
+        assert size in script and digest in script
+    assert FLASHINFER_WHEEL_BASE_IMAGE_ID in script
+    assert "dgx-qwen3-asr:vllm024-pypi-test" in script
+    instructions = _logical_docker_instructions(dockerfile)
+    assert [line for line in instructions if re.match(r"(?:ARG|FROM)\s+", line)] == [
+        "ARG QUALIFIED_ASR_BASE=dgx-qwen3-asr:vllm023-615e858c",
+        "FROM ${QUALIFIED_ASR_BASE}",
+    ]
+    runs = [line for line in instructions if line.startswith("RUN ")]
+    assert len(runs) == 1
+    assert "--mount=type=bind" in runs[0] and "readonly" in runs[0]
+    assert "--no-cache-dir" in runs[0] and "--no-deps" in runs[0]
+    assert "--force-reinstall" in runs[0] and "PIP_NO_INDEX=1" in runs[0]
+    assert not any(line.startswith(("COPY ", "ADD ")) for line in instructions)
+    assert not _has_asr_forbidden_compiler_addition(dockerfile)
+    assert "--network=none" in script and "--pull=false" in script
+    assert script.index("verify-images") < script.index('docker image tag "$candidate_image_id"')
 
 
 def test_nuc_shared_ai_hosts_use_one_configurable_dgx_gateway() -> None:

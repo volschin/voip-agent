@@ -115,6 +115,23 @@ distribution outside the FlashInfer package family remains identical. The
 candidate is not deployed by this command and must pass its staged benchmark
 before it can be considered eligible.
 
+To build the isolated vLLM 0.24 comparison without recompiling production
+components, run:
+
+```bash
+cd dgx
+./asr/build-vllm024-wheel-candidate.sh
+```
+
+The script requires the exact qualified vLLM 0.23 production image, downloads
+the official precompiled ARM64 vLLM 0.24.0 wheel and pure-Python
+`humming-kernels` 0.1.6 wheel from their pinned PyPI URLs, and verifies release
+metadata, bytes, the inherited rootfs/configuration, `pip check`, the official
+Qwen3-ASR adapter, and the complete installed-distribution multiset. It creates
+only `dgx-qwen3-asr:vllm024-pypi-test`; it neither changes nor deploys the
+production service. Qualification remains subject to the non-speech-first
+staged benchmark.
+
 `qwen3-tts` builds locally from `./tts`. Production callers use stable
 whole-WAV `/v1/audio/speech`; `/v1/audio/speech/stream` remains available only
 for diagnostics. The image applies a version-bound patch to
