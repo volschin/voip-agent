@@ -203,3 +203,26 @@ The final report records build provenance, the complete static delta,
 non-speech result, whether the full comparison ran, complete metrics when it
 did, cleanup, production restoration, and candidate eligibility. Eligibility
 does not authorize rollout, merge, push, or PR creation.
+
+## Execution Result
+
+The candidate built successfully as
+`sha256:33196be25326c83ce9d44da854a9e25d681c37a5f676cf879973999da49d6e68`
+(ARM64/Linux, `19,773,749,096` bytes). Its exact 21-layer production prefix,
+single appended layer, image configuration, adapter, and complete installed
+distribution multiset were independently verified. The only distribution
+changes were `vllm 0.23.0 -> 0.24.0` and
+`humming-kernels 0.1.4 -> 0.1.6`; `pip check` passed.
+
+The frozen non-speech discriminator completed exactly `10/10` requests once
+and observed candidate-correlated CUDA. It produced per-case word counts
+`5,1,1,0,0,4,1,1,0,1`, totaling `14`, with zero malformed responses,
+additions, language changes, command-risk cases, or nondeterministic cases.
+This exceeds the fixed limit of `5`, so the candidate failed and the complete
+quality/load comparison was correctly skipped.
+
+All three exact benchmark-container counts finished at zero. The candidate
+image was retained for inspection. Production remained on
+`sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930`
+with its exact command/model, `running|healthy|0|unless-stopped`. No rollout,
+Portainer action, push, PR, or merge occurred.

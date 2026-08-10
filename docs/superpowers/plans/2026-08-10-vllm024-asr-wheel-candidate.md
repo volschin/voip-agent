@@ -10,6 +10,10 @@
 
 **Tech Stack:** Bash, Python 3.12, Docker BuildKit, ARM64 NVIDIA GB10, CUDA 13.0, PyTorch 2.11, vLLM 0.24.0, humming-kernels 0.1.6, UrocyonF/Qwen3-ASR-1.7B-NVFP4, pytest, Ruff.
 
+**Status:** Completed 2026-08-10 UTC. Candidate rejected by the mandatory
+non-speech gate; this checked plan is a historical record and authorizes no
+further command or rollout.
+
 ## Global Constraints
 
 - Baseline: `dgx-qwen3-asr:vllm023-615e858c` at `sha256:0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930`.
@@ -106,27 +110,27 @@ git commit -m "build(asr): add vLLM 0.24 wheel candidate"
 
 **Interfaces:** Committed recipe and live invariant in; immutable candidate and safe provenance out.
 
-- [ ] **Step 1: Capture preflight**
+- [x] **Step 1: Capture preflight**
 
 Require exact production image/command/model and
 `running|healthy|0|unless-stopped`, normalized gateway identity, and zero exact
 test containers `qwen3-asr-vllm024-test`, `asr-vllm024-gateway`, and
 `asr-vllm024-production-gateway`.
 
-- [ ] **Step 2: Transfer committed inputs only**
+- [x] **Step 2: Transfer committed inputs only**
 
 Stream `git archive HEAD dgx/asr` into a mode-0700 GX10 temporary directory and
 verify recipe hashes without exposing its path. Transfer no environment,
 models, benchmark data, or worktree state.
 
-- [ ] **Step 3: Build once and verify independently**
+- [x] **Step 3: Build once and verify independently**
 
 Run the builder once. Then independently recheck image ID, platform, size,
 rootfs prefix, configuration, exact distribution multiset/delta, adapter,
 `pip check`, imports, and versions. Any mismatch rejects the image and leaves
 production untouched.
 
-- [ ] **Step 4: Write the owner-only build report**
+- [x] **Step 4: Write the owner-only build report**
 
 Record committed input hashes, base/candidate IDs, wheel identities, equality
 proof, adapter hashes, platform/size/duration, and unchanged production only.
@@ -139,20 +143,20 @@ proof, adapter hashes, platform/size/duration, and unchanged production only.
 
 **Interfaces:** Verified image and frozen benchmark in; safe PASS/FAIL and full-test decision out.
 
-- [ ] **Step 1: Validate the protected artifact**
+- [x] **Step 1: Validate the protected artifact**
 
 Use the established owner-only validator. Require mode `0600`, exact corpus,
 ten-case/order/runner/scorer/request hashes, fixed case IDs, and `language=de`.
 Print neither path nor content.
 
-- [ ] **Step 2: Start and prove candidate plus gateway**
+- [x] **Step 2: Start and prove candidate plus gateway**
 
 Start `qwen3-asr-vllm024-test` and `asr-vllm024-gateway` with the exact runtime.
 Require loopback-only ports, restart `no`, exact image/model, readiness,
 normalized text-only response, zero restarts, PID-correlated CUDA, and nonzero
 SM activity during a real request.
 
-- [ ] **Step 3: Run the exact ten cases once and gate**
+- [x] **Step 3: Run the exact ten cases once and gate**
 
 Require `10/10`, words `<=5`, zero malformed/addition/language-change/
 command-risk/nondeterminism cases, and CUDA true. Do not inspect, retry, or
@@ -160,6 +164,9 @@ tune. Write safe identities, hashes, per-case counts, aggregate/safety/CUDA,
 and decision. On FAIL skip Task 4; on PASS continue.
 
 ### Task 4: Run the conditional complete comparison
+
+**Skipped:** The fixed non-speech discriminator produced `14` words, exceeding
+the limit of `5`. No Task 4 container or request series was started.
 
 **Files:**
 - Append outside Git: `.superpowers/sdd/2026-08-10-vllm024-asr-wheel-candidate/performance-report.md`
@@ -192,19 +199,19 @@ provenance, and decision.
 
 **Interfaces:** Benchmark evidence in; zero test containers, unchanged production, safe tracked outcome out.
 
-- [ ] **Step 1: Clean up exact containers and prove production invariant**
+- [x] **Step 1: Clean up exact containers and prove production invariant**
 
 Remove only the three exact test container names if present, require all counts
 zero, and retain the candidate image. Compare production image, command, model,
 state, health, restart count, and policy exactly with preflight.
 
-- [ ] **Step 2: Append the safe execution outcome**
+- [x] **Step 2: Append the safe execution outcome**
 
 Record candidate ID/size, wheel provenance, static delta, discriminator, whether
 the full series ran, complete safe metrics when applicable, cleanup, production
 invariant, and eligibility. Include no protected content or paths.
 
-- [ ] **Step 3: Run fresh full verification**
+- [x] **Step 3: Run fresh full verification**
 
 ```bash
 /home/volsch/projekte/voip-agent/venv/bin/pytest -q
@@ -215,7 +222,7 @@ git diff --check
 git status --short
 ```
 
-- [ ] **Step 4: Commit the safe outcome**
+- [x] **Step 4: Commit the safe outcome**
 
 ```bash
 git add docs/superpowers/specs/2026-08-10-vllm024-asr-wheel-candidate-design.md \
@@ -224,3 +231,25 @@ git commit -m "docs(asr): record vLLM 0.24 benchmark"
 ```
 
 Expected: owner-only data remains outside Git. No rollout, merge, push, or PR.
+
+## Historical Execution Result
+
+- Candidate image:
+  `sha256:33196be25326c83ce9d44da854a9e25d681c37a5f676cf879973999da49d6e68`,
+  ARM64/Linux, `19,773,749,096` bytes, exact rootfs `21 + 1`.
+- Static delta: only `vllm 0.23.0 -> 0.24.0` and
+  `humming-kernels 0.1.4 -> 0.1.6`; all 214 unrelated distribution entries,
+  image configuration, and required runtime packages matched.
+- Adapter changed exactly from the vLLM 0.23 SHA
+  `e233961d...0342d` to the official vLLM 0.24 SHA `639d3691...ceffd`.
+- Non-speech: FAIL, `10/10`, `14` words, per case
+  `5,1,1,0,0,4,1,1,0,1`; zero malformed/addition/language-change/
+  command-risk/nondeterminism cases; CUDA true, maximum correlated SM `2%`.
+- Safe result SHA-256:
+  `84465ff9f4c990145d4fb6fc19632fb9434a4726dea90480f81b4e1b30ac88a7`.
+- Complete 70/70 and 12/12 comparison: skipped by the mandatory gate.
+- Cleanup: all three exact test-container counts zero; candidate retained;
+  production exact and `running|healthy|0|unless-stopped`.
+- Fresh repository gates: `405 passed`, Ruff check/format, Compose render, and
+  `git diff --check` all passed.
+- Decision: rejected; no rollout, Portainer action, push, PR, or merge.
