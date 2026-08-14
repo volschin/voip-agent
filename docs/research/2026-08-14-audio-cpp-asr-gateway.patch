@@ -1,0 +1,19 @@
+--- a/src/asr_benchmark_gateway/client.py
++++ b/src/asr_benchmark_gateway/client.py
+@@ -36,6 +36,6 @@
+             response = await self._client.post(
+                 "/v1/audio/transcriptions",
+                 files={"file": ("audio.wav", wav, "audio/wav")},
+-                data={"language": language},
++                data={"language": language, "model": "qwen3-asr"},
+                 timeout=httpx.Timeout(timeout),
+             )
+@@ -46,7 +46,6 @@
+         if (
+             not isinstance(payload, dict)
+-            or set(payload) != {"text"}
+-            or not isinstance(payload["text"], str)
++            or not isinstance(payload.get("text"), str)
+         ):
+             raise InvalidBackendResponse
+         return payload["text"]

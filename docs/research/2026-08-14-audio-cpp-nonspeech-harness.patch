@@ -1,0 +1,43 @@
+--- a/run-nonspeech.py
++++ b/run-nonspeech.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Run the frozen Cohere ten-case discriminator without protected content."""
++"""Run the frozen audio.cpp ten-case discriminator without protected content."""
+
+ from __future__ import annotations
+
+@@ -23,11 +23,11 @@
+ VALIDATOR_SHA256 = "1f1279e8c5d836a885aa27632364ceec36615a40443ae83484fc5e1d7c6876a1"
+ REQUEST_CONTRACT_SHA256 = "d5164cfa9c2898f0adacb666a69e771f58dfb8955dfdcd01f0238f83c7c150a9"
+ CASE_IDS_SHA256 = "2eb9ea534ecee8c84bc27b6d6bd3011b88609bea52bd3e3ab189d4c3c8a50db7"
+-IMAGE_SHA256 = "0fadf01c8957a91ad83aca03395e7cd61fb66c1b20f5049e268ddd5424560930"
+-MODEL_REVISION = "b1eacc2686a3d08ceaae5f24a88b1d519620bc09"
++IMAGE_SHA256 = "6cddc4a8c306fe07e7baa6d4562d7145777e8eb2664c7c6a45091de67f9881ba"
++MODEL_REVISION = "bcd2b5b7f32b480ab5790554cfa8347f246a14f3"
+ MANIFEST_SHA256 = "44a3d411e0adcd15a740a9f59ee6aaf52d2946fc3956be08908ab9c516982663"
+-MODEL_MANIFEST_SHA256 = "fbbe6e988cd2b437e01d6596422841bb94eb2cc000e2d668ae2b42e8418dda55"
+-MAX_MODEL_LEN = 1024
++MODEL_MANIFEST_SHA256 = "9095527e702f3ebe131ece9521822d1a8b0f4ed957173b8780459ee4c46892bb"
++MAX_MODEL_LEN = 0
+
+
+ def _sha256(path: Path) -> str:
+@@ -157,7 +157,7 @@
+         records = asyncio.run(_run(runner, cases, args.corpus_root, args.gateway_origin))
+     duration_ms = (time.perf_counter() - started) * 1000
+     raw = {
+-        "schema": "asr-cohere-vllm023-1024-nonspeech-raw-v1",
++        "schema": "asr-audiocpp-04ba437-nonspeech-raw-v1",
+         "image_sha256": IMAGE_SHA256,
+         "model_revision": MODEL_REVISION,
+         "model_manifest_sha256": MODEL_MANIFEST_SHA256,
+@@ -195,7 +195,7 @@
+         if scorer.command_risk(text):
+             command_risk.append(case_id)
+     safe = {
+-        "schema": "asr-cohere-vllm023-1024-nonspeech-safe-v1",
++        "schema": "asr-audiocpp-04ba437-nonspeech-safe-v1",
+         "image_sha256": IMAGE_SHA256,
+         "model_revision_sha256": hashlib.sha256(MODEL_REVISION.encode()).hexdigest(),
+         "model_manifest_sha256": MODEL_MANIFEST_SHA256,
