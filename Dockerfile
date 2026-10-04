@@ -41,6 +41,10 @@ RUN CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC" \
 
 FROM python:3.14-slim-bookworm AS runtime
 
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/volschin/voip-agent" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}"
+
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
@@ -63,9 +67,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && rm -f /tmp/*.whl \
     && python -c "import agent.main, pjsua2; print('voip-agent runtime imports OK')"
 
+ENV HF_HOME=/opt/voip-model-cache
+
+RUN python -c "from agent.turn_detector import TurnDetector; TurnDetector(model_repo='pipecat-ai/smart-turn-v3', model_filename='smart-turn-v3.2-cpu.onnx', model_revision='f766f81d3cfdf7737ac64aad813d91bbfd56bf93', providers=['CPUExecutionProvider'])" \
+    && chmod -R a+rX /opt/voip-model-cache
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    HF_HOME=/home/voip-agent/.cache/huggingface
+    HF_HUB_OFFLINE=1
 
 USER voip-agent
 

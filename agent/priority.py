@@ -5,6 +5,7 @@ from uuid import UUID
 
 import httpx
 
+from agent.observability import AgentStatus
 from agent.private_files import validate_private_file
 
 _TOKEN_HEADER = "X-Voice-Priority-Token"
@@ -47,7 +48,9 @@ class PriorityLeaseClient:
         base_url: str,
         client: httpx.AsyncClient,
         token_file: str,
+        status: AgentStatus | None = None,
     ) -> None:
+        self._status = status
         self._base_url = base_url.rstrip("/")
         self._client = client
         self._token = _read_token(token_file)
@@ -84,6 +87,8 @@ class PriorityLeaseClient:
                 return None
             return response.json()
         except (httpx.HTTPError, ValueError, TypeError):
+            if self._status is not None:
+                self._status.priority_error()
             raise PriorityUnavailable() from None
 
 

@@ -213,3 +213,28 @@ async def test_priority_renewal_failure_terminates_native_call_once(settings):
     assert playback.buffered_bytes == 0
     call.terminate.assert_called_once_with()
     lease.release.assert_awaited_once()
+
+
+def test_cluster_sip_and_media_bind_to_lan_address(settings):
+    from types import SimpleNamespace
+
+    from agent import pjsip
+
+    settings = settings.model_copy(update={"pjsip_bind_address": "192.168.68.20"})
+    pj = SimpleNamespace(TransportConfig=SimpleNamespace)
+    transport = pjsip.sip_transport_config(settings, pj)
+    account = SimpleNamespace(mediaConfig=SimpleNamespace(transportConfig=SimpleNamespace()))
+    pjsip.configure_media_transport(settings, account)
+    assert (transport.port, transport.boundAddress, transport.publicAddress) == (
+        5062,
+        "192.168.68.20",
+        "192.168.68.20",
+    )
+    media = account.mediaConfig.transportConfig
+    assert (
+        media.boundAddress,
+        media.publicAddress,
+        media.port,
+        media.portRange,
+        media.randomizePort,
+    ) == ("192.168.68.20", "192.168.68.20", 40000, 4, False)

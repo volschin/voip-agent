@@ -13,6 +13,7 @@ from agent.answer_policy import DelayedAnswerService, caller_id_from_uri
 from agent.audio import PCM16_PLAYBACK_BLOCK_BYTES
 from agent.config import Settings
 from agent.conversation import ConversationManager
+from agent.observability import AgentStatus
 
 log = logging.getLogger(__name__)
 
@@ -183,10 +184,33 @@ class PjsipAudioSink:
             raise
 
 
+def sip_transport_config(settings: Settings, pj):
+    config = pj.TransportConfig()
+    config.port = settings.pjsip_local_port
+    config.boundAddress = str(settings.pjsip_bind_address)
+    config.publicAddress = str(settings.pjsip_bind_address)
+    return config
+
+
+def configure_media_transport(settings: Settings, account) -> None:
+    config = account.mediaConfig.transportConfig
+    config.boundAddress = str(settings.pjsip_bind_address)
+    config.publicAddress = str(settings.pjsip_bind_address)
+    config.port = settings.pjsip_media_port
+    config.portRange = settings.pjsip_media_port_range
+    config.randomizePort = False
+
+
 class PjsipClient:
     """Register with the FRITZ!Box and connect calls to ConversationManager."""
 
-    def __init__(self, settings: Settings, conversations: ConversationManager) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        conversations: ConversationManager,
+        status: AgentStatus | None = None,
+    ) -> None:
+        self._status = status
         self._s = settings
         self._conversations = conversations
         self._stop_requested = False
@@ -282,6 +306,7 @@ class PjsipClient:
                 self.audio_port: AgentAudioPort | None = None
                 self.call_media = None
                 self.media_started = False
+                self._reported_closed = False
 
             def _reply(self, status_code: int) -> None:
                 parameter = pj.CallOpParam()
@@ -316,6 +341,13 @@ class PjsipClient:
                     info.lastReason,
                 )
                 if info.state == pj.PJSIP_INV_STATE_DISCONNECTED:
+                    if client._status is not None and not self._reported_closed:
+                        self._reported_closed = True
+                        client._status.active_calls = max(0, client._status.active_calls - 1)
+                        if int(info.lastStatusCode) >= 400:
+                            client._status.failed_calls += 1
+                        else:
+                            client._status.completed_calls += 1
                     self.sink.close()
                     client._answer_policy.disconnected(
                         self.native_call_id,
@@ -365,6 +397,10 @@ class PjsipClient:
 
             def onRegState(self, parameter: object) -> None:  # noqa: N802
                 info = self.getInfo()
+                if client._status is not None:
+                    client._status.registered = bool(
+                        info.regIsActive and 200 <= int(parameter.code) < 300
+                    )
                 log.info(
                     "SIP registration active=%s status=%s %s",
                     info.regIsActive,
@@ -375,6 +411,8 @@ class PjsipClient:
             def onIncomingCall(self, parameter: object) -> None:  # noqa: N802
                 call = AgentCall(self, parameter.callId)
                 self.calls[parameter.callId] = call
+                if client._status is not None:
+                    client._status.active_calls += 1
                 try:
                     call.caller_id = caller_id_from_uri(call.getInfo().remoteUri)
                     client._answer_policy.offer(parameter.callId, call.caller_id, call)
@@ -408,8 +446,7 @@ class PjsipClient:
             endpoint_config.medConfig.audioFramePtime = 20
             endpoint.libInit(endpoint_config)
 
-            transport_config = pj.TransportConfig()
-            transport_config.port = self._s.pjsip_local_port
+            transport_config = sip_transport_config(self._s, pj)
             transport_type = {
                 "udp": pj.PJSIP_TRANSPORT_UDP,
                 "tcp": pj.PJSIP_TRANSPORT_TCP,
@@ -419,6 +456,7 @@ class PjsipClient:
             endpoint.audDevManager().setNullDev()
 
             account_config = pj.AccountConfig()
+            configure_media_transport(self._s, account_config)
             account_config.idUri = self.identity_uri
             account_config.regConfig.registrarUri = self.registrar_uri
             account_config.sipConfig.transportId = transport_id
@@ -444,10 +482,14 @@ class PjsipClient:
 
             while not self._stop_requested:
                 endpoint.libHandleEvents(0)
+                if self._status is not None:
+                    self._status.tick()
                 self._answer_policy.tick()
                 account.cleanup()
                 await asyncio.sleep(self._s.pjsip_event_poll_ms / 1000)
         finally:
+            if self._status is not None:
+                self._status.registered = False
             log.info("Shutting down PJSIP agent")
             self._answer_policy.terminate_all()
             await self._conversations.stop_all()

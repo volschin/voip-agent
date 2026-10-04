@@ -1,5 +1,8 @@
 """Configuration management for VoIP agent."""
 
+from ipaddress import IPv4Address
+from urllib.parse import urlsplit
+
 from pydantic import ConfigDict, Field, IPvAnyAddress, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
@@ -26,7 +29,12 @@ class Settings(BaseSettings):
     fritzbox_sip_username: str = ""
     fritzbox_sip_password: str = ""
     pjsip_transport: str = "udp"
-    pjsip_local_port: int = 5062
+    pjsip_bind_address: IPv4Address = IPv4Address("127.0.0.1")
+    pjsip_local_port: int = Field(default=5062, ge=1, le=65535)
+    pjsip_media_port: int = Field(default=40000, ge=1024, le=65530)
+    pjsip_media_port_range: int = Field(default=4, ge=0, le=100)
+    health_bind_address: IPv4Address = IPv4Address("127.0.0.1")
+    health_port: int = Field(default=9118, ge=1, le=65535)
     pjsip_log_level: int = 2
     pjsip_event_poll_ms: int = 10
     answer_delay_seconds: float = 20.0
@@ -54,6 +62,14 @@ class Settings(BaseSettings):
         if value not in {"udp", "tcp"}:
             raise ValueError("pjsip_transport must be 'udp' or 'tcp'")
         return value
+
+    @model_validator(mode="after")
+    def _validate_media_ports(self):
+        if self.pjsip_media_port % 2 or self.pjsip_media_port_range % 2:
+            raise ValueError("PJSIP media port and range must be even for RTP/RTCP")
+        if self.pjsip_media_port + self.pjsip_media_port_range + 1 > 65535:
+            raise ValueError("PJSIP RTP/RTCP range exceeds available ports")
+        return self
 
     # Legacy Asterisk settings retained only for the rollback adapter/tests.
     # The production entry point no longer reads or validates them.
@@ -99,6 +115,7 @@ class Settings(BaseSettings):
     tts_voice_profile: str = "shared-female-de-v1"
     llm_base_url: str = ""
     llm_model: str = "companion-gemma"
+    llm_api_key_file: str = "/run/secrets/liter_api_key"
     embedding_base_url: str = "http://dgx-spark:8003"
     ai_proxy_username: str = "voip-agent"
     ai_proxy_password_file: str = "/run/secrets/shared_ai_password"
@@ -115,8 +132,15 @@ class Settings(BaseSettings):
         # https only: the shared boundary carries BasicAuth credentials.
         if not origin.startswith("https://"):
             raise ValueError("ai_origin must start with https://")
-        host = origin[len("https://") :]
-        if not host or "/" in host:
+        parsed = urlsplit(origin)
+        if (
+            not parsed.hostname
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or parsed.username
+            or parsed.password
+        ):
             raise ValueError("ai_origin must be a scheme+host origin without a path")
         return origin
 
@@ -142,14 +166,13 @@ class Settings(BaseSettings):
         credentials = (
             self.ai_proxy_username,
             self.ai_proxy_password_file,
-            self.ai_proxy_ca_file,
             self.voice_priority_token_file,
         )
         if not any(value.strip() for value in credentials):
             return self
         if not all(value.strip() for value in credentials):
             raise ValueError(
-                "AI proxy username, password file, CA file, and priority token "
+                "AI proxy username, password file, and priority token "
                 "file must be configured together"
             )
         for name, url in (

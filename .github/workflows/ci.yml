@@ -52,6 +52,12 @@ jobs:
         run: ruff format --check agent/ tests/ dgx/tts/
 
   container-smoke:
+    needs: [test, lint]
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    permissions:
+      contents: read
+      packages: write
     name: Build and import production images
     runs-on: ubuntu-latest
 
@@ -60,7 +66,7 @@ jobs:
 
       - name: Build and import production runtime
         run: |
-          docker build --file Dockerfile --tag voip-agent-ci:production .
+          docker build --file Dockerfile --build-arg SOURCE_REVISION="$SOURCE_SHA" --tag voip-agent-ci:production .
           docker run --rm --entrypoint python voip-agent-ci:production \
             -c "import agent.main, pjsua2, webrtcvad"
 
@@ -69,3 +75,23 @@ jobs:
           docker build --file Dockerfile.pjsip-poc --tag voip-agent-ci:pjsip-poc .
           docker run --rm --entrypoint python voip-agent-ci:pjsip-poc \
             -c "import agent.pjsip_poc, pjsua2, webrtcvad"
+
+      - name: Verify packaged turn detector offline
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,size=64m \
+            --entrypoint python voip-agent-ci:production \
+            -c "from agent.turn_detector import TurnDetector; TurnDetector(model_repo='pipecat-ai/smart-turn-v3', model_filename='smart-turn-v3.2-cpu.onnx', model_revision='f766f81d3cfdf7737ac64aad813d91bbfd56bf93', providers=['CPUExecutionProvider'])"
+
+      - name: Publish verified source image
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          image="ghcr.io/${SOURCE_REPOSITORY,,}:sha-${SOURCE_SHA}"
+          docker tag voip-agent-ci:production "$image"
+          docker push "$image"
+          printf 'Published source %s: `%s`\n' "$SOURCE_SHA" "$image" >> "$GITHUB_STEP_SUMMARY"
