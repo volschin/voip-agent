@@ -1,5 +1,5 @@
-ARG CUDA_DEVEL_IMAGE=nvidia/cuda:13.3.1-devel-ubuntu26.04@sha256:da3989b0ea8e8b4b241711edd5823bc1cc83d05a01882258bddad84d7394c37e
-ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:13.3.1-base-ubuntu26.04@sha256:f65b4f0b65bbf2e0a2520cebaec3120bf4ed110aecc3e7dcab3b11cb508a0484
+ARG CUDA_DEVEL_IMAGE=nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:cfd231229dc272f5b77fa8d8ae8a0ffe076fae7ae58a58d8e2863cba9e41da81
+ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:13.4.2-base-ubuntu26.04@sha256:6f91fe96c40ef0e41b95c52860ed232602570c28c699b6d7de5b643290efb729
 
 FROM ${CUDA_DEVEL_IMAGE} AS builder
 
