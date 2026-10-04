@@ -42,3 +42,22 @@ async def test_http_routes_reflect_real_status_and_metrics():
             assert (await client.get(origin + "/unknown")).status_code == 404
             status.last_heartbeat -= 31
             assert (await client.get(origin + "/livez")).status_code == 503
+
+
+async def test_stream_close_closes_inner_stream_before_returning():
+    closed = False
+
+    async def source():
+        nonlocal closed
+        try:
+            yield "token"
+            yield "next"
+        finally:
+            closed = True
+
+    status = observability.AgentStatus()
+    stream = status.wrap_stream("llm", source)()
+    assert await anext(stream) == "token"
+    await stream.aclose()
+    assert closed
+    assert status.stages["llm"][0] == 1

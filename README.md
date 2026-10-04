@@ -245,7 +245,9 @@ Macvlan LAN IP for FRITZ!Box SIP/RTP and Cilium for its primary Pod network.
 
 The authenticated GX10 origin remains `https://mate.olcon.de`. ASR/TTS and
 Voice-Priority use the existing BasicAuth client; LLM requests use the separate
-`LLM_API_KEY_FILE` Liter VoIP Bearer key. Each client rejects other origins and
+`LLM_API_KEY_FILE` Liter VoIP Bearer key. For a new Compose build, place that
+existing key in the owner-only host file `secrets/liter_api_key` and set
+`PJSIP_BIND_ADDRESS` to the Docker host LAN IP in `.env`. Each client rejects other origins and
 other route classes, and neither follows redirects. System certificate roots
 remain enabled; `AI_PROXY_CA_FILE` is optional additional trust, never a
 replacement for system trust. Voice-Priority additionally sends its existing

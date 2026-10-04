@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 
 _STAGES = ("stt", "llm", "tts")
@@ -66,8 +66,8 @@ class AgentStatus:
 
     def wrap_stream(self, stage, call):
         async def measured(*args, **kwargs):
-            async with self.measure(stage):
-                async for item in call(*args, **kwargs):
+            async with self.measure(stage), aclosing(call(*args, **kwargs)) as stream:
+                async for item in stream:
                     yield item
 
         return measured

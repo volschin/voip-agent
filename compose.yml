@@ -11,6 +11,7 @@ services:
       - .env
     environment:
       PJSIP_LOG_LEVEL: ${PJSIP_LOG_LEVEL:-2}
+      PJSIP_BIND_ADDRESS: ${PJSIP_BIND_ADDRESS:?Set the Docker host LAN IP in .env}
     extra_hosts:
       - "dgx-spark:${DGX_HOST_IP:-192.168.68.41}"
       - "${AI_ORIGIN_HOST:-mate.olcon.de}:${DGX_HOST_IP:-192.168.68.41}"
@@ -25,6 +26,7 @@ services:
       - /home/volsch/voip-agent/secrets/shared_ai_password:/run/secrets/shared_ai_password:ro
       - /home/volsch/voip-agent/secrets/mate_ca.crt:/run/secrets/mate_ca.crt:ro
       - /home/volsch/voip-agent/secrets/voice_priority_token:/run/secrets/voice_priority_token:ro
+      - /home/volsch/voip-agent/secrets/liter_api_key:/run/secrets/liter_api_key:ro
     cap_drop:
       - ALL
     security_opt:
