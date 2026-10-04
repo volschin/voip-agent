@@ -62,3 +62,17 @@ def test_projection_rejects_writable_mount(tmp_path):
     tmp_path.chmod(0o777)
     with pytest.raises(ValueError, match="unsafe"):
         validate_private_file(str(key), label="key", forbid_group_other_read=True)
+
+
+def test_projection_rejects_generation_symlink(tmp_path):
+    root = tmp_path / "mount"
+    root.mkdir(mode=0o755)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    (outside / "key").write_text("secret")
+    (outside / "key").chmod(0o440)
+    (root / "..generation").symlink_to(outside)
+    (root / "..data").symlink_to("..generation")
+    (root / "key").symlink_to("..data/key")
+    with pytest.raises(ValueError, match="unsafe"):
+        validate_private_file(str(root / "key"), label="key", forbid_group_other_read=True)

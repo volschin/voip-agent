@@ -32,6 +32,7 @@ def validate_private_file(
                 or "/" in generation
                 or generation in {"..", "..data"}
                 or root.is_symlink()
+                or (root / generation).is_symlink()
             ):
                 raise ValueError(f"{label} file is unsafe")
             resolved = candidate.resolve(strict=True)
