@@ -265,3 +265,21 @@ def test_shared_ai_credentials_reject_direct_or_different_origins(
 
     with pytest.raises(ValueError, match="mate.olcon.de"):
         Settings(**_valid_kwargs(**values))
+
+
+def test_cluster_binding_is_configurable():
+    s = Settings(**_valid_kwargs(pjsip_bind_address="192.168.68.20", ai_proxy_ca_file=""))
+    assert str(s.pjsip_bind_address) == "192.168.68.20"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"pjsip_media_port": 40001},
+        {"pjsip_media_port_range": 3},
+        {"pjsip_media_port": 65530, "pjsip_media_port_range": 6},
+    ],
+)
+def test_invalid_media_ports_rejected(overrides):
+    with pytest.raises(ValueError, match="PJSIP"):
+        Settings(**_valid_kwargs(**overrides))

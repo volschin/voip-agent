@@ -233,3 +233,47 @@ non-streaming TTS, and 609 ms to the first diagnostic codec-stream chunk for
 short German probes. Longer real inference correlated with 94% ASR and 96% TTS GPU
 utilization on the NVIDIA GB10. These are acceptance probes, not long-running
 percentile benchmarks; there is no cloud, direct-port, or CPU fallback.
+
+
+## Kubernetes deployment contract
+
+The HomeOps integration runs one replica in namespace `ai`, using a Multus
+Macvlan LAN IP for FRITZ!Box SIP/RTP and Cilium for its primary Pod network.
+`PJSIP_BIND_ADDRESS` binds and advertises SIP and media;
+`PJSIP_MEDIA_PORT=40000` with `PJSIP_MEDIA_PORT_RANGE=4` provides RTP
+40000/40002/40004 and RTCP 40001/40003/40005. No STUN or host networking is needed.
+
+The authenticated GX10 origin remains `https://mate.olcon.de`. ASR/TTS and
+Voice-Priority use the existing BasicAuth client; LLM requests use the separate
+`LLM_API_KEY_FILE` Liter VoIP Bearer key. For a new Compose build, place that
+existing key in the owner-only host file `secrets/liter_api_key` and set
+`PJSIP_BIND_ADDRESS` to the Docker host LAN IP in `.env`. Each client rejects other origins and
+other route classes, and neither follows redirects. System certificate roots
+remain enabled; `AI_PROXY_CA_FILE` is optional additional trust, never a
+replacement for system trust. Voice-Priority additionally sends its existing
+`X-Voice-Priority-Token`. No master keys or direct inference ports are used.
+
+Credentials accept protected regular files or native kubelet Secret projections.
+Projected files must remain within their generation, have root/current-user
+ownership and no other-user access, and allow group-read only for the process
+group; mounts/generation directories cannot be group/world writable. Kubernetes
+uses UID/GID/fsGroup 10001 with read-only mode 0440. Owner-only local files stay
+strict; ordinary symlinks and escaping projections remain rejected.
+
+The production image preloads the revision-pinned CPU Smart Turn model into
+`/opt/voip-model-cache`, sets `HF_HUB_OFFLINE=1`, and starts without model downloads
+or a writable model PVC. Missing model initialization fails startup. With no
+`TRUSTED_CALLERS`, neither PostgreSQL nor Microsoft Graph is initialized.
+
+Native read-only `/livez`, `/readyz`, `/metrics` listen on
+`HEALTH_BIND_ADDRESS:HEALTH_PORT` (defaults `127.0.0.1:9118`). Kubernetes explicitly
+binds only the primary Pod IP. Readiness requires initialization, detector and
+SIP registration; liveness requires the PJSIP event-loop heartbeat. GX10 or
+registrar outages must not trigger liveness restart loops. Metrics contain only
+fixed stage names, counters and durations, without call contents or identifiers.
+
+CI publishes the smoke-tested AMD64 image as
+`ghcr.io/volschin/voip-agent:sha-<source revision>`; HomeOps pins its registry
+digest. Stop the Docker source before starting the Kubernetes instance. Rollback
+requires stopping the cluster instance via Git and proving its absence before
+starting the prepared compatible image on the NUC. GX10 stacks stay unchanged.

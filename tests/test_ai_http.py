@@ -8,6 +8,7 @@ import httpx
 import pytest
 import respx
 
+from agent import ai_http
 from agent.ai_http import build_ai_client
 from agent.config import Settings
 from agent.llm import LlmClient
@@ -28,12 +29,16 @@ def _settings(tmp_path: Path, **overrides: str) -> Settings:
     password.chmod(0o600)
     ca.chmod(0o644)
     token.chmod(0o600)
+    key = tmp_path / "liter-key"
+    key.write_text("liter-secret\n")
+    key.chmod(0o600)
     values = {
         "fritzbox_sip_username": "agent-phone",
         "fritzbox_sip_password": "strong-secret",
         "stt_base_url": "https://mate.olcon.de",
         "tts_base_url": "https://mate.olcon.de",
         "llm_base_url": "https://mate.olcon.de",
+        "llm_api_key_file": str(key),
         "ai_proxy_username": "voip-agent",
         "ai_proxy_password_file": str(password),
         "ai_proxy_ca_file": str(ca),
@@ -46,8 +51,8 @@ def _settings(tmp_path: Path, **overrides: str) -> Settings:
 
 @pytest.fixture
 def ssl_context(monkeypatch: pytest.MonkeyPatch) -> ssl.SSLContext:
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    monkeypatch.setattr(ssl, "create_default_context", lambda *, cafile: context)
+    context = MagicMock(spec=ssl.SSLContext)
+    monkeypatch.setattr(ssl, "create_default_context", lambda **kwargs: context)
     return context
 
 
@@ -191,6 +196,7 @@ async def test_ai_client_authenticates_stt_tts_and_llm_only(
     ssl_context: ssl.SSLContext,
 ) -> None:
     ai_client = build_ai_client(_settings(tmp_path))
+    llm_client = ai_http.build_llm_client(_settings(tmp_path))
     local_client = httpx.AsyncClient()
     stt_route = respx.post("https://mate.olcon.de/v1/audio/transcriptions").mock(
         return_value=httpx.Response(200, json={"text": "Hallo"})
@@ -231,7 +237,7 @@ async def test_ai_client_authenticates_stt_tts_and_llm_only(
         system_prompt="Deutsch",
         rag=rag.lookup,
         calendar=AsyncMock(),
-        client=ai_client,
+        client=llm_client,
     )
 
     assert await SttClient("https://mate.olcon.de", ai_client).transcribe(b"\x00\x00") == "Hallo"
@@ -239,8 +245,49 @@ async def test_ai_client_authenticates_stt_tts_and_llm_only(
     assert await llm.complete([{"role": "user", "content": "Hallo"}]) == "Hallo"
     assert await rag.lookup("Wissen") == "Keine relevanten Informationen gefunden."
 
-    for route in (stt_route, tts_route, llm_route):
+    for route in (stt_route, tts_route):
         assert route.calls[0].request.headers["authorization"] == (EXPECTED_AUTHORIZATION)
     assert "authorization" not in embedding_route.calls[0].request.headers
+    assert llm_route.calls[0].request.headers["Authorization"] == "Bearer liter-secret"
+    await llm_client.aclose()
     await ai_client.aclose()
     await local_client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_clients_reject_other_routes_and_origins(tmp_path, ssl_context):
+    basic = build_ai_client(_settings(tmp_path))
+    bearer = ai_http.build_llm_client(_settings(tmp_path))
+    for client, url, method in [
+        (basic, "https://mate.olcon.de/v1/chat/completions", "POST"),
+        (bearer, "https://mate.olcon.de/v1/audio/speech", "POST"),
+        (basic, "https://other.test/v1/audio/speech", "POST"),
+        (bearer, "https://other.test/v1/models", "GET"),
+    ]:
+        with pytest.raises(ValueError, match="route|origin"):
+            await client.request(method, url)
+    await basic.aclose()
+    await bearer.aclose()
+
+
+def test_tls_loads_system_roots_before_optional_private_ca(tmp_path, monkeypatch):
+    context = MagicMock(spec=ssl.SSLContext)
+    factory = MagicMock(return_value=context)
+    monkeypatch.setattr(ssl, "create_default_context", factory)
+    settings = _settings(tmp_path)
+    build_ai_client(settings)
+    assert factory.call_args.kwargs == {}
+    assert context.load_verify_locations.call_args.kwargs == {"cafile": settings.ai_proxy_ca_file}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_bearer_client_does_not_follow_redirect(tmp_path, ssl_context):
+    route = respx.get("https://mate.olcon.de/v1/models").mock(
+        return_value=httpx.Response(302, headers={"location": "https://other.test/v1/models"})
+    )
+    async with ai_http.build_llm_client(_settings(tmp_path)) as client:
+        response = await client.get("https://mate.olcon.de/v1/models")
+    assert response.status_code == 302
+    assert len(route.calls) == 1

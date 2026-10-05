@@ -6,10 +6,11 @@ import asyncpg
 import httpx
 import msal
 
-from agent.ai_http import build_ai_client
+from agent.ai_http import build_ai_client, build_llm_client
 from agent.config import Settings
 from agent.conversation import ConversationManager
 from agent.llm import LlmClient
+from agent.observability import AgentStatus, StatusServer
 from agent.pipeline import VoicePipeline
 from agent.pjsip import PjsipClient
 from agent.priority import PriorityLeaseClient
@@ -31,13 +32,13 @@ async def _rag_unavailable(_query: str) -> str:
     return "Die Wissensdatenbank ist derzeit nicht verfügbar."
 
 
-async def main() -> None:
-    s = Settings()
-
+async def create_rag_pool(settings: Settings):
+    if not settings.trusted_caller_set:
+        return None
     pg_pool = None
     try:
         pg_pool = await asyncio.wait_for(
-            asyncpg.create_pool(s.db_dsn, min_size=2, max_size=5),
+            asyncpg.create_pool(settings.db_dsn, min_size=2, max_size=5),
             timeout=5,
         )
     except Exception:
@@ -46,27 +47,44 @@ async def main() -> None:
         # result while the voice path remains operational.
         log.warning("pgvector unavailable; RAG disabled")
 
+    return pg_pool
+
+
+def create_calendar(settings: Settings):
+    if not settings.trusted_caller_set:
+        return UnavailableCalendar()
     if all(
         (
-            s.azure_tenant_id,
-            s.azure_client_id,
-            s.azure_client_secret,
-            s.calendar_user_email,
+            settings.azure_tenant_id,
+            settings.azure_client_id,
+            settings.azure_client_secret,
+            settings.calendar_user_email,
         )
     ):
         msal_app = msal.ConfidentialClientApplication(
-            client_id=s.azure_client_id,
-            authority=f"https://login.microsoftonline.com/{s.azure_tenant_id}",
-            client_credential=s.azure_client_secret,
+            client_id=settings.azure_client_id,
+            authority=f"https://login.microsoftonline.com/{settings.azure_tenant_id}",
+            client_credential=settings.azure_client_secret,
         )
-        calendar = MSGraphCalendar(msal_app=msal_app, user_email=s.calendar_user_email)
+        calendar = MSGraphCalendar(msal_app=msal_app, user_email=settings.calendar_user_email)
     else:
         log.info("Microsoft Graph is not configured; calendar tools disabled")
         calendar = UnavailableCalendar()
 
+    return calendar
+
+
+async def main() -> None:
+    s = Settings()
+
+    pg_pool = await create_rag_pool(s)
+    calendar = create_calendar(s)
+
     # Authentication belongs only on the exact Traefik AI routes. Embeddings
     # remain on their independent local endpoint and must never receive it.
+    status = AgentStatus()
     ai_client = build_ai_client(s)
+    llm_client = build_llm_client(s)
     local_client = httpx.AsyncClient()
     stt = SttClient(base_url=s.stt_base_url, client=ai_client)
     tts = TtsClient(
@@ -78,6 +96,7 @@ async def main() -> None:
         base_url=s.voice_priority_base_url,
         client=ai_client,
         token_file=s.voice_priority_token_file,
+        status=status,
     )
     # Build the detector (downloads the model) only when the feature is on;
     # otherwise pass None and ConversationManager runs the legacy silence path.
@@ -91,8 +110,13 @@ async def main() -> None:
                 providers=s.turn_onnx_provider_list,
                 threshold=s.turn_complete_threshold,
             )
-        except Exception as exc:
-            log.warning("Smart Turn unavailable; using fixed-silence VAD: %s", exc)
+        except Exception:
+            await ai_client.aclose()
+            await llm_client.aclose()
+            await local_client.aclose()
+            if pg_pool is not None:
+                await pg_pool.close()
+            raise RuntimeError("Smart Turn initialization failed") from None
     rag_lookup = (
         RagTool(pool=pg_pool, embedding_base_url=s.embedding_base_url, client=local_client).lookup
         if pg_pool is not None
@@ -107,13 +131,13 @@ async def main() -> None:
         calendar_write_enabled=s.calendar_write_enabled,
         max_tool_rounds=s.max_tool_rounds,
         trusted_callers=s.trusted_caller_set,
-        client=ai_client,
+        client=llm_client,
     )
     pipeline = VoicePipeline(
-        stt=stt.transcribe,
-        llm=llm.complete,
-        tts=tts.synthesize,
-        llm_stream=llm.complete_stream,
+        stt=status.wrap("stt", stt.transcribe),
+        llm=status.wrap("llm", llm.complete),
+        tts=status.wrap("tts", tts.synthesize),
+        llm_stream=status.wrap_stream("llm", llm.complete_stream),
         tts_stream=tts.synthesize_stream,
     )
     conversations = ConversationManager(
@@ -122,18 +146,21 @@ async def main() -> None:
         priority_client=priority,
         turn_detector=turn_detector,
     )
-    pjsip = PjsipClient(settings=s, conversations=conversations)
+    pjsip = PjsipClient(settings=s, conversations=conversations, status=status)
     loop = asyncio.get_running_loop()
     for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(shutdown_signal, pjsip.request_stop)
 
     try:
-        await pjsip.run()
+        status.initialize(detector_loaded=turn_detector is not None)
+        async with StatusServer(status, str(s.health_bind_address), s.health_port):
+            await pjsip.run()
     finally:
         pjsip.request_stop()
         for shutdown_signal in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(shutdown_signal)
         await ai_client.aclose()
+        await llm_client.aclose()
         await local_client.aclose()
         if pg_pool is not None:
             await pg_pool.close()
