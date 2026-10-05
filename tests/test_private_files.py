@@ -76,3 +76,24 @@ def test_projection_rejects_generation_symlink(tmp_path):
     (root / "key").symlink_to("..data/key")
     with pytest.raises(ValueError, match="unsafe"):
         validate_private_file(str(root / "key"), label="key", forbid_group_other_read=True)
+
+
+def test_native_readonly_projection_accepts_kubelet_writable_root(tmp_path, monkeypatch):
+    import os
+    from types import SimpleNamespace
+
+    key = projection(tmp_path)
+    tmp_path.chmod(0o1777)
+    monkeypatch.setattr(os, "statvfs", lambda path: SimpleNamespace(f_flag=os.ST_RDONLY))
+    assert validate_private_file(str(key), label="key", forbid_group_other_read=True).is_file()
+
+
+def test_readonly_projection_still_rejects_writable_generation(tmp_path, monkeypatch):
+    import os
+    from types import SimpleNamespace
+
+    key = projection(tmp_path)
+    (tmp_path / "..2026_10_04").chmod(0o777)
+    monkeypatch.setattr(os, "statvfs", lambda path: SimpleNamespace(f_flag=os.ST_RDONLY))
+    with pytest.raises(ValueError, match="unsafe"):
+        validate_private_file(str(key), label="key", forbid_group_other_read=True)
