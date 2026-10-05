@@ -88,6 +88,23 @@ jobs:
             --entrypoint python voip-agent-ci:production \
             -c "from agent.turn_detector import TurnDetector; TurnDetector(model_repo='pipecat-ai/smart-turn-v3', model_filename='smart-turn-v3.2-cpu.onnx', model_revision='f766f81d3cfdf7737ac64aad813d91bbfd56bf93', providers=['CPUExecutionProvider'])"
 
+      - name: Verify native read-only Secret projection
+        run: |
+          projection=$(mktemp -d)
+          trap 'sudo rm -rf "$projection"' EXIT
+          sudo chown 0:10001 "$projection"
+          sudo chmod 1777 "$projection"
+          sudo mkdir -m 0755 "$projection/..generation"
+          printf 'synthetic-smoke-credential' | sudo tee "$projection/..generation/key" >/dev/null
+          sudo chown 0:10001 "$projection/..generation/key"
+          sudo chmod 0440 "$projection/..generation/key"
+          ln -s ..generation "$projection/..data"
+          ln -s ..data/key "$projection/key"
+          docker run --rm --network none --read-only \
+            --mount "type=bind,src=$projection,dst=/run/secrets,readonly" \
+            --entrypoint python voip-agent-ci:production \
+            -c "from agent.private_files import validate_private_file; validate_private_file('/run/secrets/key', label='smoke', forbid_group_other_read=True)"
+
       - name: Publish verified source image
         if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         env:

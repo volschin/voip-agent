@@ -38,9 +38,12 @@ def validate_private_file(
             resolved = candidate.resolve(strict=True)
             if resolved.parent != (root / generation).resolve(strict=True):
                 raise ValueError(f"{label} file is unsafe")
+            readonly_mount = bool(os.statvfs(root).f_flag & os.ST_RDONLY)
             for directory in (root, resolved.parent):
                 info = directory.stat()
-                if info.st_mode & 0o022 or info.st_uid not in {0, os.geteuid()}:
+                writable_mode = bool(info.st_mode & 0o022)
+                protected_root = directory == root and readonly_mount
+                if (writable_mode and not protected_root) or info.st_uid not in {0, os.geteuid()}:
                     raise ValueError(f"{label} file is unsafe")
             candidate = resolved
             metadata = candidate.lstat()
