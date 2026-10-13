@@ -1,4 +1,4 @@
-FROM python:3.14-slim-bookworm AS pjsip-builder
+FROM python:3.15-slim-bookworm AS pjsip-builder
 
 ARG PJSIP_COMMIT=5a457451fa2712ba18e12b01738e8ff3af2b26fd
 
@@ -39,7 +39,7 @@ RUN CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC" \
     && make --directory=pjsip-apps/src/swig/python wheel
 
 
-FROM python:3.14-slim-bookworm AS runtime
+FROM python:3.15-slim-bookworm AS runtime
 
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.source="https://github.com/volschin/voip-agent" \
